@@ -303,6 +303,38 @@ void test_sif0_dma_reply() {
         "SIF0 completion raises the shared IOP DMA interrupt");
 }
 
+void test_iop_timer5_deadlines() {
+  ps2vita::Memory memory;
+  memory.iop_write32(0x1F8014A8u, 5u);
+  memory.iop_write32(0x1F8014A4u, 0x70u);
+  memory.iop_write32(0x1F801074u, 1u << 16);
+  memory.iop_write32(0x1F801078u, 1u);
+  memory.advance(39u);
+  check(memory.iop_read32(0x1F8014A0u) == 4u &&
+        (memory.iop_read32(0x1F8014A4u) & 0x1800u) == 0u &&
+        !memory.iop_interrupt_pending(),
+        "IOP Timer 5 remains quiet before its EE-cycle deadline");
+  memory.advance(1u);
+  const auto target_mode = memory.iop_read32(0x1F8014A4u);
+  check(memory.iop_read32(0x1F8014A0u) == 5u &&
+        (target_mode & 0x800u) != 0u &&
+        memory.iop_interrupt_pending(),
+        "IOP Timer 5 target sets its flag and INTC bit 16 at the deadline");
+  const auto acknowledged_mode = memory.iop_read32(0x1F8014A4u);
+  check((acknowledged_mode & 0x1800u) == 0u &&
+        (acknowledged_mode & 0x400u) != 0u,
+        "IOP Timer 5 mode read clears event flags and rearms interrupts");
+
+  memory.iop_write32(0x1F801070u, ~std::uint32_t{1u << 16});
+  memory.iop_write32(0x1F8014A4u, 0x60u);
+  memory.iop_write32(0x1F8014A0u, 0xFFFFFFFEu);
+  memory.advance(16u);
+  check(memory.iop_read32(0x1F8014A0u) == 0u &&
+        (memory.iop_read32(0x1F8014A4u) & 0x1000u) != 0u &&
+        memory.iop_interrupt_pending(),
+        "IOP Timer 5 overflow wraps and raises the same interrupt line");
+}
+
 void test_exception_entry_and_eret() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -1170,6 +1202,7 @@ int main() {
   test_iop_memory_and_cpu();
   test_sif1_dma_and_external_interrupts();
   test_sif0_dma_reply();
+  test_iop_timer5_deadlines();
   test_exception_entry_and_eret();
   test_cop0_count_advances();
   test_di_ei_status();

@@ -95,7 +95,7 @@ private:
   std::vector<std::uint8_t> vu_mem_;
   std::vector<std::uint8_t> iop_ram_;
   std::array<std::uint8_t, 4096> iop_scratch_{};
-  std::vector<std::uint8_t> iop_hw_;
+  mutable std::vector<std::uint8_t> iop_hw_;
   std::vector<std::uint8_t> ee_internal_;
   mutable std::vector<std::uint8_t> dve_;
   std::array<std::uint16_t, 256> dve_device_regs_{};
@@ -109,6 +109,9 @@ private:
   mutable std::uint32_t timer0_count_ = 0;
   mutable unsigned timer0_reads_ = 0;
   mutable unsigned rdram_sdevid_ = 0;
+  std::uint32_t iop_cycle_remainder_ = 0;
+  std::uint32_t timer5_prescale_remainder_ = 0;
+  bool timer5_target_future_ = false;
   std::uint32_t sif0_cycles_remaining_ = 0;
   std::uint32_t sif1_cycles_remaining_ = 0;
   std::uint32_t iop_cache_control_ = 0;

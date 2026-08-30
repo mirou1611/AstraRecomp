@@ -53,6 +53,10 @@ INTC state. The transfer is never made visible synchronously with an MMIO write.
 The reverse SIF0 path follows the same rule: it consumes the observed IOP end tag
 and EE CNT/IRQ destination tag at a cycle deadline, including short-packet zero
 padding, before raising EE DMAC channel 5 and the shared IOP DMA interrupt.
+IOP Timer 5 shares this deterministic master timeline. A persistent 8:1 phase
+converts EE cycles to IOP cycles, then the selected 1/8/16/256 prescaler drives
+32-bit target and overflow events. Mode reads acknowledge event flags and rearm
+the timer's internal interrupt latch; eligible events raise IOP INTC bit 16.
 
 This keeps four concerns separate:
 

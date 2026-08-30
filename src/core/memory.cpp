@@ -100,6 +100,9 @@ void Memory::clear() {
   timer0_count_ = 0;
   timer0_reads_ = 0;
   rdram_sdevid_ = 0;
+  iop_cycle_remainder_ = 0;
+  timer5_prescale_remainder_ = 0;
+  timer5_target_future_ = false;
   sif0_cycles_remaining_ = 0;
   sif1_cycles_remaining_ = 0;
   iop_cache_control_ = 0;
@@ -431,6 +434,55 @@ void Memory::advance(std::uint32_t cycles) {
     iop_hw_[offset + 3] = static_cast<std::uint8_t>(value >> 24);
   };
 
+  // IOP Timer 5 is driven from the same EE master-cycle timeline as DMA.
+  // The scheduler executes one IOP cycle per eight EE cycles and preserves
+  // the fractional phase across frontend slices.
+  const auto total_iop_phase =
+      static_cast<std::uint64_t>(iop_cycle_remainder_) + cycles;
+  const auto iop_cycles = static_cast<std::uint32_t>(total_iop_phase / 8u);
+  iop_cycle_remainder_ = static_cast<std::uint32_t>(total_iop_phase % 8u);
+  if (iop_cycles != 0u) {
+    auto mode = raw_iop(0x04A4u);
+    if ((mode & 1u) == 0u) { // No gate: count from the selected clock source.
+      static constexpr std::uint32_t rates[4] = {1u, 8u, 16u, 256u};
+      const auto rate = rates[(mode >> 13) & 3u];
+      const auto prescaled =
+          static_cast<std::uint64_t>(timer5_prescale_remainder_) + iop_cycles;
+      const auto ticks = prescaled / rate;
+      timer5_prescale_remainder_ = static_cast<std::uint32_t>(prescaled % rate);
+      if (ticks != 0u) {
+        const auto old_count = raw_iop(0x04A0u);
+        const auto target = raw_iop(0x04A8u);
+        const auto expanded = static_cast<std::uint64_t>(old_count) + ticks;
+        const bool target_reached = !timer5_target_future_ &&
+            old_count < target && expanded >= target;
+        const bool overflowed = expanded > UINT32_MAX;
+        auto new_count = static_cast<std::uint32_t>(expanded);
+        if (target_reached) {
+          mode |= 0x800u;
+          if ((mode & 0x10u) != 0u && (mode & 0x400u) != 0u)
+            store_iop(0x0070u, raw_iop(0x0070u) | (1u << 16));
+          if ((mode & 0x40u) == 0u)
+            mode &= ~0x400u;
+          if ((mode & 0x08u) != 0u && target != 0u)
+            new_count = static_cast<std::uint32_t>(expanded % target);
+          else
+            timer5_target_future_ = true;
+        }
+        if (overflowed) {
+          mode |= 0x1000u;
+          if ((mode & 0x20u) != 0u && (mode & 0x400u) != 0u)
+            store_iop(0x0070u, raw_iop(0x0070u) | (1u << 16));
+          if ((mode & 0x40u) == 0u)
+            mode &= ~0x400u;
+          timer5_target_future_ = false;
+        }
+        store_iop(0x04A0u, new_count);
+        store_iop(0x04A4u, mode);
+      }
+    }
+  }
+
   if (sif0_cycles_remaining_ != 0u) {
     if (cycles < sif0_cycles_remaining_) {
       sif0_cycles_remaining_ -= cycles;
@@ -644,11 +696,33 @@ std::uint8_t Memory::iop_read8(std::uint32_t address) const {
 }
 
 std::uint16_t Memory::iop_read16(std::uint32_t address) const {
+  const auto p = address & 0x1FFFFFFFu;
+  if (p == 0x1F8014A4u) {
+    const auto offset = static_cast<std::size_t>(p - 0x1F801000u);
+    const auto value = static_cast<std::uint16_t>(iop_hw_[offset]) |
+        (static_cast<std::uint16_t>(iop_hw_[offset + 1u]) << 8);
+    // Reading mode acknowledges the target/overflow flags and arms the next
+    // interrupt. Bit 10 is the timer's internal interrupt-enable latch.
+    iop_hw_[offset + 1u] =
+        static_cast<std::uint8_t>((iop_hw_[offset + 1u] & 0xE7u) | 0x04u);
+    return value;
+  }
   return static_cast<std::uint16_t>(iop_read8(address)) |
       (static_cast<std::uint16_t>(iop_read8(address + 1u)) << 8);
 }
 
 std::uint32_t Memory::iop_read32(std::uint32_t address) const {
+  const auto p = address & 0x1FFFFFFFu;
+  if (p == 0x1F8014A4u) {
+    const auto offset = static_cast<std::size_t>(p - 0x1F801000u);
+    const auto value = static_cast<std::uint32_t>(iop_hw_[offset]) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 1u]) << 8) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 2u]) << 16) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 3u]) << 24);
+    iop_hw_[offset + 1u] =
+        static_cast<std::uint8_t>((iop_hw_[offset + 1u] & 0xE7u) | 0x04u);
+    return value;
+  }
   return static_cast<std::uint32_t>(iop_read16(address)) |
       (static_cast<std::uint32_t>(iop_read16(address + 2u)) << 16);
 }
@@ -713,6 +787,24 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
     value = flags | (value & 0x00FFFFFFu);
   } else if (p == 0x1F801450u && (value & 2u) != 0u) {
     hw_[0xF000u] |= 2u;
+  } else if (p == 0x1F8014A4u) {
+    const auto offset = static_cast<std::size_t>(p - 0x1F801000u);
+    const auto current = static_cast<std::uint32_t>(iop_hw_[offset]) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 1u]) << 8) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 2u]) << 16) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 3u]) << 24);
+    auto flags = current & 0x1C00u;
+    if ((flags & 0x1800u) == 0u)
+      flags = 0x400u;
+    value = (value & 0x63FFu) | flags;
+    iop_hw_[0x04A0u] = iop_hw_[0x04A1u] = 0u;
+    iop_hw_[0x04A2u] = iop_hw_[0x04A3u] = 0u;
+    timer5_prescale_remainder_ = 0u;
+    timer5_target_future_ = false;
+  } else if (p == 0x1F8014A0u) {
+    timer5_target_future_ = value > iop_read32(0x1F8014A8u);
+  } else if (p == 0x1F8014A8u) {
+    timer5_target_future_ = value <= iop_read32(0x1F8014A0u);
   }
   iop_write16(address, static_cast<std::uint16_t>(value));
   iop_write16(address + 2u, static_cast<std::uint16_t>(value >> 16));

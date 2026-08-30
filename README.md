@@ -48,7 +48,7 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 
 | Area | Current state |
 | --- | --- |
-| BIOS bootstrap | Executes through initialization, both SIF directions, and into the EE DMAC interrupt handler |
+| BIOS bootstrap | Executes through initialization, both SIF directions, EE DMAC handling, and the first IOP Timer 5 interrupt |
 | PC recompiler | Phase-0 analysis and a tested R5900-to-C++ subset with interpreter/native differential checks |
 | Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
 | Guest graphics | Reference rasterizer exists; guest GIF packets are not connected yet |
@@ -102,6 +102,8 @@ PS2 ELF / user BIOS
   completion flags and EE/IOP external-interrupt entry
 - Cycle-scheduled SIF0 IOP-to-EE reply DMA with tagged destination delivery,
   quadword padding, completion state, and interrupt wakeup
+- Master-cycle-driven 32-bit IOP Timer 5 with clock prescaling, target and
+  overflow deadlines, mode acknowledgement, and INTC bit 16 delivery
 - Absent development-board debug aperture with retail-style null-device behavior
 - Portable EE interpreter foundation with 128-bit GPR storage
 - Fixed-size decoded EE block cache with delay-slot boundaries, hotness tracking,

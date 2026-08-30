@@ -221,7 +221,9 @@ int main(int argc, char** argv) {
         }
         if ((address >= 0x1F801070u && address < 0x1F801080u) ||
             (address >= 0x1F8010F0u && address < 0x1F801100u) ||
+            (address >= 0x1F801100u && address < 0x1F801130u) ||
             (address >= 0x1F801450u && address < 0x1F801458u) ||
+            (address >= 0x1F801480u && address < 0x1F8014B0u) ||
             (address >= 0x1F801520u && address < 0x1F801570u) ||
             (address >= 0x1F801570u && address < 0x1F801578u) ||
             (address >= 0x1F80157Cu && address < 0x1F801580u)) {
@@ -342,6 +344,17 @@ int main(int argc, char** argv) {
       emulator.memory().iop_read32(0x1F801104u),
       emulator.memory().iop_read32(0x1F801108u),
       emulator.memory().iop_read32(0x1FFE0130u));
+  std::printf("iop_t3 count=%08X mode=%08X target=%08X "
+              "t4=%08X/%08X/%08X t5=%08X/%08X/%08X\n",
+      emulator.memory().iop_read32(0x1F801480u),
+      emulator.memory().iop_read32(0x1F801484u),
+      emulator.memory().iop_read32(0x1F801488u),
+      emulator.memory().iop_read32(0x1F801490u),
+      emulator.memory().iop_read32(0x1F801494u),
+      emulator.memory().iop_read32(0x1F801498u),
+      emulator.memory().iop_read32(0x1F8014A0u),
+      emulator.memory().iop_read32(0x1F8014A4u),
+      emulator.memory().iop_read32(0x1F8014A8u));
   std::printf("iop_sif0 madr=%08X bcr=%08X chcr=%08X tadr=%08X "
               "sif1_madr=%08X bcr=%08X chcr=%08X\n",
       emulator.memory().iop_read32(0x1F801520u),
