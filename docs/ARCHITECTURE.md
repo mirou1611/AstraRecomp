@@ -68,6 +68,10 @@ Video field timing is also master-cycle-driven. The initial NTSC phase preserves
 the exact 59.94 Hz rational remainder across fields, raises VBlank start/end in
 both EE and IOP interrupt controllers, and remains independent of host rendering
 or frontend frame pacing.
+The same timing domain advances HBlank at a rational scanline cadence and clocks
+EE Timer 3 when the guest selects its external source. Timer count, target,
+overflow, reached-flag acknowledgement, and INTC delivery stay in the portable
+device model rather than depending on frontend reads or host time.
 
 This keeps four concerns separate:
 

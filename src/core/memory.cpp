@@ -13,6 +13,9 @@ constexpr std::uint32_t kNtscRenderCycles = 4498396u;
 constexpr std::uint32_t kNtscVblankCycles = 421724u;
 constexpr std::uint32_t kNtscFieldRemainder = 360u;
 constexpr std::uint32_t kNtscFieldDivisor = 2997u;
+constexpr std::uint32_t kNtscScanlineCycles = 18743u;
+constexpr std::uint32_t kNtscScanlineRemainder = 495225u;
+constexpr std::uint32_t kNtscScanlineDivisor = 1573425u;
 } // namespace
 
 Memory::Memory()
@@ -123,6 +126,9 @@ void Memory::clear() {
   video_cycles_remaining_ = kNtscRenderCycles;
   video_field_remainder_ = 0;
   video_in_vblank_ = false;
+  hblank_cycles_remaining_ = kNtscScanlineCycles;
+  hblank_cycle_remainder_ = 0;
+  timer3_target_future_ = false;
   iop_cycle_remainder_ = 0;
   timer5_prescale_remainder_ = 0;
   timer5_target_future_ = false;
@@ -421,6 +427,15 @@ void Memory::write32(std::uint32_t address, std::uint32_t value) {
   } else if (p == 0x1000F010u) {
     if (!valid(address, 4)) return;
     value = read32(address) ^ value; // EE INTC mask bits toggle on write.
+  } else if (p == 0x10001800u) {
+    value &= 0xFFFFu;
+    timer3_target_future_ = value >= (read32(0x10001820u) & 0xFFFFu);
+  } else if (p == 0x10001810u) {
+    const auto current = read32(address);
+    value = ((current & 0xC00u) & ~(value & 0xC00u)) | (value & 0x3FFu);
+  } else if (p == 0x10001820u) {
+    value &= 0xFFFFu;
+    timer3_target_future_ = value <= (read32(0x10001800u) & 0xFFFFu);
   }
   write16(address, static_cast<std::uint16_t>(value));
   write16(address + 2, static_cast<std::uint16_t>(value >> 16));
@@ -456,6 +471,49 @@ void Memory::advance(std::uint32_t cycles) {
     iop_hw_[offset + 2] = static_cast<std::uint8_t>(value >> 16);
     iop_hw_[offset + 3] = static_cast<std::uint8_t>(value >> 24);
   };
+
+  // HBlank is Timer 3's external clock source. Preserve the fractional NTSC
+  // scanline phase so counter reads remain deterministic over long runs.
+  auto hblank_cycles = cycles;
+  while (hblank_cycles >= hblank_cycles_remaining_) {
+    hblank_cycles -= hblank_cycles_remaining_;
+    hblank_cycles_remaining_ = kNtscScanlineCycles;
+    hblank_cycle_remainder_ += kNtscScanlineRemainder;
+    if (hblank_cycle_remainder_ >= kNtscScanlineDivisor) {
+      hblank_cycle_remainder_ -= kNtscScanlineDivisor;
+      ++hblank_cycles_remaining_;
+    }
+
+    auto mode = raw_ee(0x1810u);
+    if ((mode & 0x83u) == 0x83u && (mode & 0x04u) == 0u) {
+      const auto old_count = raw_ee(0x1800u) & 0xFFFFu;
+      const auto target = raw_ee(0x1820u) & 0xFFFFu;
+      auto new_count = (old_count + 1u) & 0xFFFFu;
+      const bool overflowed = old_count == 0xFFFFu;
+      if (overflowed) {
+        timer3_target_future_ = false;
+        if ((mode & 0x200u) != 0u && (mode & 0x800u) == 0u) {
+          mode |= 0x800u;
+          store_ee(0xF000u, raw_ee(0xF000u) | (1u << 12));
+        }
+      }
+      const bool target_reached = !timer3_target_future_ &&
+          old_count < target && old_count + 1u >= target;
+      if (target_reached) {
+        if ((mode & 0x100u) != 0u && (mode & 0x400u) == 0u) {
+          mode |= 0x400u;
+          store_ee(0xF000u, raw_ee(0xF000u) | (1u << 12));
+        }
+        if ((mode & 0x40u) != 0u && target != 0u)
+          new_count = 0u;
+        else
+          timer3_target_future_ = true;
+      }
+      store_ee(0x1800u, new_count);
+      store_ee(0x1810u, mode);
+    }
+  }
+  hblank_cycles_remaining_ -= hblank_cycles;
 
   // Drive the video field phase from EE master cycles. VBlank start/end are
   // independent hardware edges observed by both interrupt controllers.

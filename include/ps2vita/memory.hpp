@@ -122,6 +122,9 @@ private:
   std::uint32_t video_cycles_remaining_ = 0;
   std::uint32_t video_field_remainder_ = 0;
   bool video_in_vblank_ = false;
+  std::uint32_t hblank_cycles_remaining_ = 0;
+  std::uint32_t hblank_cycle_remainder_ = 0;
+  bool timer3_target_future_ = false;
   std::uint32_t iop_cycle_remainder_ = 0;
   std::uint32_t timer5_prescale_remainder_ = 0;
   bool timer5_target_future_ = false;

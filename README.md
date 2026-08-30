@@ -108,6 +108,8 @@ PS2 ELF / user BIOS
   OpenConfig/ReadConfig/WriteConfig/CloseConfig secondary-command transport
 - Deterministic 59.94 Hz NTSC field phase with fractional-cycle correction and
   synchronized EE/IOP VBlank start and end interrupts
+- HBlank-driven EE Timer 3 with rational scanline phase, 16-bit target/overflow
+  behavior, write-one-to-clear reached flags, and INTC bit 12 delivery
 - Absent development-board debug aperture with retail-style null-device behavior
 - Portable EE interpreter foundation with 128-bit GPR storage
 - Fixed-size decoded EE block cache with delay-slot boundaries, hotness tracking,

@@ -396,6 +396,27 @@ void test_video_vblank_deadlines() {
         "VBlank end raises both interrupt controllers at its deadline");
 }
 
+void test_ee_timer3_hblank_clock() {
+  ps2vita::Memory memory;
+  memory.write32(0x10001820u, 2u);
+  memory.write32(0x10001810u, 0xD83u); // Clear flags, count HBlank, target IRQ.
+  check(memory.read32(0x10001810u) == 0x183u,
+        "EE Timer 3 mode writes clear reached flags with write-one semantics");
+  memory.write32(0x1000F010u, 1u << 12);
+  memory.advance(18742u);
+  check(memory.read32(0x10001800u) == 0u &&
+        (memory.ee_interrupt_lines() & 0x400u) == 0u,
+        "EE Timer 3 remains quiet before the HBlank edge");
+  memory.advance(1u);
+  check(memory.read32(0x10001800u) == 1u,
+        "EE Timer 3 advances from its external HBlank clock");
+  memory.advance(18743u);
+  check(memory.read32(0x10001800u) == 2u &&
+        (memory.read32(0x10001810u) & 0x400u) != 0u &&
+        (memory.ee_interrupt_lines() & 0x400u) != 0u,
+        "EE Timer 3 target raises INTC bit 12 on the exact scanline");
+}
+
 void test_exception_entry_and_eret() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -1266,6 +1287,7 @@ int main() {
   test_iop_timer5_deadlines();
   test_cdvd_reset_status();
   test_video_vblank_deadlines();
+  test_ee_timer3_hblank_clock();
   test_exception_entry_and_eret();
   test_cop0_count_advances();
   test_di_ei_status();
