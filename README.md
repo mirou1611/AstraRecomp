@@ -111,7 +111,8 @@ PS2 ELF / user BIOS
 - Initial MMI support (`PADDUW`, `DIV1/DIVU1`, `HI1/LO1` moves) using full
   128-bit GPR state and the EE's second accumulator pair
 - Packed MMI accumulator save/restore and composition (`PMFHI`, `PMFLO`,
-  `PMTHI`, `PMTLO`, `PCPYLD`, and `PCPYUD`)
+  `PMTHI`, `PMTLO`, `PCPYLD`, `PCPYUD`, and `PEXTLW`)
+- R5900 shift-amount register state with `MFSA`/`MTSA` save and restore
 - Scalar COP1 register moves, arithmetic, conversion, comparison, and branches
 - Scalar COP1 memory transfers (`LWC1`/`SWC1`)
 - Verified native semantic zero-fill acceleration for the BIOS's large RAM clear

@@ -36,6 +36,7 @@ struct CpuState {
   std::uint64_t lo = 0;
   std::uint64_t hi1 = 0;
   std::uint64_t lo1 = 0;
+  std::uint32_t shift_amount = 0;
   std::uint32_t pc = 0;
   std::uint64_t cycles = 0;
   // Guest instructions completed by verified native semantic fast paths.

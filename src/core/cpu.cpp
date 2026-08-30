@@ -396,6 +396,8 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
     case 0x25: set_reg(rd, rsv | rtv); break;
     case 0x26: set_reg(rd, rsv ^ rtv); break;
     case 0x27: set_reg(rd, ~(rsv | rtv)); break;
+    case 0x28: set_reg(rd, state_.shift_amount); break; // MFSA
+    case 0x29: state_.shift_amount = static_cast<std::uint32_t>(rsv); break; // MTSA
     case 0x2A: set_reg(rd, static_cast<std::int64_t>(rsv) < static_cast<std::int64_t>(rtv)); break;
     case 0x2B: set_reg(rd, rsv < rtv); break;
     // Overflow exceptions are not exposed yet, so trapping and non-trapping
@@ -749,6 +751,13 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
       const auto b = static_cast<std::uint32_t>(rtv);
       state_.lo1 = b ? sx32(a / b) : std::numeric_limits<std::uint64_t>::max();
       state_.hi1 = sx32(b ? a % b : a);
+    } else if (fn == 0x08 && sub == 0x12) { // PEXTLW
+      if (rd != 0) {
+        const auto low = (rtv & 0xFFFFFFFFu) | (rsv << 32);
+        const auto high = (rtv >> 32) | (rsv & 0xFFFFFFFF00000000ull);
+        state_.gpr[rd] = low;
+        state_.gpr_hi[rd] = high;
+      }
     } else if (fn == 0x09 && sub == 0x08) { // PMFHI
       if (rd != 0) {
         state_.gpr[rd] = state_.hi;

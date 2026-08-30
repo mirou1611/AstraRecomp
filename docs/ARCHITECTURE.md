@@ -59,6 +59,8 @@ This keeps four concerns separate:
 - `Memory` translates guest addresses and routes RAM, BIOS, EE internal state,
   hardware registers, IOP windows, and GS/VU apertures to explicit devices.
 - `Cpu` owns precise R5900 architectural state and interpreter semantics.
+- R5900 state includes both 128-bit accumulator halves and the architectural
+  shift-amount register so exception/context switches can save and restore them.
 - `IopCpu` owns portable R3000A execution and reset-ROM architectural behavior.
 - A decoded-block frontend owns block discovery, invalidation, and hotness.
 - A Vita-only code-cache provider will own executable allocation and instruction-

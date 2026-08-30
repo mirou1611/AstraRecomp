@@ -691,6 +691,39 @@ void test_mmi_pcpyld() {
         "PCPYUD packs Rs high below Rt high with alias-safe reads");
 }
 
+void test_mmi_pextlw() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[2] = 0x2222222211111111ull;
+  cpu.state().gpr[3] = 0xBBBBBBBBAAAAAAAAull;
+  // pextlw v0,v1,v0: destination aliases rt, as in the BIOS save path.
+  memory.write32(0x1000u, (0x1Cu << 26) | (3u << 21) | (2u << 16) |
+                                (2u << 11) | (0x12u << 6) | 0x08u);
+  memory.write32(0x1004u, 0x0000000Du);
+  cpu.state().pc = 0x1000u;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "PExtLW executes");
+  check(cpu.state().gpr[2] == 0xAAAAAAAA11111111ull &&
+        cpu.state().gpr_hi[2] == 0xBBBBBBBB22222222ull,
+        "PExtLW interleaves low words with alias-safe source reads");
+}
+
+void test_r5900_shift_amount_moves() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().shift_amount = 0x89ABCDEFu;
+  cpu.state().gpr[4] = 0xFEDCBA9876543210ull;
+  memory.write32(0x1000u, (2u << 11) | 0x28u);          // mfsa v0
+  memory.write32(0x1004u, (4u << 21) | 0x29u);          // mtsa a0
+  memory.write32(0x1008u, (3u << 11) | 0x28u);          // mfsa v1
+  memory.write32(0x100Cu, 0x0000000Du);
+  cpu.state().pc = 0x1000u;
+  check(cpu.run(8) == ps2vita::StopReason::Break, "MFSA/MTSA execute");
+  check(cpu.state().gpr[2] == 0x89ABCDEFu &&
+        cpu.state().shift_amount == 0x76543210u &&
+        cpu.state().gpr[3] == 0x76543210u,
+        "MFSA zero-extends and MTSA retains the source low word");
+}
+
 void test_r5900_three_operand_multiply() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -1156,6 +1189,8 @@ int main() {
   test_mmi_div1_accumulator();
   test_mmi_packed_accumulator_moves();
   test_mmi_pcpyld();
+  test_mmi_pextlw();
+  test_r5900_shift_amount_moves();
   test_r5900_three_operand_multiply();
   test_scalar_fpu();
   test_fpu_memory_transfer();
