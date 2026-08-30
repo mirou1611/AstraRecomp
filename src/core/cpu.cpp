@@ -94,6 +94,18 @@ void Cpu::branch(std::uint32_t target) {
 
 StopReason Cpu::step() {
   if (halt_requested_) return stop_reason_ = StopReason::Halted;
+  const auto interrupt_lines = memory_.ee_interrupt_lines();
+  state_.cop0[13] = (state_.cop0[13] & ~0x00000C00u) | interrupt_lines;
+  const auto status = state_.cop0[12];
+  if (exception_mode_ && interrupt_lines != 0u &&
+      (status & interrupt_lines) != 0u && (status & 0x00010001u) == 0x00010001u &&
+      (status & 0x00000006u) == 0u) {
+    raise_interrupt(interrupt_lines);
+    ++state_.cycles;
+    ++state_.cop0[9];
+    memory_.advance(1);
+    return stop_reason_ = StopReason::None;
+  }
   if ((state_.pc & 3u) != 0 || !memory_.valid(state_.pc, 4)) {
     fault_address_ = state_.pc;
     return stop_reason_ = StopReason::MemoryFault;
@@ -148,6 +160,21 @@ StopReason Cpu::step() {
     branch(new_target);
   }
   return stop_reason_ = StopReason::None;
+}
+
+void Cpu::raise_interrupt(std::uint32_t lines) {
+  state_.cop0[13] = (state_.cop0[13] & ~0x8000007Cu) | lines;
+  state_.cop0[14] = state_.pc;
+  state_.cop0[12] |= 2u;
+  bool bootstrap_vectors = (state_.cop0[12] & (1u << 22)) != 0;
+  if (!bootstrap_vectors) {
+    bootstrap_vectors = memory_.read32(0x80000180u) == 0 &&
+                        memory_.read32(0x80000184u) == 0 &&
+                        memory_.read32(0x80000188u) == 0 &&
+                        memory_.read32(0x8000018Cu) == 0;
+  }
+  state_.pc = bootstrap_vectors ? 0xBFC00200u : 0x80000180u;
+  branch_pending_ = false;
 }
 
 void Cpu::raise_exception(StopReason reason, std::uint32_t fault_pc,

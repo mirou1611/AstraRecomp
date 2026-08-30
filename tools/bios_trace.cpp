@@ -84,25 +84,29 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  constexpr std::size_t kTraceSize = 64;
+  constexpr std::size_t kTraceSize = 256;
   std::array<TraceEntry, kTraceSize> trace{};
   std::array<IopTraceEntry, kTraceSize> iop_trace{};
   std::array<CacheEntry, kTraceSize> cache_trace{};
   std::array<StoreEntry, kTraceSize> low_store_trace{};
   std::array<StoreEntry, kTraceSize> syscall_store_trace{};
   std::array<StoreEntry, kTraceSize> sbus_store_trace{};
+  std::array<StoreEntry, kTraceSize> dma_store_trace{};
   std::array<StoreEntry, kTraceSize> gif_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_low_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_sbus_store_trace{};
+  std::array<StoreEntry, kTraceSize> iop_dma_store_trace{};
   std::size_t cursor = 0;
   std::size_t iop_cursor = 0;
   std::size_t cache_cursor = 0;
   std::size_t low_store_cursor = 0;
   std::size_t syscall_store_cursor = 0;
   std::size_t sbus_store_cursor = 0;
+  std::size_t dma_store_cursor = 0;
   std::size_t gif_store_cursor = 0;
   std::size_t iop_low_store_cursor = 0;
   std::size_t iop_sbus_store_cursor = 0;
+  std::size_t iop_dma_store_cursor = 0;
   std::vector<char> serial_output;
   serial_output.reserve(16384);
   std::vector<char> iop_serial_output;
@@ -164,6 +168,13 @@ int main(int argc, char** argv) {
             state.pc, instruction, address, state.gpr[source],
             state.gpr_hi[source]};
       }
+      if ((physical >= 0x10008000u && physical < 0x1000E100u) ||
+          (physical >= 0x1000E000u && physical < 0x1000E100u) ||
+          (physical >= 0x1000F000u && physical < 0x1000F020u)) {
+        dma_store_trace[dma_store_cursor++ % kTraceSize] = {
+            state.pc, instruction, address, state.gpr[source],
+            state.gpr_hi[source]};
+      }
       if ((physical >= 0x10003000u && physical < 0x10003100u) ||
           (physical >= 0x1000A000u && physical < 0x1000A100u) ||
           (physical >= 0x12000000u && physical < 0x12002000u)) {
@@ -208,6 +219,15 @@ int main(int argc, char** argv) {
           iop_sbus_store_trace[iop_sbus_store_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
         }
+        if ((address >= 0x1F801070u && address < 0x1F801080u) ||
+            (address >= 0x1F8010F0u && address < 0x1F801100u) ||
+            (address >= 0x1F801450u && address < 0x1F801458u) ||
+            (address >= 0x1F801520u && address < 0x1F801570u) ||
+            (address >= 0x1F801570u && address < 0x1F801578u) ||
+            (address >= 0x1F80157Cu && address < 0x1F801580u)) {
+          iop_dma_store_trace[iop_dma_store_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address, iop.gpr[source], 0u};
+        }
       }
       iop_reason = emulator.iop().step();
     }
@@ -241,6 +261,37 @@ int main(int argc, char** argv) {
       emulator.memory().read32(0x1000F000u),
       emulator.memory().read32(0x1000F010u),
       emulator.memory().read32(0x1000E010u));
+  std::printf("ee_sif0 chcr=%08X madr=%08X qwc=%08X tadr=%08X\n",
+      emulator.memory().read32(0x1000C000u),
+      emulator.memory().read32(0x1000C010u),
+      emulator.memory().read32(0x1000C020u),
+      emulator.memory().read32(0x1000C030u));
+  std::printf("ee_sif1 chcr=%08X madr=%08X qwc=%08X tadr=%08X\n",
+      emulator.memory().read32(0x1000C400u),
+      emulator.memory().read32(0x1000C410u),
+      emulator.memory().read32(0x1000C420u),
+      emulator.memory().read32(0x1000C430u));
+  const auto sif1_tadr = emulator.memory().read32(0x1000C430u);
+  std::printf("ee_sif1_tag=%08X %08X %08X %08X\n",
+      emulator.memory().read32(sif1_tadr),
+      emulator.memory().read32(sif1_tadr + 4u),
+      emulator.memory().read32(sif1_tadr + 8u),
+      emulator.memory().read32(sif1_tadr + 12u));
+  std::printf("ee_sif1_next=%08X %08X %08X %08X\n",
+      emulator.memory().read32(sif1_tadr + 16u),
+      emulator.memory().read32(sif1_tadr + 20u),
+      emulator.memory().read32(sif1_tadr + 24u),
+      emulator.memory().read32(sif1_tadr + 28u));
+  const auto sif1_madr = emulator.memory().read32(sif1_tadr + 4u) & 0x0FFFFFF0u;
+  std::printf("ee_sif1_data=%08X %08X %08X %08X %08X %08X %08X %08X\n",
+      emulator.memory().read32(sif1_madr),
+      emulator.memory().read32(sif1_madr + 4u),
+      emulator.memory().read32(sif1_madr + 8u),
+      emulator.memory().read32(sif1_madr + 12u),
+      emulator.memory().read32(sif1_madr + 16u),
+      emulator.memory().read32(sif1_madr + 20u),
+      emulator.memory().read32(sif1_madr + 24u),
+      emulator.memory().read32(sif1_madr + 28u));
   std::printf("timer3_count=%08X mode=%08X compare=%08X hold=%08X\n",
       emulator.memory().read32(0x10001800u),
       emulator.memory().read32(0x10001810u),
@@ -289,6 +340,15 @@ int main(int argc, char** argv) {
       emulator.memory().iop_read32(0x1F801104u),
       emulator.memory().iop_read32(0x1F801108u),
       emulator.memory().iop_read32(0x1FFE0130u));
+  std::printf("iop_sif0 madr=%08X bcr=%08X chcr=%08X tadr=%08X "
+              "sif1_madr=%08X bcr=%08X chcr=%08X\n",
+      emulator.memory().iop_read32(0x1F801520u),
+      emulator.memory().iop_read32(0x1F801524u),
+      emulator.memory().iop_read32(0x1F801528u),
+      emulator.memory().iop_read32(0x1F80152Cu),
+      emulator.memory().iop_read32(0x1F801530u),
+      emulator.memory().iop_read32(0x1F801534u),
+      emulator.memory().iop_read32(0x1F801538u));
   std::puts("written TLB entries:");
   for (unsigned index = 0; index < 48u; ++index) {
     std::uint32_t mask = 0, hi = 0, lo0 = 0, lo1 = 0;
@@ -408,6 +468,20 @@ int main(int argc, char** argv) {
                   static_cast<unsigned long long>(item.value_lo));
     }
   }
+  if (dma_store_cursor != 0) {
+    std::puts("recent stores to EE DMA/interrupt registers:");
+    const std::size_t store_count =
+        dma_store_cursor < kTraceSize ? dma_store_cursor : kTraceSize;
+    const std::size_t store_first =
+        dma_store_cursor < kTraceSize ? 0 : dma_store_cursor % kTraceSize;
+    for (std::size_t i = 0; i < store_count; ++i) {
+      const auto& item = dma_store_trace[(store_first + i) % kTraceSize];
+      std::printf("%08X  %08X  address=%08X value=%016llX:%016llX\n",
+                  item.pc, item.instruction, item.address,
+                  static_cast<unsigned long long>(item.value_hi),
+                  static_cast<unsigned long long>(item.value_lo));
+    }
+  }
   if (iop_low_store_cursor != 0) {
     std::puts("recent IOP stores to low RAM:");
     const std::size_t store_count =
@@ -429,6 +503,19 @@ int main(int argc, char** argv) {
         ? 0 : iop_sbus_store_cursor % kTraceSize;
     for (std::size_t i = 0; i < store_count; ++i) {
       const auto& item = iop_sbus_store_trace[(store_first + i) % kTraceSize];
+      std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
+                  item.instruction, item.address,
+                  static_cast<unsigned long long>(item.value_lo));
+    }
+  }
+  if (iop_dma_store_cursor != 0) {
+    std::puts("recent IOP stores to DMA/interrupt registers:");
+    const std::size_t store_count = iop_dma_store_cursor < kTraceSize
+        ? iop_dma_store_cursor : kTraceSize;
+    const std::size_t store_first = iop_dma_store_cursor < kTraceSize
+        ? 0 : iop_dma_store_cursor % kTraceSize;
+    for (std::size_t i = 0; i < store_count; ++i) {
+      const auto& item = iop_dma_store_trace[(store_first + i) % kTraceSize];
       std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
                   item.instruction, item.address,
                   static_cast<unsigned long long>(item.value_lo));

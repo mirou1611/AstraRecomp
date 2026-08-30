@@ -100,6 +100,7 @@ void Memory::clear() {
   timer0_count_ = 0;
   timer0_reads_ = 0;
   rdram_sdevid_ = 0;
+  sif1_cycles_remaining_ = 0;
   iop_cache_control_ = 0;
   // EE hardware reset values observed by the BIOS during board detection.
   write32(0x1000F260u, 0x1D000060u);
@@ -380,10 +381,16 @@ void Memory::write32(std::uint32_t address, std::uint32_t value) {
       rdram_sdevid_ = 0;
     value &= ~0x80000000u;
   }
-  if (p == 0x1000F000u || p == 0x1000E010u) {
+  if (p == 0x1000F000u) {
     if (!valid(address, 4)) return;
     const auto current = read32(address);
     value = current & ~value;
+  } else if (p == 0x1000E010u) {
+    if (!valid(address, 4)) return;
+    const auto current = read32(address);
+    const auto status = (current & 0xFFFFu) & ~(value & 0xFFFFu);
+    const auto mask = ((current >> 16) ^ (value >> 16)) & 0xFFFFu;
+    value = status | (mask << 16);
   } else if (p == 0x1000F010u) {
     if (!valid(address, 4)) return;
     value = read32(address) ^ value; // EE INTC mask bits toggle on write.
@@ -398,7 +405,116 @@ void Memory::write64(std::uint32_t address, std::uint64_t value) {
 }
 
 void Memory::advance(std::uint32_t cycles) {
-  (void)cycles;
+  const auto raw_ee = [&](std::size_t offset) {
+    return static_cast<std::uint32_t>(hw_[offset]) |
+        (static_cast<std::uint32_t>(hw_[offset + 1]) << 8) |
+        (static_cast<std::uint32_t>(hw_[offset + 2]) << 16) |
+        (static_cast<std::uint32_t>(hw_[offset + 3]) << 24);
+  };
+  const auto store_ee = [&](std::size_t offset, std::uint32_t value) {
+    hw_[offset] = static_cast<std::uint8_t>(value);
+    hw_[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+    hw_[offset + 2] = static_cast<std::uint8_t>(value >> 16);
+    hw_[offset + 3] = static_cast<std::uint8_t>(value >> 24);
+  };
+  const auto raw_iop = [&](std::size_t offset) {
+    return static_cast<std::uint32_t>(iop_hw_[offset]) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 1]) << 8) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 2]) << 16) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 3]) << 24);
+  };
+  const auto store_iop = [&](std::size_t offset, std::uint32_t value) {
+    iop_hw_[offset] = static_cast<std::uint8_t>(value);
+    iop_hw_[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+    iop_hw_[offset + 2] = static_cast<std::uint8_t>(value >> 16);
+    iop_hw_[offset + 3] = static_cast<std::uint8_t>(value >> 24);
+  };
+
+  if (sif1_cycles_remaining_ != 0u) {
+    if (cycles < sif1_cycles_remaining_) {
+      sif1_cycles_remaining_ -= cycles;
+      return;
+    }
+    sif1_cycles_remaining_ = 0;
+
+    auto tadr = raw_ee(0xC430u) & 0x0FFFFFF0u;
+    std::uint32_t final_madr = 0;
+    bool complete = false;
+    for (unsigned tag_index = 0; tag_index < 64u && !complete; ++tag_index) {
+      const auto tag = read32(tadr);
+      const auto qwc = tag & 0xFFFFu;
+      const auto id = (tag >> 28) & 7u;
+      const auto source = read32(tadr + 4u) & 0x0FFFFFF0u;
+      // The reset path uses REF followed by REFE. Other source-chain tag
+      // modes remain deliberately unsupported until traced and tested.
+      if ((id != 0u && id != 3u) || qwc == 0u || !valid(source, qwc * 16u))
+        break;
+      const auto destination = read32(source) & 0x00FFFFFFu;
+      const auto words = read32(source + 4u) & 0x000FFFFFu;
+      if (words > (qwc - 1u) * 4u || !iop_valid(destination, words * 4u))
+        break;
+      for (std::uint32_t word = 0; word < words; ++word)
+        iop_write32(destination + word * 4u,
+                    read32(source + 16u + word * 4u));
+      final_madr = source + qwc * 16u;
+      store_iop(0x0530u, destination + words * 4u);
+      tadr += 16u;
+      complete = id == 0u || ((tag & 0x80000000u) != 0u &&
+                             (raw_ee(0xC400u) & 0x80u) != 0u);
+    }
+    if (complete) {
+      store_ee(0xC410u, final_madr);
+      store_ee(0xC420u, 0u);
+      store_ee(0xC430u, tadr);
+      store_ee(0xC400u, raw_ee(0xC400u) & ~0x100u);
+      store_ee(0xE010u, raw_ee(0xE010u) | (1u << 6));
+      store_ee(0xF240u, raw_ee(0xF240u) & ~0x4000u);
+      store_iop(0x0538u, raw_iop(0x0538u) & ~0x01000000u);
+      store_iop(0x0574u, raw_iop(0x0574u) | (1u << 27));
+      store_iop(0x0070u, raw_iop(0x0070u) | (1u << 3));
+    }
+  }
+
+  if (sif1_cycles_remaining_ == 0u &&
+      (raw_ee(0xC400u) & 0x100u) != 0u &&
+      (raw_iop(0x0538u) & 0x01000000u) != 0u) {
+    auto tadr = raw_ee(0xC430u) & 0x0FFFFFF0u;
+    std::uint32_t total_qwc = 0;
+    bool complete_chain = false;
+    for (unsigned tag_index = 0; tag_index < 64u && !complete_chain;
+         ++tag_index) {
+      if (!valid(tadr, 16u)) break;
+      const auto tag = read32(tadr);
+      const auto qwc = tag & 0xFFFFu;
+      const auto id = (tag >> 28) & 7u;
+      if ((id != 0u && id != 3u) || qwc == 0u ||
+          total_qwc > (UINT32_MAX / 8u) - qwc)
+        break;
+      total_qwc += qwc;
+      tadr += 16u;
+      complete_chain = id == 0u || ((tag & 0x80000000u) != 0u &&
+                                   (raw_ee(0xC400u) & 0x80u) != 0u);
+    }
+    if (complete_chain) {
+      sif1_cycles_remaining_ = total_qwc * 8u;
+      store_ee(0xF240u, raw_ee(0xF240u) | 0x4000u);
+    }
+  }
+}
+
+std::uint32_t Memory::ee_interrupt_lines() const {
+  const auto intc_status = read32(0x1000F000u);
+  const auto intc_mask = read32(0x1000F010u);
+  const auto dmac = read32(0x1000E010u);
+  std::uint32_t lines = 0;
+  if ((intc_status & intc_mask) != 0u) lines |= 0x400u;
+  if (((dmac & 0xFFFFu) & (dmac >> 16)) != 0u) lines |= 0x800u;
+  return lines;
+}
+
+bool Memory::iop_interrupt_pending() const {
+  return iop_read32(0x1F801078u) != 0u &&
+      (iop_read32(0x1F801070u) & iop_read32(0x1F801074u)) != 0u;
 }
 
 bool Memory::iop_valid(std::uint32_t address, std::size_t size) const {
@@ -504,6 +620,15 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
     case 0x60u: store(0xF260u, 0); return;
     default: return;
     }
+  }
+  if (p == 0x1F801070u) {
+    value = iop_read32(address) & value;
+  } else if (p == 0x1F801574u) {
+    const auto current = iop_read32(address);
+    const auto flags = (current & 0x7F000000u) & ~(value & 0x7F000000u);
+    value = flags | (value & 0x00FFFFFFu);
+  } else if (p == 0x1F801450u && (value & 2u) != 0u) {
+    hw_[0xF000u] |= 2u;
   }
   iop_write16(address, static_cast<std::uint16_t>(value));
   iop_write16(address + 2u, static_cast<std::uint16_t>(value >> 16));

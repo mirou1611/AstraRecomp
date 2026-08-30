@@ -64,6 +64,7 @@ private:
   void set_reg(unsigned index, std::uint64_t value);
   void raise_exception(StopReason reason, std::uint32_t fault_pc,
                        bool in_delay_slot);
+  void raise_interrupt(std::uint32_t lines);
   StopReason memory_fault(std::uint32_t address);
   std::uint32_t try_fast_zero_fill(std::uint32_t instruction_budget);
   StopReason execute(std::uint32_t instruction, std::uint32_t current_pc,

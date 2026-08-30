@@ -190,6 +190,81 @@ void test_iop_memory_and_cpu() {
         "IOP models the R3000A one-instruction load delay");
 }
 
+void test_sif1_dma_and_external_interrupts() {
+  ps2vita::Memory memory;
+  // Observed BIOS source chain: REF followed by REFE. Each block begins with
+  // an IOP destination tag and is followed by its word payload.
+  memory.write32(0x2000u, 0x30000002u);
+  memory.write32(0x2004u, 0x00003000u);
+  memory.write32(0x2010u, 0x00000002u);
+  memory.write32(0x2014u, 0x00003040u);
+  memory.write32(0x3000u, 0x80001000u);
+  memory.write32(0x3004u, 4u);
+  memory.write32(0x3010u, 0x11111111u);
+  memory.write32(0x3014u, 0x22222222u);
+  memory.write32(0x3018u, 0x33333333u);
+  memory.write32(0x301Cu, 0x44444444u);
+  memory.write32(0x3040u, 0xC0001100u);
+  memory.write32(0x3044u, 4u);
+  memory.write32(0x3050u, 0x55555555u);
+  memory.write32(0x3054u, 0x66666666u);
+  memory.write32(0x3058u, 0x77777777u);
+  memory.write32(0x305Cu, 0x88888888u);
+  memory.write32(0x1000C430u, 0x2000u);
+  memory.write32(0x1000C400u, 0x184u);
+  memory.iop_write32(0x1F801538u, 0x41000300u);
+  memory.iop_write32(0x1F801074u, 1u << 3);
+  memory.iop_write32(0x1F801078u, 1u);
+
+  memory.advance(1u);
+  memory.advance(31u);
+  check(memory.iop_read32(0x1000u) == 0u,
+        "scheduled SIF1 chain is not visible before its full-QWC deadline");
+  memory.advance(1u);
+  check(memory.iop_read32(0x1000u) == 0x11111111u &&
+        memory.iop_read32(0x100Cu) == 0x44444444u &&
+        memory.iop_read32(0x1100u) == 0x55555555u &&
+        memory.iop_read32(0x110Cu) == 0x88888888u,
+        "SIF1 REF/REFE chain copies EE packets into IOP RAM");
+  check((memory.read32(0x1000C400u) & 0x100u) == 0u &&
+        (memory.iop_read32(0x1F801538u) & 0x01000000u) == 0u,
+        "SIF1 completion clears both channel start bits");
+  check((memory.read32(0x1000E010u) & (1u << 6)) != 0u &&
+        (memory.iop_read32(0x1F801574u) & (1u << 27)) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 3)) != 0u,
+        "SIF1 completion raises EE and IOP DMA status");
+  check(memory.iop_interrupt_pending(),
+        "IOP INTC exposes the SIF1 DMA completion");
+
+  memory.write32(0x1000E010u, 1u << 22);
+  check(memory.ee_interrupt_lines() == 0x800u,
+        "EE DMAC mask exposes the pending channel on Cause IP3");
+  memory.write32(0x80000180u, 0x24000000u);
+  ps2vita::Cpu ee(memory);
+  ee.reset(0x1000u);
+  ee.set_exception_mode(true);
+  ee.state().cop0[12] = 0x00010801u;
+  check(ee.step() == ps2vita::StopReason::None &&
+        ee.state().pc == 0x80000180u && ee.state().cop0[14] == 0x1000u,
+        "EE takes an enabled external DMAC interrupt");
+
+  ps2vita::IopCpu iop(memory);
+  iop.state().pc = 0x100u;
+  iop.state().cop0[12] = 0x00000401u;
+  check(iop.step() == ps2vita::IopStopReason::None &&
+        iop.state().pc == 0x80000080u && iop.state().cop0[14] == 0x100u,
+        "IOP takes an enabled INTC interrupt");
+
+  memory.write32(0x1000E010u, 1u << 6);
+  memory.iop_write32(0x1F801070u, ~std::uint32_t{1u << 3});
+  check(memory.ee_interrupt_lines() == 0u && !memory.iop_interrupt_pending(),
+        "guest acknowledgements lower both DMA interrupt lines");
+  memory.iop_write32(0x1F801450u, 2u);
+  memory.write32(0x1000F010u, 1u << 1);
+  check(memory.ee_interrupt_lines() == 0x400u,
+        "IOP ICFG bit 1 raises the EE SBUS interrupt");
+}
+
 void test_exception_entry_and_eret() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -961,6 +1036,7 @@ int main() {
   test_memory_aliases();
   test_bios_mapping_and_boot();
   test_iop_memory_and_cpu();
+  test_sif1_dma_and_external_interrupts();
   test_exception_entry_and_eret();
   test_cop0_count_advances();
   test_di_ei_status();

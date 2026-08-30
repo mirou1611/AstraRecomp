@@ -46,6 +46,8 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 - Hardware-derived R5900 COP0/FPU reset identity and coprocessor-enable state
 - COP0 Count driven by interpreted EE cycles for BIOS delay calibration
 - EE/IOP SBUS flag semantics with guest-generated SIFINIT and BOOTEND events
+- Cycle-scheduled SIF1 REF/REFE DMA from EE RAM into IOP RAM, including DMA
+  completion flags and EE/IOP external-interrupt entry
 - Absent development-board debug aperture with retail-style null-device behavior
 - Portable EE interpreter foundation with 128-bit GPR storage
 - Fixed-size decoded EE block cache with delay-slot boundaries, hotness tracking,

@@ -59,6 +59,15 @@ void IopCpu::raise_exception(std::uint32_t code, std::uint32_t pc,
 
 IopStopReason IopCpu::step() {
   const auto pc = state_.pc;
+  const bool interrupt_pending = memory_.iop_interrupt_pending();
+  if (interrupt_pending) state_.cop0[13] |= 0x00000400u;
+  else state_.cop0[13] &= ~0x00000400u;
+  if (interrupt_pending && (state_.cop0[12] & 0x00000401u) == 0x00000401u) {
+    raise_exception(0, pc, branch_pending_);
+    ++state_.cycles;
+    stop_reason_ = IopStopReason::None;
+    return stop_reason_;
+  }
   if ((pc & 3u) != 0 || !memory_.iop_valid(pc, 4)) {
     fault_address_ = pc;
     stop_reason_ = IopStopReason::MemoryFault;

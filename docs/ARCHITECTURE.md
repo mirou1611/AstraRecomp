@@ -44,7 +44,10 @@ entry, mirrored RAM, scratchpad, SBUS access, and CP0 cache isolation. EE SBUS
 register behavior implements the hardware's asymmetric MSFLAG/SMFLAG set/clear
 rules. The reset ROM now generates the SIFINIT acknowledgement and EESYNC BOOTEND
 flags through emulated IOP instructions; no synthetic BIOS-PC skip or boot-event
-state machine remains.
+state machine remains. SIF1 command delivery is also event-driven: the scheduler
+derives a completion deadline from the complete observed REF/REFE source chain,
+then copies its tagged payload into IOP RAM and raises the modeled EE DMAC and IOP
+INTC state. The transfer is never made visible synchronously with an MMIO write.
 
 This keeps four concerns separate:
 
