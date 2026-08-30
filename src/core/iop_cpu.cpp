@@ -118,6 +118,16 @@ bool IopCpu::execute(std::uint32_t ins, std::uint32_t pc, bool& schedules,
   const unsigned fn = ins & 63u;
   const auto rsv = state_.gpr[rs];
   const auto rtv = state_.gpr[rt];
+  // R3000A cache isolation redirects ordinary RAM stores into the data cache.
+  // We do not model cache contents yet, but suppressing the backing-RAM write
+  // preserves the architecturally visible behavior used by the reset ROM while
+  // it invalidates cache lines. Hardware and scratchpad writes remain live.
+  const auto write_memory = [&](std::uint32_t address, auto&& writer) {
+    const auto physical = address & 0x1FFFFFFFu;
+    const bool isolated_ram = (state_.cop0[12] & 0x00010000u) != 0u &&
+        physical < Memory::kIopWindowSize;
+    if (!isolated_ram) writer();
+  };
   const auto branch_to = [&](bool take, bool likely = false) {
     if (take) {
       schedules = true;
@@ -242,21 +252,24 @@ bool IopCpu::execute(std::uint32_t ins, std::uint32_t pc, bool& schedules,
       const unsigned shift = (a & 3u) * 8u;
       const auto mask = 0xFFFFFF00u << (24u - shift);
       schedule_load(rt, (rtv & mask) | (memory_.iop_read32(aligned) >> shift)); break; }
-  case 0x28: memory_.iop_write8(effective(rsv, ins), static_cast<std::uint8_t>(rtv)); break;
+  case 0x28: { const auto a = effective(rsv, ins); write_memory(a, [&] {
+      memory_.iop_write8(a, static_cast<std::uint8_t>(rtv)); }); break; }
   case 0x29: { const auto a = effective(rsv, ins); if (a & 1u) { exception = 5; fault_address_ = a; break; }
-      memory_.iop_write16(a, static_cast<std::uint16_t>(rtv)); break; }
+      write_memory(a, [&] { memory_.iop_write16(a, static_cast<std::uint16_t>(rtv)); }); break; }
   case 0x2A: { const auto a = effective(rsv, ins); const auto aligned = a & ~3u;
       const unsigned shift = (a & 3u) * 8u;
       const auto replace = 0xFFFFFF00u << shift;
-      memory_.iop_write32(aligned, (memory_.iop_read32(aligned) & ~replace) |
-          (rtv >> (24u - shift))); break; }
+      write_memory(aligned, [&] { memory_.iop_write32(aligned,
+          (memory_.iop_read32(aligned) & ~replace) |
+          (rtv >> (24u - shift))); }); break; }
   case 0x2B: { const auto a = effective(rsv, ins); if (a & 3u) { exception = 5; fault_address_ = a; break; }
-      memory_.iop_write32(a, rtv); break; }
+      write_memory(a, [&] { memory_.iop_write32(a, rtv); }); break; }
   case 0x2E: { const auto a = effective(rsv, ins); const auto aligned = a & ~3u;
       const unsigned shift = (a & 3u) * 8u;
       const auto replace = 0x00FFFFFFu >> (24u - shift);
-      memory_.iop_write32(aligned, (memory_.iop_read32(aligned) & ~replace) |
-          (rtv << shift)); break; }
+      write_memory(aligned, [&] { memory_.iop_write32(aligned,
+          (memory_.iop_read32(aligned) & ~replace) |
+          (rtv << shift)); }); break; }
   default: return false;
   }
   return true;

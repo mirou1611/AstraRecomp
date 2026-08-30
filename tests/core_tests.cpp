@@ -166,6 +166,15 @@ void test_iop_memory_and_cpu() {
         "IOP branch delay slot and RAM store execute correctly");
 
   iop.state() = {};
+  iop.state().cop0[12] = 0x00010000u;
+  iop.state().gpr[9] = 0xDEADBEEFu;
+  memory.iop_write32(0x00000000u, i_type(0x2B, 0, 9, 0x1000));
+  memory.iop_write32(0x00001000u, 0x12345678u);
+  iop.step();
+  check(memory.iop_read32(0x1000u) == 0x12345678u,
+        "IOP cache isolation suppresses ordinary RAM stores");
+
+  iop.state() = {};
   iop.state().gpr[8] = 9u;
   memory.iop_write32(0x00000100u, 42u);
   memory.iop_write32(0x00000000u, i_type(0x23, 0, 8, 0x100));

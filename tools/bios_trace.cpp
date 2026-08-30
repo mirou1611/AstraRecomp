@@ -49,10 +49,10 @@ std::uint32_t parse_address(const char* text) {
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 6) {
+  if (argc < 2 || argc > 8) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
-        "[WATCH_LOW_CLEAR]\n");
+        "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC]\n");
     return 2;
   }
 
@@ -70,6 +70,13 @@ int main(int argc, char** argv) {
   const std::uint64_t stop_hit = argc >= 5
       ? std::strtoull(argv[4], nullptr, 0) : 1ull;
   const bool watch_low_clear = argc >= 6 && std::strtoul(argv[5], nullptr, 0);
+  const std::uint64_t iop_divisor = argc >= 7
+      ? std::strtoull(argv[6], nullptr, 0) : 8ull;
+  if (iop_divisor == 0u) {
+    std::fputs("IOP_DIVISOR must be non-zero\n", stderr);
+    return 2;
+  }
+  const std::uint32_t iop_stop_pc = argc >= 8 ? parse_address(argv[7]) : 0u;
 
   ps2vita::Emulator emulator;
   if (!emulator.load_bios(bios.data(), bios.size()) || !emulator.boot_bios()) {
@@ -84,12 +91,14 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> low_store_trace{};
   std::array<StoreEntry, kTraceSize> syscall_store_trace{};
   std::array<StoreEntry, kTraceSize> sbus_store_trace{};
+  std::array<StoreEntry, kTraceSize> iop_low_store_trace{};
   std::size_t cursor = 0;
   std::size_t iop_cursor = 0;
   std::size_t cache_cursor = 0;
   std::size_t low_store_cursor = 0;
   std::size_t syscall_store_cursor = 0;
   std::size_t sbus_store_cursor = 0;
+  std::size_t iop_low_store_cursor = 0;
   std::vector<char> serial_output;
   serial_output.reserve(16384);
   std::vector<char> iop_serial_output;
@@ -99,6 +108,7 @@ int main(int argc, char** argv) {
   std::uint32_t low_stub_word = 0;
   bool low_stub_seen = false;
   bool low_clear_triggered = false;
+  bool iop_stop_triggered = false;
   ps2vita::StopReason reason = ps2vita::StopReason::None;
   ps2vita::IopStopReason iop_reason = ps2vita::IopStopReason::None;
   for (; steps < max_steps; ++steps) {
@@ -154,11 +164,15 @@ int main(int argc, char** argv) {
     if (state.pc == stop_pc && ++hits >= stop_hit) break;
     reason = emulator.cpu().step();
     if (reason != ps2vita::StopReason::None) break;
-    if ((steps & 7u) == 7u) {
+    if ((steps % iop_divisor) == iop_divisor - 1u) {
       const auto& iop = emulator.iop().state();
       const auto iop_instruction = emulator.memory().iop_read32(iop.pc);
       iop_trace[iop_cursor++ % kTraceSize] = {iop.pc, iop_instruction,
           iop.gpr[2], iop.gpr[3], iop.gpr[4], iop.gpr[31]};
+      if (iop_stop_pc != 0u && iop.pc == iop_stop_pc) {
+        iop_stop_triggered = true;
+        break;
+      }
       if ((iop_instruction >> 26) == 0x28u) {
         const unsigned base = (iop_instruction >> 21) & 31u;
         const unsigned source = (iop_instruction >> 16) & 31u;
@@ -166,6 +180,19 @@ int main(int argc, char** argv) {
         const auto address = (iop.gpr[base] + offset) & 0x1FFFFFFFu;
         if (address == 0x1F801040u && iop_serial_output.size() < 16384u)
           iop_serial_output.push_back(static_cast<char>(iop.gpr[source]));
+      }
+      const unsigned iop_opcode = iop_instruction >> 26;
+      if (iop_opcode == 0x28u || iop_opcode == 0x29u ||
+          iop_opcode == 0x2Au || iop_opcode == 0x2Bu ||
+          iop_opcode == 0x2Eu) {
+        const unsigned base = (iop_instruction >> 21) & 31u;
+        const unsigned source = (iop_instruction >> 16) & 31u;
+        const auto offset = static_cast<std::int16_t>(iop_instruction);
+        const auto address = (iop.gpr[base] + offset) & 0x1FFFFFFFu;
+        if (address < 0x2000u) {
+          iop_low_store_trace[iop_low_store_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address, iop.gpr[source], 0u};
+        }
       }
       iop_reason = emulator.iop().step();
     }
@@ -183,6 +210,8 @@ int main(int argc, char** argv) {
   const auto& iop_state = emulator.iop().state();
   if (low_clear_triggered)
     std::puts("watch: physical low kernel stub at 80000700 was cleared");
+  if (iop_stop_triggered)
+    std::printf("watch: IOP reached %08X\n", iop_stop_pc);
   std::printf("steps=%llu reason=%s pc=%08X v0=%016llX a0=%016llX ra=%016llX\n",
       static_cast<unsigned long long>(steps), ps2vita::stop_reason_name(reason),
       state.pc, static_cast<unsigned long long>(state.gpr[2]),
@@ -219,22 +248,23 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(state.gpr[8]),
       static_cast<unsigned long long>(state.gpr[9]));
   std::printf("iop_cycles=%llu iop_reason=%s iop_pc=%08X iop_opcode=%08X "
-              "iop_v0=%08X iop_sp=%08X iop_ra=%08X\n",
+              "iop_v0=%08X iop_sp=%08X iop_ra=%08X iop_status=%08X\n",
       static_cast<unsigned long long>(iop_state.cycles),
       ps2vita::iop_stop_reason_name(iop_reason), iop_state.pc,
       emulator.memory().iop_read32(iop_state.pc), iop_state.gpr[2],
-      iop_state.gpr[29], iop_state.gpr[31]);
+      iop_state.gpr[29], iop_state.gpr[31], iop_state.cop0[12]);
   std::printf("iop_s0=%08X s1=%08X s2=%08X s8=%08X gp=%08X\n",
       iop_state.gpr[16], iop_state.gpr[17], iop_state.gpr[18],
       iop_state.gpr[30], iop_state.gpr[28]);
   std::printf("iop_intc_stat=%08X mask=%08X ctrl=%08X "
-              "t0_count=%08X mode=%08X target=%08X\n",
+              "t0_count=%08X mode=%08X target=%08X cache_ctrl=%08X\n",
       emulator.memory().iop_read32(0x1F801070u),
       emulator.memory().iop_read32(0x1F801074u),
       emulator.memory().iop_read32(0x1F801078u),
       emulator.memory().iop_read32(0x1F801100u),
       emulator.memory().iop_read32(0x1F801104u),
-      emulator.memory().iop_read32(0x1F801108u));
+      emulator.memory().iop_read32(0x1F801108u),
+      emulator.memory().iop_read32(0x1FFE0130u));
   std::puts("written TLB entries:");
   for (unsigned index = 0; index < 48u; ++index) {
     std::uint32_t mask = 0, hi = 0, lo0 = 0, lo1 = 0;
@@ -249,6 +279,22 @@ int main(int argc, char** argv) {
             emulator.memory().read64(0x80000000u + address)),
         static_cast<unsigned long long>(
             emulator.memory().read64(0x80000008u + address)));
+  }
+  std::puts("IOP RAM 000003C0..0000041F:");
+  for (std::uint32_t address = 0x3C0u; address < 0x420u; address += 16u) {
+    std::printf("%08X  %08X %08X %08X %08X\n", address,
+        emulator.memory().iop_read32(address),
+        emulator.memory().iop_read32(address + 4u),
+        emulator.memory().iop_read32(address + 8u),
+        emulator.memory().iop_read32(address + 12u));
+  }
+  std::puts("IOP RAM 00000000..0000017F:");
+  for (std::uint32_t address = 0u; address < 0x180u; address += 16u) {
+    std::printf("%08X  %08X %08X %08X %08X\n", address,
+        emulator.memory().iop_read32(address),
+        emulator.memory().iop_read32(address + 4u),
+        emulator.memory().iop_read32(address + 8u),
+        emulator.memory().iop_read32(address + 12u));
   }
   const std::size_t count = cursor < kTraceSize ? cursor : kTraceSize;
   const std::size_t first = cursor < kTraceSize ? 0 : cursor % kTraceSize;
@@ -323,6 +369,19 @@ int main(int argc, char** argv) {
                   static_cast<unsigned long long>(item.value_lo));
     }
   }
+  if (iop_low_store_cursor != 0) {
+    std::puts("recent IOP stores to low RAM:");
+    const std::size_t store_count =
+        iop_low_store_cursor < kTraceSize ? iop_low_store_cursor : kTraceSize;
+    const std::size_t store_first = iop_low_store_cursor < kTraceSize
+        ? 0 : iop_low_store_cursor % kTraceSize;
+    for (std::size_t i = 0; i < store_count; ++i) {
+      const auto& item = iop_low_store_trace[(store_first + i) % kTraceSize];
+      std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
+                  item.instruction, item.address,
+                  static_cast<unsigned long long>(item.value_lo));
+    }
+  }
   if (!serial_output.empty()) {
     std::puts("EE serial output:");
     std::fwrite(serial_output.data(), 1, serial_output.size(), stdout);
@@ -333,5 +392,5 @@ int main(int argc, char** argv) {
     std::fwrite(iop_serial_output.data(), 1, iop_serial_output.size(), stdout);
     if (iop_serial_output.back() != '\n') std::putchar('\n');
   }
-  return state.pc == stop_pc ? 0 : 1;
+  return state.pc == stop_pc || iop_stop_triggered ? 0 : 1;
 }

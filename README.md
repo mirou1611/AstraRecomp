@@ -15,7 +15,8 @@ register, memory, PC, cycle, and stop state agree. A second probe shows
 JAL/delay-slot/`jr $ra` sequence.
 
 It now executes a user-supplied retail BIOS through EE hardware initialization,
-relocation into RAM, and the first IOP/SIF boot synchronization. It does **not yet
+relocation into RAM, IOP reset-ROM startup, and the BIOS `Initialize Done` stage.
+It does **not yet
 render the PS2 startup or run retail games**. Those require deeper IOP, DMA,
 interrupt, GIF/GS, SPU2, and disc emulation described in the roadmap. The existing
 core is real BIOS execution, not a renamed frontend or a fake compatibility screen.
@@ -35,6 +36,8 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 - 64 KiB EE MMIO window with initial INTC/DMAC and Timer 0 semantics
 - EE-visible GS privileged-register aperture at `0x12000000`
 - 2 MiB IOP RAM mirrored through the EE-visible 8 MiB IOP window
+- Portable R3000A IOP interpreter with branch/load delays, exceptions, and
+  reset-ROM cache-isolation behavior
 - PS2-compatible null-bus behavior for uninstalled high memory
 - Initial EE-visible IOP hardware register window at `0x1F801000`
 - EE TLB translation with paired pages, variable page masks, and TLB instructions
