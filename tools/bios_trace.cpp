@@ -383,6 +383,30 @@ int main(int argc, char** argv) {
       emulator.memory().iop_read32(sif0_madr + 20u),
       emulator.memory().iop_read32(sif0_madr + 24u),
       emulator.memory().iop_read32(sif0_madr + 28u));
+  std::puts("delivered SIF0 packet EE 000935C0 / IOP source 00019870:");
+  for (std::uint32_t offset = 0u; offset < 0x40u; offset += 16u) {
+    std::printf("EE %08X  %08X %08X %08X %08X   IOP %08X  %08X %08X %08X %08X\n",
+        0x000935C0u + offset,
+        emulator.memory().read32(0x000935C0u + offset),
+        emulator.memory().read32(0x000935C4u + offset),
+        emulator.memory().read32(0x000935C8u + offset),
+        emulator.memory().read32(0x000935CCu + offset),
+        0x00019870u + offset,
+        emulator.memory().iop_read32(0x00019870u + offset),
+        emulator.memory().iop_read32(0x00019874u + offset),
+        emulator.memory().iop_read32(0x00019878u + offset),
+        emulator.memory().iop_read32(0x0001987Cu + offset));
+  }
+  std::puts("EE wait/SIF routines 8000FDE8 and 800125C0:");
+  for (const auto base : {0x8000FDE8u, 0x800125C0u}) {
+    for (std::uint32_t offset = 0u; offset < 0xC0u; offset += 16u) {
+      std::printf("%08X  %08X %08X %08X %08X\n", base + offset,
+          emulator.memory().read32(base + offset),
+          emulator.memory().read32(base + offset + 4u),
+          emulator.memory().read32(base + offset + 8u),
+          emulator.memory().read32(base + offset + 12u));
+    }
+  }
   std::puts("written TLB entries:");
   for (unsigned index = 0; index < 48u; ++index) {
     std::uint32_t mask = 0, hi = 0, lo0 = 0, lo1 = 0;

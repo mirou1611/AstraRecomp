@@ -306,7 +306,9 @@ void test_sif0_dma_reply() {
 void test_iop_timer5_deadlines() {
   ps2vita::Memory memory;
   memory.iop_write32(0x1F8014A8u, 5u);
-  memory.iop_write32(0x1F8014A4u, 0x70u);
+  memory.iop_write16(0x1F8014A4u, 0x70u);
+  check((memory.iop_read16(0x1F8014A4u) & 0x400u) != 0u,
+        "IOP Timer 5 halfword mode writes arm the interrupt latch");
   memory.iop_write32(0x1F801074u, 1u << 16);
   memory.iop_write32(0x1F801078u, 1u);
   memory.advance(39u);

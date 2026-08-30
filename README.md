@@ -102,8 +102,8 @@ PS2 ELF / user BIOS
   completion flags and EE/IOP external-interrupt entry
 - Cycle-scheduled SIF0 IOP-to-EE reply DMA with tagged destination delivery,
   quadword padding, completion state, and interrupt wakeup
-- Master-cycle-driven 32-bit IOP Timer 5 with clock prescaling, target and
-  overflow deadlines, mode acknowledgement, and INTC bit 16 delivery
+- Master-cycle-driven 32-bit IOP Timer 5 with 16/32-bit register access,
+  clock prescaling, pulsed-repeat target/overflow IRQs, and INTC bit 16 delivery
 - Absent development-board debug aperture with retail-style null-device behavior
 - Portable EE interpreter foundation with 128-bit GPR storage
 - Fixed-size decoded EE block cache with delay-slot boundaries, hotness tracking,

@@ -443,6 +443,10 @@ void Memory::advance(std::uint32_t cycles) {
   iop_cycle_remainder_ = static_cast<std::uint32_t>(total_iop_phase % 8u);
   if (iop_cycles != 0u) {
     auto mode = raw_iop(0x04A4u);
+    // Pulsed repeat mode rearms shortly after an interrupt. Advancing to the
+    // next IOP cycle is a deterministic approximation of that hardware pulse.
+    if ((mode & 0x40u) != 0u && (mode & 0x80u) == 0u)
+      mode |= 0x400u;
     if ((mode & 1u) == 0u) { // No gate: count from the selected clock source.
       static constexpr std::uint32_t rates[4] = {1u, 8u, 16u, 256u};
       const auto rate = rates[(mode >> 13) & 3u];
@@ -458,23 +462,32 @@ void Memory::advance(std::uint32_t cycles) {
             old_count < target && expanded >= target;
         const bool overflowed = expanded > UINT32_MAX;
         auto new_count = static_cast<std::uint32_t>(expanded);
-        if (target_reached) {
-          mode |= 0x800u;
-          if ((mode & 0x10u) != 0u && (mode & 0x400u) != 0u)
+        const auto fire_interrupt = [&](std::uint32_t flag) {
+          if ((mode & 0x400u) == 0u) return;
+          const bool repeat = (mode & 0x40u) != 0u;
+          const bool toggle = (mode & 0x80u) != 0u;
+          if (repeat || (mode & flag) == 0u)
             store_iop(0x0070u, raw_iop(0x0070u) | (1u << 16));
-          if ((mode & 0x40u) == 0u)
-            mode &= ~0x400u;
+          if (repeat || toggle) {
+            if (toggle)
+              mode ^= 0x400u;
+            else
+              mode &= ~0x400u;
+          }
+        };
+        if (target_reached) {
+          if ((mode & 0x10u) != 0u)
+            fire_interrupt(0x800u);
+          mode |= 0x800u;
           if ((mode & 0x08u) != 0u && target != 0u)
             new_count = static_cast<std::uint32_t>(expanded % target);
           else
             timer5_target_future_ = true;
         }
         if (overflowed) {
+          if ((mode & 0x20u) != 0u)
+            fire_interrupt(0x1000u);
           mode |= 0x1000u;
-          if ((mode & 0x20u) != 0u && (mode & 0x400u) != 0u)
-            store_iop(0x0070u, raw_iop(0x0070u) | (1u << 16));
-          if ((mode & 0x40u) == 0u)
-            mode &= ~0x400u;
           timer5_target_future_ = false;
         }
         store_iop(0x04A0u, new_count);
@@ -743,6 +756,22 @@ void Memory::iop_write8(std::uint32_t address, std::uint8_t value) {
 }
 
 void Memory::iop_write16(std::uint32_t address, std::uint16_t value) {
+  const auto p = address & 0x1FFFFFFFu;
+  if (p == 0x1F8014A4u) {
+    const auto offset = static_cast<std::size_t>(p - 0x1F801000u);
+    const auto current = static_cast<std::uint16_t>(iop_hw_[offset]) |
+        (static_cast<std::uint16_t>(iop_hw_[offset + 1u]) << 8);
+    auto flags = static_cast<std::uint16_t>(current & 0x1C00u);
+    const bool active_event = (current & 0x1800u) != 0u &&
+        (current & 0x30u) != 0u;
+    if (!active_event)
+      flags = 0x400u;
+    value = static_cast<std::uint16_t>((value & 0x63FFu) | flags);
+    iop_hw_[0x04A0u] = iop_hw_[0x04A1u] = 0u;
+    iop_hw_[0x04A2u] = iop_hw_[0x04A3u] = 0u;
+    timer5_prescale_remainder_ = 0u;
+    timer5_target_future_ = false;
+  }
   iop_write8(address, static_cast<std::uint8_t>(value));
   iop_write8(address + 1u, static_cast<std::uint8_t>(value >> 8));
 }
@@ -794,7 +823,9 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
         (static_cast<std::uint32_t>(iop_hw_[offset + 2u]) << 16) |
         (static_cast<std::uint32_t>(iop_hw_[offset + 3u]) << 24);
     auto flags = current & 0x1C00u;
-    if ((flags & 0x1800u) == 0u)
+    const bool active_event = (current & 0x1800u) != 0u &&
+        (current & 0x30u) != 0u;
+    if (!active_event)
       flags = 0x400u;
     value = (value & 0x63FFu) | flags;
     iop_hw_[0x04A0u] = iop_hw_[0x04A1u] = 0u;
@@ -806,8 +837,10 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
   } else if (p == 0x1F8014A8u) {
     timer5_target_future_ = value <= iop_read32(0x1F8014A0u);
   }
-  iop_write16(address, static_cast<std::uint16_t>(value));
-  iop_write16(address + 2u, static_cast<std::uint16_t>(value >> 16));
+  iop_write8(address, static_cast<std::uint8_t>(value));
+  iop_write8(address + 1u, static_cast<std::uint8_t>(value >> 8));
+  iop_write8(address + 2u, static_cast<std::uint8_t>(value >> 16));
+  iop_write8(address + 3u, static_cast<std::uint8_t>(value >> 24));
 }
 
 bool Memory::copy_in(std::uint32_t address, const void* source, std::size_t size) {

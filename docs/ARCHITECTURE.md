@@ -56,7 +56,9 @@ padding, before raising EE DMAC channel 5 and the shared IOP DMA interrupt.
 IOP Timer 5 shares this deterministic master timeline. A persistent 8:1 phase
 converts EE cycles to IOP cycles, then the selected 1/8/16/256 prescaler drives
 32-bit target and overflow events. Mode reads acknowledge event flags and rearm
-the timer's internal interrupt latch; eligible events raise IOP INTC bit 16.
+the timer's internal interrupt latch; pulsed-repeat mode drops and rearms that
+latch on later counter synchronization. Both halfword and word mode writes use
+the same device semantics, and eligible events raise IOP INTC bit 16.
 
 This keeps four concerns separate:
 
