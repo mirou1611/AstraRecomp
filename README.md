@@ -192,8 +192,9 @@ Use a dump from hardware you own as permitted by your local law.
 
 See [docs/PS2RECOMP_INTEGRATION.md](docs/PS2RECOMP_INTEGRATION.md) for the
 Phase-0 frontend boundary, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for core
-design boundaries, and [docs/ROADMAP.md](docs/ROADMAP.md) for the route from this
-milestone to games.
+design boundaries, [docs/BIOS_OPCODE_PROFILE.md](docs/BIOS_OPCODE_PROFILE.md) for
+the measured EE/IOP optimization priorities, and
+[docs/ROADMAP.md](docs/ROADMAP.md) for the route from this milestone to games.
 
 ## License
 

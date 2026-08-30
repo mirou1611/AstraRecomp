@@ -1,11 +1,14 @@
 #include "ps2vita/emulator.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -44,6 +47,91 @@ struct StoreEntry {
 
 std::uint32_t parse_address(const char* text) {
   return static_cast<std::uint32_t>(std::strtoul(text, nullptr, 0));
+}
+
+// Group encodings at the same boundaries used by the interpreters. This keeps
+// immediates and register choices from fragmenting the profile while retaining
+// the SPECIAL, REGIMM, COP and MMI selectors that decide implementation work.
+std::uint16_t opcode_family(std::uint32_t instruction) {
+  const auto primary = static_cast<std::uint16_t>(instruction >> 26);
+  std::uint16_t selector = 0;
+  if (primary == 0u || primary == 0x1Cu)
+    selector = static_cast<std::uint16_t>(instruction & 0x3Fu);
+  else if (primary == 1u)
+    selector = static_cast<std::uint16_t>((instruction >> 16) & 0x1Fu);
+  else if (primary >= 0x10u && primary <= 0x12u) {
+    const auto rs = static_cast<std::uint16_t>((instruction >> 21) & 0x1Fu);
+    selector = rs == 0x10u
+        ? static_cast<std::uint16_t>(0x20u | (instruction & 0x1Fu)) : rs;
+  }
+  return static_cast<std::uint16_t>((primary << 6) | selector);
+}
+
+std::string opcode_family_name(std::uint16_t family) {
+  static constexpr const char* primary_names[64] = {
+      "SPECIAL", "REGIMM", "J", "JAL", "BEQ", "BNE", "BLEZ", "BGTZ",
+      "ADDI", "ADDIU", "SLTI", "SLTIU", "ANDI", "ORI", "XORI", "LUI",
+      "COP0", "COP1", "COP2", "COP3", "BEQL", "BNEL", "BLEZL", "BGTZL",
+      "DADDI", "DADDIU", "LDL", "LDR", "MMI", "UNASSIGNED_1D",
+      "LQ", "SQ", "LB", "LH", "LWL", "LW", "LBU", "LHU", "LWR", "LWU",
+      "SB", "SH", "SWL", "SW", "SDL", "SDR", "SWR", "CACHE",
+      "LL", "LWC1", "LWC2", "PREF", "LLD", "LDC1", "LQC2", "LD",
+      "SC", "SWC1", "SWC2", "UNASSIGNED_3B", "SCD", "SDC1", "SQC2", "SD"};
+  const auto primary = static_cast<unsigned>(family >> 6);
+  const auto selector = static_cast<unsigned>(family & 0x3Fu);
+  if (primary == 0u) {
+    static constexpr const char* special_names[64] = {
+        "SLL/NOP", nullptr, "SRL", "SRA", "SLLV", nullptr, "SRLV", "SRAV",
+        "JR", "JALR", "MOVZ", "MOVN", "SYSCALL", "BREAK", nullptr, "SYNC",
+        "MFHI", "MTHI", "MFLO", "MTLO", "DSLLV", nullptr, "DSRLV", "DSRAV",
+        "MULT", "MULTU", "DIV", "DIVU", nullptr, nullptr, nullptr, nullptr,
+        "ADD", "ADDU", "SUB", "SUBU", "AND", "OR", "XOR", "NOR",
+        "MFSA", "MTSA", "SLT", "SLTU", "DADD", "DADDU", "DSUB", "DSUBU",
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+        "DSLL", nullptr, "DSRL", "DSRA", "DSLL32", nullptr, "DSRL32", "DSRA32"};
+    if (special_names[selector]) return special_names[selector];
+  }
+  if (primary == 1u) {
+    static constexpr const char* regimm_names[32] = {
+        "BLTZ", "BGEZ", "BLTZL", "BGEZL", nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+        "BLTZAL", "BGEZAL", "BLTZALL", "BGEZALL"};
+    if (regimm_names[selector]) return regimm_names[selector];
+  }
+  if (primary == 0x1Cu && selector == 0x29u) return "PCPYUD";
+  std::string name = primary_names[primary];
+  if (primary == 0u || primary == 1u || primary == 0x1Cu ||
+      (primary >= 0x10u && primary <= 0x12u)) {
+    char suffix[8]{};
+    std::snprintf(suffix, sizeof(suffix), "/%02X", selector);
+    name += suffix;
+  }
+  return name;
+}
+
+void print_opcode_profile(const char* processor,
+                          const std::array<std::uint64_t, 4096>& counts,
+                          std::uint64_t total) {
+  std::vector<std::pair<std::uint64_t, std::uint16_t>> ranked;
+  for (std::uint16_t family = 0; family < counts.size(); ++family) {
+    if (counts[family] != 0u) ranked.emplace_back(counts[family], family);
+  }
+  std::sort(ranked.begin(), ranked.end(), [](const auto& left,
+                                              const auto& right) {
+    return left.first != right.first ? left.first > right.first
+                                     : left.second < right.second;
+  });
+  std::printf("%s dynamic opcode families (top 24 of %zu, total=%llu):\n",
+      processor, ranked.size(), static_cast<unsigned long long>(total));
+  const auto limit = std::min<std::size_t>(ranked.size(), 24u);
+  for (std::size_t i = 0; i < limit; ++i) {
+    const auto percent = total == 0u ? 0.0
+        : 100.0 * static_cast<double>(ranked[i].first) /
+              static_cast<double>(total);
+    std::printf("%2zu %-16s %12llu %6.2f%%\n", i + 1,
+        opcode_family_name(ranked[i].second).c_str(),
+        static_cast<unsigned long long>(ranked[i].first), percent);
+  }
 }
 
 } // namespace
@@ -99,6 +187,10 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> iop_cdvd_trace{};
   std::array<StoreEntry, kTraceSize> iop_scmd_trace{};
   std::array<std::uint64_t, 256> iop_scmd_counts{};
+  std::array<std::uint64_t, 4096> ee_opcode_counts{};
+  std::array<std::uint64_t, 4096> iop_opcode_counts{};
+  std::uint64_t ee_profile_total = 0;
+  std::uint64_t iop_profile_total = 0;
   std::size_t cursor = 0;
   std::size_t iop_cursor = 0;
   std::size_t cache_cursor = 0;
@@ -128,6 +220,16 @@ int main(int argc, char** argv) {
   for (; steps < max_steps; ++steps) {
     const auto& state = emulator.cpu().state();
     const auto instruction = emulator.memory().read32(state.pc);
+    const auto ee_lines = emulator.memory().ee_interrupt_lines();
+    const auto ee_status = state.cop0[12];
+    const bool ee_takes_interrupt = ee_lines != 0u &&
+        (ee_status & ee_lines) != 0u &&
+        (ee_status & 0x00010001u) == 0x00010001u &&
+        (ee_status & 0x00000006u) == 0u;
+    if (!ee_takes_interrupt) {
+      ++ee_opcode_counts[opcode_family(instruction)];
+      ++ee_profile_total;
+    }
     trace[cursor++ % kTraceSize] = {
         state.pc, instruction, state.gpr[2],
         state.gpr[4], state.gpr[31]};
@@ -195,6 +297,12 @@ int main(int argc, char** argv) {
     if ((steps % iop_divisor) == iop_divisor - 1u) {
       const auto& iop = emulator.iop().state();
       const auto iop_instruction = emulator.memory().iop_read32(iop.pc);
+      const bool iop_takes_interrupt = emulator.memory().iop_interrupt_pending() &&
+          (iop.cop0[12] & 0x00000401u) == 0x00000401u;
+      if (!iop_takes_interrupt) {
+        ++iop_opcode_counts[opcode_family(iop_instruction)];
+        ++iop_profile_total;
+      }
       iop_trace[iop_cursor++ % kTraceSize] = {iop.pc, iop_instruction,
           iop.gpr[2], iop.gpr[3], iop.gpr[4], iop.gpr[31]};
       if (iop_stop_pc != 0u && iop.pc == iop_stop_pc) {
@@ -633,6 +741,8 @@ int main(int argc, char** argv) {
     std::printf("%08X command=%02llX\n", entry.pc,
         static_cast<unsigned long long>(entry.value_lo));
   }
+  print_opcode_profile("EE", ee_opcode_counts, ee_profile_total);
+  print_opcode_profile("IOP", iop_opcode_counts, iop_profile_total);
   if (!serial_output.empty()) {
     std::puts("EE serial output:");
     std::fwrite(serial_output.data(), 1, serial_output.size(), stdout);
