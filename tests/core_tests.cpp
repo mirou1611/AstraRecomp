@@ -366,6 +366,36 @@ void test_cdvd_reset_status() {
         "CDVD ReadConfig exposes a bounded sixteen-byte result");
 }
 
+void test_video_vblank_deadlines() {
+  ps2vita::Memory memory;
+  memory.write32(0x1000F010u, (1u << 2) | (1u << 3));
+  memory.iop_write32(0x1F801074u, (1u << 0) | (1u << 11));
+  memory.iop_write32(0x1F801078u, 1u);
+
+  memory.advance(4498395u);
+  check((memory.read32(0x1000F000u) & 0xCu) == 0u &&
+        !memory.iop_interrupt_pending(),
+        "VBlank start remains quiet before its NTSC field deadline");
+  memory.advance(1u);
+  check((memory.read32(0x1000F000u) & (1u << 2)) != 0u &&
+        (memory.ee_interrupt_lines() & 0x400u) != 0u &&
+        (memory.iop_read32(0x1F801070u) & 1u) != 0u &&
+        memory.iop_interrupt_pending(),
+        "VBlank start raises the EE and IOP interrupt lines together");
+
+  memory.write32(0x1000F000u, 1u << 2);
+  memory.iop_write32(0x1F801070u, ~std::uint32_t{1u});
+  memory.advance(421723u);
+  check((memory.read32(0x1000F000u) & (1u << 3)) == 0u &&
+        !memory.iop_interrupt_pending(),
+        "VBlank end remains quiet before the blanking deadline");
+  memory.advance(1u);
+  check((memory.read32(0x1000F000u) & (1u << 3)) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 11)) != 0u &&
+        memory.iop_interrupt_pending(),
+        "VBlank end raises both interrupt controllers at its deadline");
+}
+
 void test_exception_entry_and_eret() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -1235,6 +1265,7 @@ int main() {
   test_sif0_dma_reply();
   test_iop_timer5_deadlines();
   test_cdvd_reset_status();
+  test_video_vblank_deadlines();
   test_exception_entry_and_eret();
   test_cop0_count_advances();
   test_di_ei_status();

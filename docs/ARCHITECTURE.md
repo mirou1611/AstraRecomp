@@ -64,6 +64,10 @@ code sees a no-disc reset state and exchanges parameters/results through the
 physical secondary-command registers. Configuration commands use bounded
 16-byte FIFOs; disc media, seek timing, RTC, and persistent NVRAM remain explicit
 future device layers rather than being hidden behind IOP module HLE.
+Video field timing is also master-cycle-driven. The initial NTSC phase preserves
+the exact 59.94 Hz rational remainder across fields, raises VBlank start/end in
+both EE and IOP interrupt controllers, and remains independent of host rendering
+or frontend frame pacing.
 
 This keeps four concerns separate:
 

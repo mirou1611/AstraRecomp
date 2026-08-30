@@ -5,6 +5,16 @@
 
 namespace ps2vita {
 
+namespace {
+// The BIOS configures NTSC interlace. These integer deadlines follow the
+// 294.912 MHz EE clock at 59.94 fields/s and PCSX2's measured 22.5-scanline
+// VBlank interval. A rational remainder corrects the fractional field cycle.
+constexpr std::uint32_t kNtscRenderCycles = 4498396u;
+constexpr std::uint32_t kNtscVblankCycles = 421724u;
+constexpr std::uint32_t kNtscFieldRemainder = 360u;
+constexpr std::uint32_t kNtscFieldDivisor = 2997u;
+} // namespace
+
 Memory::Memory()
     : ram_(kRamSize, 0), bios_(kBiosSize, 0), scratch_(kScratchSize, 0),
       hw_(kHwSize, 0), gs_hw_(kGsHwSize, 0), vu_mem_(kVuSize, 0),
@@ -110,6 +120,9 @@ void Memory::clear() {
   cdvd_config_offset_ = 0;
   cdvd_config_blocks_ = 0;
   cdvd_config_index_ = 0;
+  video_cycles_remaining_ = kNtscRenderCycles;
+  video_field_remainder_ = 0;
+  video_in_vblank_ = false;
   iop_cycle_remainder_ = 0;
   timer5_prescale_remainder_ = 0;
   timer5_target_future_ = false;
@@ -443,6 +456,30 @@ void Memory::advance(std::uint32_t cycles) {
     iop_hw_[offset + 2] = static_cast<std::uint8_t>(value >> 16);
     iop_hw_[offset + 3] = static_cast<std::uint8_t>(value >> 24);
   };
+
+  // Drive the video field phase from EE master cycles. VBlank start/end are
+  // independent hardware edges observed by both interrupt controllers.
+  auto video_cycles = cycles;
+  while (video_cycles >= video_cycles_remaining_) {
+    video_cycles -= video_cycles_remaining_;
+    if (!video_in_vblank_) {
+      video_in_vblank_ = true;
+      video_cycles_remaining_ = kNtscVblankCycles;
+      store_ee(0xF000u, raw_ee(0xF000u) | (1u << 2));
+      store_iop(0x0070u, raw_iop(0x0070u) | (1u << 0));
+    } else {
+      video_in_vblank_ = false;
+      video_cycles_remaining_ = kNtscRenderCycles;
+      video_field_remainder_ += kNtscFieldRemainder;
+      if (video_field_remainder_ >= kNtscFieldDivisor) {
+        video_field_remainder_ -= kNtscFieldDivisor;
+        ++video_cycles_remaining_;
+      }
+      store_ee(0xF000u, raw_ee(0xF000u) | (1u << 3));
+      store_iop(0x0070u, raw_iop(0x0070u) | (1u << 11));
+    }
+  }
+  video_cycles_remaining_ -= video_cycles;
 
   // IOP Timer 5 is driven from the same EE master-cycle timeline as DMA.
   // The scheduler executes one IOP cycle per eight EE cycles and preserves

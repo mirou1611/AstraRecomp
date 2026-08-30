@@ -97,6 +97,8 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> iop_sbus_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_dma_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_cdvd_trace{};
+  std::array<StoreEntry, kTraceSize> iop_scmd_trace{};
+  std::array<std::uint64_t, 256> iop_scmd_counts{};
   std::size_t cursor = 0;
   std::size_t iop_cursor = 0;
   std::size_t cache_cursor = 0;
@@ -109,6 +111,8 @@ int main(int argc, char** argv) {
   std::size_t iop_sbus_store_cursor = 0;
   std::size_t iop_dma_store_cursor = 0;
   std::size_t iop_cdvd_cursor = 0;
+  std::size_t iop_scmd_cursor = 0;
+  unsigned last_iop_scmd = 256u;
   std::vector<char> serial_output;
   serial_output.reserve(16384);
   std::vector<char> iop_serial_output;
@@ -233,6 +237,15 @@ int main(int argc, char** argv) {
         if (address >= 0x1F402000u && address < 0x1F402100u) {
           iop_cdvd_trace[iop_cdvd_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
+          if (address == 0x1F402016u) {
+            const auto command = iop.gpr[source] & 0xFFu;
+            ++iop_scmd_counts[command];
+            if (command != last_iop_scmd) {
+              iop_scmd_trace[iop_scmd_cursor++ % kTraceSize] = {
+                  iop.pc, iop_instruction, address, command, 0u};
+              last_iop_scmd = command;
+            }
+          }
         }
         if ((address >= 0x1F801070u && address < 0x1F801080u) ||
             (address >= 0x1F8010F0u && address < 0x1F801100u) ||
@@ -602,6 +615,22 @@ int main(int argc, char** argv) {
     const auto& entry = iop_cdvd_trace[(cdvd_start + i) % kTraceSize];
     std::printf("%08X  %08X  address=%08X value=%08llX\n",
         entry.pc, entry.instruction, entry.address,
+        static_cast<unsigned long long>(entry.value_lo));
+  }
+  std::puts("IOP CDVD SCMD histogram:");
+  for (unsigned command = 0; command < iop_scmd_counts.size(); ++command) {
+    if (iop_scmd_counts[command] != 0u)
+      std::printf("%02X=%llu ", command,
+          static_cast<unsigned long long>(iop_scmd_counts[command]));
+  }
+  std::putchar('\n');
+  std::puts("IOP CDVD SCMD transitions:");
+  const auto scmd_count = std::min(iop_scmd_cursor, kTraceSize);
+  const auto scmd_start = iop_scmd_cursor >= kTraceSize
+      ? iop_scmd_cursor % kTraceSize : 0u;
+  for (std::size_t i = 0; i < scmd_count; ++i) {
+    const auto& entry = iop_scmd_trace[(scmd_start + i) % kTraceSize];
+    std::printf("%08X command=%02llX\n", entry.pc,
         static_cast<unsigned long long>(entry.value_lo));
   }
   if (!serial_output.empty()) {

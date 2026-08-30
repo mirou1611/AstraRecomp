@@ -106,6 +106,8 @@ PS2 ELF / user BIOS
   clock prescaling, pulsed-repeat target/overflow IRQs, and INTC bit 16 delivery
 - Initial no-disc CDVD device state with N-READY/status registers and bounded
   OpenConfig/ReadConfig/WriteConfig/CloseConfig secondary-command transport
+- Deterministic 59.94 Hz NTSC field phase with fractional-cycle correction and
+  synchronized EE/IOP VBlank start and end interrupts
 - Absent development-board debug aperture with retail-style null-device behavior
 - Portable EE interpreter foundation with 128-bit GPR storage
 - Fixed-size decoded EE block cache with delay-slot boundaries, hotness tracking,

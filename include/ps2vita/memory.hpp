@@ -119,6 +119,9 @@ private:
   std::uint8_t cdvd_config_offset_ = 0;
   std::uint8_t cdvd_config_blocks_ = 0;
   std::uint8_t cdvd_config_index_ = 0;
+  std::uint32_t video_cycles_remaining_ = 0;
+  std::uint32_t video_field_remainder_ = 0;
+  bool video_in_vblank_ = false;
   std::uint32_t iop_cycle_remainder_ = 0;
   std::uint32_t timer5_prescale_remainder_ = 0;
   bool timer5_target_future_ = false;
