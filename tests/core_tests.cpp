@@ -118,6 +118,16 @@ void test_bios_mapping_and_boot() {
         "BIOS boot seeds EE FPU reset state");
   check(emulator.cpu().step() == ps2vita::StopReason::None, "first BIOS instruction executes");
   check(emulator.cpu().state().gpr[2] == 42, "BIOS-mapped instruction result");
+
+  ps2vita::Emulator scheduled;
+  check(scheduled.load_bios(bios.data(), bios.size()) && scheduled.boot_bios(),
+        "scheduler test BIOS boots");
+  check(scheduled.run_slice(7) == ps2vita::StopReason::StepLimit &&
+        scheduled.iop().state().cycles == 0,
+        "BIOS scheduler waits eight EE cycles before stepping IOP");
+  check(scheduled.run_slice(1) == ps2vita::StopReason::StepLimit &&
+        scheduled.iop().state().cycles == 1,
+        "BIOS scheduler preserves the EE-to-IOP phase across slices");
 }
 
 void test_iop_memory_and_cpu() {

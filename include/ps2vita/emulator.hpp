@@ -35,6 +35,7 @@ private:
   IopCpu iop_;
   Gs gs_;
   ElfLoadResult image_{};
+  std::uint32_t ee_cycles_until_iop_ = 8u;
   bool ready_ = false;
 };
 

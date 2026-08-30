@@ -18,6 +18,7 @@ Emulator::Emulator() : memory_(), cpu_(memory_), iop_(memory_) {}
 ElfLoadResult Emulator::load_elf(const void* data, std::size_t size) {
   memory_.clear();
   image_ = load_elf32(data, size, memory_);
+  ee_cycles_until_iop_ = 8u;
   ready_ = image_.ok;
   if (ready_) { cpu_.reset(image_.entry); cpu_.set_exception_mode(false); }
   return image_;
@@ -34,6 +35,7 @@ bool Emulator::boot_bios() {
   ready_ = true;
   cpu_.reset(0xBFC00000u);
   iop_.reset();
+  ee_cycles_until_iop_ = 8u;
   set_bios_reset_state(cpu_.state());
   cpu_.set_exception_mode(true);
   return true;
@@ -41,12 +43,30 @@ bool Emulator::boot_bios() {
 
 StopReason Emulator::run_slice(std::uint32_t instructions) {
   if (!ready_) return StopReason::Halted;
-  const auto result = cpu_.run(instructions);
-  if (!image_.ok) iop_.run((instructions + 7u) / 8u);
-  return result;
+  if (image_.ok) return cpu_.run(instructions);
+
+  std::uint32_t remaining = instructions;
+  while (remaining != 0u) {
+    const auto budget = remaining < ee_cycles_until_iop_
+        ? remaining : ee_cycles_until_iop_;
+    const auto cycles_before = cpu_.state().cycles;
+    const auto result = cpu_.run(budget);
+    const auto executed = static_cast<std::uint32_t>(
+        cpu_.state().cycles - cycles_before);
+    remaining -= executed;
+    ee_cycles_until_iop_ -= executed;
+    if (ee_cycles_until_iop_ == 0u) {
+      iop_.step();
+      ee_cycles_until_iop_ = 8u;
+    }
+    if (result != StopReason::StepLimit) return result;
+    if (executed == 0u) return StopReason::Halted;
+  }
+  return StopReason::StepLimit;
 }
 
 void Emulator::reset() {
+  ee_cycles_until_iop_ = 8u;
   if (image_.ok) { cpu_.reset(image_.entry); cpu_.set_exception_mode(false); }
   else if (memory_.has_bios()) {
     cpu_.reset(0xBFC00000u);

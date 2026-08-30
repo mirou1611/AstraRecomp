@@ -20,6 +20,8 @@ Vita controls -> scheduler -> EE frontend -> interpreter -> stop/debug state -> 
 Every frame executes a bounded slice of 25,000 instructions. This keeps input and
 the monitor responsive even when guest code loops forever. MIPS branch delay slots
 are represented explicitly rather than hidden in a host-language control flow.
+During BIOS execution the scheduler interleaves one IOP instruction after every
+eight EE instructions and preserves that phase across frontend slice boundaries.
 
 The interpreter is the architectural truth, not a temporary throwaway. Each EE
 instruction has one tested semantic implementation. The first execution tier now
