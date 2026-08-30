@@ -27,8 +27,18 @@ def main() -> None:
     parser.add_argument("--unsupported", action="store_true")
     parser.add_argument("--branches", action="store_true")
     parser.add_argument("--branches-bne", action="store_true")
+    parser.add_argument("--hot-scalars", action="store_true")
     args = parser.parse_args()
-    if args.branches_bne:
+    if args.hot_scalars:
+        payload = elf(0x8000, (
+            0x3C02ABCD,  # lui   v0, 0xabcd
+            0x34421234,  # ori   v0, v0, 0x1234
+            0x3083F0F0,  # andi  v1, a0, 0xf0f0
+            0x00434024,  # and   t0, v0, v1
+            0x0085482B,  # sltu  t1, a0, a1
+            0x0000000D,  # break
+        ))
+    elif args.branches_bne:
         payload = elf(0x7000, (
             0x14850003,  # bne   a0, a1, 0x7010
             0x24020001,  # addiu v0, zero, 1 (delay slot)
@@ -49,7 +59,7 @@ def main() -> None:
             0x0000000D,  # break
         ))
     elif args.unsupported:
-        payload = elf(0x5000, (0x34020001, 0x0000000D))  # ori: fallback boundary
+        payload = elf(0x5000, (0x38020001, 0x0000000D))  # xori: fallback boundary
     else:
         payload = elf(0x4000, (
             0x00851021,  # addu  v0, a0, a1

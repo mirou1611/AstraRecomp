@@ -1040,7 +1040,7 @@ void test_elf_and_emulator() {
 
 void test_phase0_aot_contract() {
   const auto& package = ps2vita::phase0_aot_package();
-  check(package.name != nullptr && package.entry_count == 14u,
+  check(package.name != nullptr && package.entry_count == 15u,
         "Phase-0 AOT package exposes sorted entry metadata");
   check(ps2vita::validate_aot_package(package).ok(),
         "Phase-0 AOT package passes metadata validation");
@@ -1204,6 +1204,58 @@ void test_phase0_aot_contract() {
             unsupported.target == 0x5000u && unsupported.instructions == 0u &&
             unsupported_state.pc == 0x5000u,
         "generated unsupported opcode exits exactly to the interpreter");
+
+  bool hot_scalar_matched = true;
+  for (unsigned iteration = 0; iteration < 32u; ++iteration) {
+    seed = seed * 1664525u + 1013904223u;
+    const std::uint64_t a0 = (static_cast<std::uint64_t>(seed) << 32) |
+                             (seed ^ 0xA5A5A5A5u);
+    seed = seed * 1664525u + 1013904223u;
+    const std::uint64_t a1 = (static_cast<std::uint64_t>(seed) << 32) |
+                             (seed ^ 0x5A5A5A5Au);
+
+    ps2vita::Memory interpreter_memory;
+    interpreter_memory.write32(0x8000u, 0x3C02ABCDu);
+    interpreter_memory.write32(0x8004u, 0x34421234u);
+    interpreter_memory.write32(0x8008u, 0x3083F0F0u);
+    interpreter_memory.write32(0x800Cu, 0x00434024u);
+    interpreter_memory.write32(0x8010u, 0x0085482Bu);
+    interpreter_memory.write32(0x8014u, 0x0000000Du);
+    ps2vita::Cpu interpreter(interpreter_memory);
+    interpreter.reset(0x8000u);
+    interpreter.state().gpr[4] = a0;
+    interpreter.state().gpr[5] = a1;
+    interpreter.state().gpr_hi[2] = 0x1111222233334444ull;
+    interpreter.state().gpr_hi[3] = 0x5555666677778888ull;
+    interpreter.state().gpr_hi[8] = 0x9999AAAABBBBCCCCull;
+    interpreter.state().gpr_hi[9] = 0xDDDDEEEEFFFF0000ull;
+    const auto interpreter_stop = interpreter.run(8u);
+
+    ps2vita::Memory generated_memory;
+    ps2vita::CpuState generated_state{};
+    generated_state.pc = 0x8000u;
+    generated_state.gpr[4] = a0;
+    generated_state.gpr[5] = a1;
+    generated_state.gpr_hi[2] = 0x1111222233334444ull;
+    generated_state.gpr_hi[3] = 0x5555666677778888ull;
+    generated_state.gpr_hi[8] = 0x9999AAAABBBBCCCCull;
+    generated_state.gpr_hi[9] = 0xDDDDEEEEFFFF0000ull;
+    const auto generated_exit = ps2vita::dispatch_aot(
+        package, generated_memory, generated_state, 2u);
+    hot_scalar_matched = hot_scalar_matched &&
+        interpreter_stop == generated_exit.reason &&
+        generated_exit.kind == ps2vita::AotExitKind::Stop &&
+        generated_exit.instructions == 6u &&
+        interpreter.state().pc == generated_state.pc &&
+        interpreter.state().cycles == generated_state.cycles;
+    for (const unsigned reg : {2u, 3u, 8u, 9u}) {
+      hot_scalar_matched = hot_scalar_matched &&
+          interpreter.state().gpr[reg] == generated_state.gpr[reg] &&
+          interpreter.state().gpr_hi[reg] == generated_state.gpr_hi[reg];
+    }
+  }
+  check(hot_scalar_matched,
+        "profile-guided scalar AOT families match seeded interpreter state");
 
   bool branch_matched = true;
   for (unsigned iteration = 0; iteration < 16u; ++iteration) {

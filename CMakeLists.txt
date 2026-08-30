@@ -19,6 +19,7 @@ set(ASTRART_MEMORY_ELF "${ASTRART_GENERATED_DIR}/aot-memory.elf")
 set(ASTRART_UNSUPPORTED_ELF "${ASTRART_GENERATED_DIR}/aot-unsupported.elf")
 set(ASTRART_BRANCH_ELF "${ASTRART_GENERATED_DIR}/aot-branch.elf")
 set(ASTRART_BNE_ELF "${ASTRART_GENERATED_DIR}/aot-bne.elf")
+set(ASTRART_HOT_SCALAR_ELF "${ASTRART_GENERATED_DIR}/aot-hot-scalars.elf")
 set(ASTRART_PHASE0_CPP "${ASTRART_GENERATED_DIR}/phase0_aot_package.cpp")
 add_custom_command(
   OUTPUT "${ASTRART_PHASE0_CPP}"
@@ -29,11 +30,13 @@ add_custom_command(
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_memory_elf.py" --unsupported "${ASTRART_UNSUPPORTED_ELF}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_memory_elf.py" --branches "${ASTRART_BRANCH_ELF}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_memory_elf.py" --branches-bne "${ASTRART_BNE_ELF}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_memory_elf.py" --hot-scalars "${ASTRART_HOT_SCALAR_ELF}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_astrart.py"
           --output "${ASTRART_PHASE0_CPP}"
           "${ASTRART_SMOKE_ELF}" "${ASTRART_CHAIN_ELF}"
           "${ASTRART_MEMORY_ELF}" "${ASTRART_UNSUPPORTED_ELF}"
           "${ASTRART_BRANCH_ELF}" "${ASTRART_BNE_ELF}"
+          "${ASTRART_HOT_SCALAR_ELF}"
   DEPENDS
     tools/generate_astrart.py
     tools/make_smoke_elf.py

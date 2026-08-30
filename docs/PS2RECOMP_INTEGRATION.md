@@ -78,14 +78,16 @@ fingerprint format, guest bounds, alignment, strict ordering, non-overlap, and
 callable function pointers. Invalid packages yield directly to the interpreter.
 Bounded dispatch performs this scan once before entering its native call loop.
 
-The generated Phase-0 package currently supports ADDIU, ADDU, LW, SW, J, JAL,
-JR, BEQ, BNE, legal data/NOP delay slots, BREAK, and explicit interpreter exits.
+The generated Phase-0 package currently supports ADDIU, ADDU, SLTU, AND, ANDI,
+ORI, LUI, LW, SW, J, JAL, JR, BEQ, BNE, legal supported-data/NOP delay slots,
+BREAK, and explicit interpreter exits.
 Reachable branch targets and fallthroughs become sorted, non-overlapping exact
-basic-block entries. Six redistributable ELF inputs generate 14 entries with a
+basic-block entries. Seven redistributable ELF inputs generate 15 entries with a
 length-delimited aggregate SHA-256 fingerprint. Seeded host tests cover arithmetic
-and memory values, both paths of BEQ/BNE, converging J blocks, call/return, and an
-unsupported ORI fallback at its exact PC. This small independent decoder is only
-the first AstraRT backend slice; PS2Recomp remains the broader analysis frontend.
+and memory values, the profile-guided scalar families with 64-bit edge inputs,
+both paths of BEQ/BNE, converging J blocks, call/return, and an unsupported XORI
+fallback at its exact PC. This small independent decoder is only the first
+AstraRT backend slice; PS2Recomp remains the broader analysis frontend.
 Generated LW/SW guards alignment and mapped ranges, yielding to the interpreter
 at the faulting PC before access. Fault-capable memory operations are not emitted
 inside delay slots until the runtime carries pending-branch exception context.

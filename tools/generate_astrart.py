@@ -74,12 +74,15 @@ def is_break(word: int) -> bool:
 def is_supported_data(word: int) -> bool:
     op = opcode(word)
     function = word & 0x3F
-    return word == 0 or op in (0x09, 0x23, 0x2B) or (op == 0 and function == 0x21)
+    return (
+        word == 0
+        or op in (0x09, 0x0C, 0x0D, 0x0F, 0x23, 0x2B)
+        or (op == 0 and function in (0x21, 0x24, 0x2B))
+    )
 
 
 def is_supported_delay(word: int) -> bool:
-    op = opcode(word)
-    return word == 0 or op == 0x09 or (op == 0 and (word & 0x3F) == 0x21)
+    return is_supported_data(word)
 
 
 def branch_target(pc: int, word: int) -> int:
@@ -168,6 +171,31 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
         if rd:
             lines.append(
                 f"{indent}state.gpr[{rd}] = sign_extend_32(static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>(state.gpr[{rt}]));"
+            )
+    elif op == 0 and (word & 0x3F) == 0x24:  # AND
+        if rd:
+            lines.append(
+                f"{indent}state.gpr[{rd}] = state.gpr[{rs}] & state.gpr[{rt}];"
+            )
+    elif op == 0 and (word & 0x3F) == 0x2B:  # SLTU
+        if rd:
+            lines.append(
+                f"{indent}state.gpr[{rd}] = state.gpr[{rs}] < state.gpr[{rt}] ? 1u : 0u;"
+            )
+    elif op == 0x0C:  # ANDI
+        if rt:
+            lines.append(
+                f"{indent}state.gpr[{rt}] = state.gpr[{rs}] & 0x{word & 0xFFFF:04x}u;"
+            )
+    elif op == 0x0D:  # ORI
+        if rt:
+            lines.append(
+                f"{indent}state.gpr[{rt}] = state.gpr[{rs}] | 0x{word & 0xFFFF:04x}u;"
+            )
+    elif op == 0x0F:  # LUI
+        if rt:
+            lines.append(
+                f"{indent}state.gpr[{rt}] = sign_extend_32(0x{(word & 0xFFFF) << 16:08x}u);"
             )
     elif op == 0x23:  # LW
         address = f"address_{pc:08x}"

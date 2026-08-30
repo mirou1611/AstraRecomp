@@ -38,11 +38,12 @@ trace prints the top 24 families for each processor automatically.
 | 16 | ANDI | 404,620 | 1.35% |
 
 The top eight families cover 80.24% of decoded EE instructions. The top sixteen
-cover 99.14%. The current subset generator already handles LW, ADDIU, BNE, BEQ,
-JAL, and NOP; the measured next expansion order is therefore SLTU, SQ, PCPYUD,
-LUI, SD, LD, AND, JR, ORI, and ANDI. PCPYUD's unusually high count comes from
-the BIOS interrupt context path, so it is a real boot-path priority rather than
-an assumed multimedia workload.
+cover 99.14%. The subset generator now handles the scalar members LW, ADDIU,
+BNE, SLTU, LUI, BEQ, AND, JR, JAL, ORI, ANDI, and NOP. The measured remaining
+expansion order is therefore SQ, PCPYUD, SD, and LD. Those operations need wider
+memory and 128-bit aliasing coverage rather than more scalar cases. PCPYUD's
+unusually high count comes from the BIOS interrupt context path, so it is a real
+boot-path priority rather than an assumed multimedia workload.
 
 ## IOP top families
 
