@@ -100,6 +100,7 @@ void Memory::clear() {
   timer0_count_ = 0;
   timer0_reads_ = 0;
   rdram_sdevid_ = 0;
+  sif0_cycles_remaining_ = 0;
   sif1_cycles_remaining_ = 0;
   iop_cache_control_ = 0;
   // EE hardware reset values observed by the BIOS during board detection.
@@ -430,6 +431,58 @@ void Memory::advance(std::uint32_t cycles) {
     iop_hw_[offset + 3] = static_cast<std::uint8_t>(value >> 24);
   };
 
+  if (sif0_cycles_remaining_ != 0u) {
+    if (cycles < sif0_cycles_remaining_) {
+      sif0_cycles_remaining_ -= cycles;
+      return;
+    }
+    sif0_cycles_remaining_ = 0;
+
+    auto tadr = raw_iop(0x052Cu) & 0x00FFFFFCu;
+    std::uint32_t final_iop_madr = 0;
+    std::uint32_t final_ee_madr = 0;
+    bool complete = false;
+    for (unsigned tag_index = 0; tag_index < 64u && !complete; ++tag_index) {
+      if (!iop_valid(tadr, 24u)) break;
+      const auto iop_tag = iop_read32(tadr);
+      const auto source = iop_tag & 0x00FFFFFFu;
+      const auto words = iop_read32(tadr + 4u) & 0x000FFFFFu;
+      const auto ee_tag = iop_read32(tadr + 8u);
+      const auto qwc = ee_tag & 0xFFFFu;
+      const auto id = (ee_tag >> 28) & 7u;
+      const auto destination = iop_read32(tadr + 12u) & 0x0FFFFFF0u;
+      // The reset reply uses an EE CNT tag terminated by IRQ/TIE. Preserve
+      // other destination-chain modes as an explicit unimplemented boundary.
+      if (id != 1u || qwc == 0u || words > qwc * 4u ||
+          !iop_valid(source, words * 4u) || !valid(destination, qwc * 16u))
+        break;
+      for (std::uint32_t word = 0; word < qwc * 4u; ++word) {
+        const auto value = word < words ? iop_read32(source + word * 4u) : 0u;
+        write32(destination + word * 4u, value);
+      }
+      final_iop_madr = source + words * 4u;
+      final_ee_madr = destination + qwc * 16u;
+      tadr += 16u;
+      const bool iop_end = (iop_tag & 0xC0000000u) != 0u;
+      const bool ee_end = (ee_tag & 0x80000000u) != 0u &&
+                          (raw_ee(0xC000u) & 0x80u) != 0u;
+      if (iop_end != ee_end) break;
+      complete = iop_end;
+    }
+    if (complete) {
+      store_ee(0xC010u, final_ee_madr);
+      store_ee(0xC020u, 0u);
+      store_ee(0xC000u, raw_ee(0xC000u) & ~0x100u);
+      store_ee(0xE010u, raw_ee(0xE010u) | (1u << 5));
+      store_ee(0xF240u, raw_ee(0xF240u) & ~(0x20u | 0x2000u));
+      store_iop(0x0520u, final_iop_madr);
+      store_iop(0x052Cu, tadr);
+      store_iop(0x0528u, raw_iop(0x0528u) & ~0x01000000u);
+      store_iop(0x0574u, raw_iop(0x0574u) | (1u << 26));
+      store_iop(0x0070u, raw_iop(0x0070u) | (1u << 3));
+    }
+  }
+
   if (sif1_cycles_remaining_ != 0u) {
     if (cycles < sif1_cycles_remaining_) {
       sif1_cycles_remaining_ -= cycles;
@@ -498,6 +551,37 @@ void Memory::advance(std::uint32_t cycles) {
     if (complete_chain) {
       sif1_cycles_remaining_ = total_qwc * 8u;
       store_ee(0xF240u, raw_ee(0xF240u) | 0x4000u);
+    }
+  }
+
+  if (sif0_cycles_remaining_ == 0u &&
+      (raw_ee(0xC000u) & 0x100u) != 0u &&
+      (raw_iop(0x0528u) & 0x01000000u) != 0u) {
+    auto tadr = raw_iop(0x052Cu) & 0x00FFFFFCu;
+    std::uint32_t total_words = 0;
+    bool complete_chain = false;
+    for (unsigned tag_index = 0; tag_index < 64u && !complete_chain;
+         ++tag_index) {
+      if (!iop_valid(tadr, 24u)) break;
+      const auto iop_tag = iop_read32(tadr);
+      const auto words = iop_read32(tadr + 4u) & 0x000FFFFFu;
+      const auto ee_tag = iop_read32(tadr + 8u);
+      const auto qwc = ee_tag & 0xFFFFu;
+      const auto id = (ee_tag >> 28) & 7u;
+      if (id != 1u || qwc == 0u || words > qwc * 4u ||
+          total_words > (UINT32_MAX / 8u) - words)
+        break;
+      total_words += words;
+      tadr += 16u;
+      const bool iop_end = (iop_tag & 0xC0000000u) != 0u;
+      const bool ee_end = (ee_tag & 0x80000000u) != 0u &&
+                          (raw_ee(0xC000u) & 0x80u) != 0u;
+      if (iop_end != ee_end) break;
+      complete_chain = iop_end;
+    }
+    if (complete_chain) {
+      sif0_cycles_remaining_ = (total_words == 0u ? 1u : total_words) * 8u;
+      store_ee(0xF240u, raw_ee(0xF240u) | 0x20u | 0x2000u);
     }
   }
 }

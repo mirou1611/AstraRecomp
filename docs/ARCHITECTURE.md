@@ -48,6 +48,9 @@ state machine remains. SIF1 command delivery is also event-driven: the scheduler
 derives a completion deadline from the complete observed REF/REFE source chain,
 then copies its tagged payload into IOP RAM and raises the modeled EE DMAC and IOP
 INTC state. The transfer is never made visible synchronously with an MMIO write.
+The reverse SIF0 path follows the same rule: it consumes the observed IOP end tag
+and EE CNT/IRQ destination tag at a cycle deadline, including short-packet zero
+padding, before raising EE DMAC channel 5 and the shared IOP DMA interrupt.
 
 This keeps four concerns separate:
 

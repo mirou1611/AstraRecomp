@@ -109,6 +109,7 @@ private:
   mutable std::uint32_t timer0_count_ = 0;
   mutable unsigned timer0_reads_ = 0;
   mutable unsigned rdram_sdevid_ = 0;
+  std::uint32_t sif0_cycles_remaining_ = 0;
   std::uint32_t sif1_cycles_remaining_ = 0;
   std::uint32_t iop_cache_control_ = 0;
 };

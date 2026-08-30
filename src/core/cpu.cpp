@@ -749,6 +749,34 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
       const auto b = static_cast<std::uint32_t>(rtv);
       state_.lo1 = b ? sx32(a / b) : std::numeric_limits<std::uint64_t>::max();
       state_.hi1 = sx32(b ? a % b : a);
+    } else if (fn == 0x09 && sub == 0x08) { // PMFHI
+      if (rd != 0) {
+        state_.gpr[rd] = state_.hi;
+        state_.gpr_hi[rd] = state_.hi1;
+      }
+    } else if (fn == 0x09 && sub == 0x09) { // PMFLO
+      if (rd != 0) {
+        state_.gpr[rd] = state_.lo;
+        state_.gpr_hi[rd] = state_.lo1;
+      }
+    } else if (fn == 0x09 && sub == 0x0E) { // PCPYLD
+      if (rd != 0) {
+        const auto high = rsv;
+        state_.gpr[rd] = rtv;
+        state_.gpr_hi[rd] = high;
+      }
+    } else if (fn == 0x29 && sub == 0x08) { // PMTHI
+      state_.hi = rsv;
+      state_.hi1 = state_.gpr_hi[rs];
+    } else if (fn == 0x29 && sub == 0x09) { // PMTLO
+      state_.lo = rsv;
+      state_.lo1 = state_.gpr_hi[rs];
+    } else if (fn == 0x29 && sub == 0x0E) { // PCPYUD
+      if (rd != 0) {
+        const auto low = state_.gpr_hi[rs];
+        state_.gpr_hi[rd] = state_.gpr_hi[rt];
+        state_.gpr[rd] = low;
+      }
     } else if (fn == 0x28 && sub == 0x10) { // PADDUW
       if (rd != 0) {
         state_.gpr[rd] = packed_add_unsigned_words(rsv, rtv);

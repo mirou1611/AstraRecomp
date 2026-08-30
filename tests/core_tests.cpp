@@ -265,6 +265,44 @@ void test_sif1_dma_and_external_interrupts() {
         "IOP ICFG bit 1 raises the EE SBUS interrupt");
 }
 
+void test_sif0_dma_reply() {
+  ps2vita::Memory memory;
+  // Observed BIOS reply: one IOP end tag supplies six words, followed by an
+  // EE CNT/IRQ tag requesting two QWC. The remaining two words are padding.
+  memory.iop_write32(0x200Cu, 0x80003000u);
+  memory.iop_write32(0x2010u, 6u);
+  memory.iop_write32(0x2014u, 0x90000002u);
+  memory.iop_write32(0x2018u, 0x00004000u);
+  memory.iop_write32(0x201Cu, 0u);
+  memory.iop_write32(0x2020u, 0u);
+  for (std::uint32_t word = 0; word < 6u; ++word)
+    memory.iop_write32(0x3000u + word * 4u, 0xA0000000u + word);
+  memory.write32(0x1000C000u, 0x184u);
+  memory.iop_write32(0x1F80152Cu, 0x200Cu);
+  memory.iop_write32(0x1F801528u, 0x01000701u);
+
+  memory.advance(1u);
+  memory.advance(47u);
+  check(memory.read32(0x4000u) == 0u,
+        "scheduled SIF0 reply is not visible before its word deadline");
+  memory.advance(1u);
+  check(memory.read32(0x4000u) == 0xA0000000u &&
+        memory.read32(0x4014u) == 0xA0000005u &&
+        memory.read32(0x4018u) == 0u && memory.read32(0x401Cu) == 0u,
+        "SIF0 reply copies IOP words and zero-pads the EE quadword");
+  check((memory.read32(0x1000C000u) & 0x100u) == 0u &&
+        memory.read32(0x1000C010u) == 0x4020u &&
+        (memory.read32(0x1000E010u) & (1u << 5)) != 0u,
+        "SIF0 completion advances EE MADR and raises DMAC channel 5");
+  check((memory.iop_read32(0x1F801528u) & 0x01000000u) == 0u &&
+        memory.iop_read32(0x1F801520u) == 0x3018u &&
+        memory.iop_read32(0x1F80152Cu) == 0x201Cu &&
+        (memory.iop_read32(0x1F801574u) & (1u << 26)) != 0u,
+        "SIF0 completion advances IOP DMA state and raises its flag");
+  check((memory.iop_read32(0x1F801070u) & (1u << 3)) != 0u,
+        "SIF0 completion raises the shared IOP DMA interrupt");
+}
+
 void test_exception_entry_and_eret() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -590,6 +628,67 @@ void test_mmi_div1_accumulator() {
   check(cpu.run(8) == ps2vita::StopReason::Break, "DIV1/MFLO1/MFHI1 execute");
   check(cpu.state().gpr[10] == 14 && cpu.state().gpr[11] == 2,
         "DIV1 exposes quotient and remainder through LO1/HI1");
+}
+
+void test_mmi_packed_accumulator_moves() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().hi = 0x1111222233334444ull;
+  cpu.state().hi1 = 0x5555666677778888ull;
+  cpu.state().lo = 0x9999AAAABBBBCCCCull;
+  cpu.state().lo1 = 0xDDDDEEEEFFFF0000ull;
+  cpu.state().gpr[4] = 0x0123456789ABCDEFull;
+  cpu.state().gpr_hi[4] = 0xFEDCBA9876543210ull;
+  const auto mmi_group = [](unsigned fn, unsigned sub, unsigned rs,
+                            unsigned rd) {
+    return (0x1Cu << 26) | (rs << 21) | (rd << 11) | (sub << 6) | fn;
+  };
+  memory.write32(0x1000u, mmi_group(0x09, 0x08, 0, 2)); // pmfhi v0
+  memory.write32(0x1004u, mmi_group(0x09, 0x09, 0, 3)); // pmflo v1
+  memory.write32(0x1008u, mmi_group(0x29, 0x08, 4, 0)); // pmthi a0
+  memory.write32(0x100Cu, mmi_group(0x29, 0x09, 4, 0)); // pmtlo a0
+  memory.write32(0x1010u, 0x0000000Du);
+  cpu.state().pc = 0x1000u;
+  check(cpu.run(8) == ps2vita::StopReason::Break,
+        "packed HI/LO accumulator moves execute");
+  check(cpu.state().gpr[2] == 0x1111222233334444ull &&
+        cpu.state().gpr_hi[2] == 0x5555666677778888ull &&
+        cpu.state().gpr[3] == 0x9999AAAABBBBCCCCull &&
+        cpu.state().gpr_hi[3] == 0xDDDDEEEEFFFF0000ull,
+        "PMFHI/PMFLO preserve all 128 accumulator bits");
+  check(cpu.state().hi == cpu.state().gpr[4] &&
+        cpu.state().hi1 == cpu.state().gpr_hi[4] &&
+        cpu.state().lo == cpu.state().gpr[4] &&
+        cpu.state().lo1 == cpu.state().gpr_hi[4],
+        "PMTHI/PMTLO restore all 128 accumulator bits");
+}
+
+void test_mmi_pcpyld() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[2] = 0x1111222233334444ull;
+  cpu.state().gpr[3] = 0xAAAABBBBCCCCDDDDull;
+  // pcpyld v1,v1,v0: destination aliases rs, as in interrupt-save code.
+  memory.write32(0x1000u, (0x1Cu << 26) | (3u << 21) | (2u << 16) |
+                                (3u << 11) | (0x0Eu << 6) | 0x09u);
+  memory.write32(0x1004u, 0x0000000Du);
+  cpu.state().pc = 0x1000u;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "PCPYLD executes");
+  check(cpu.state().gpr[3] == 0x1111222233334444ull &&
+        cpu.state().gpr_hi[3] == 0xAAAABBBBCCCCDDDDull,
+        "PCPYLD packs Rt low below Rs low with alias-safe reads");
+
+  cpu.state().gpr_hi[2] = 0x0123456789ABCDEFull;
+  cpu.state().gpr_hi[3] = 0xFEDCBA9876543210ull;
+  // pcpyud v0,v0,v1: destination aliases rs.
+  memory.write32(0x1008u, (0x1Cu << 26) | (2u << 21) | (3u << 16) |
+                                (2u << 11) | (0x0Eu << 6) | 0x29u);
+  memory.write32(0x100Cu, 0x0000000Du);
+  cpu.state().pc = 0x1008u;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "PCPYUD executes");
+  check(cpu.state().gpr[2] == 0x0123456789ABCDEFull &&
+        cpu.state().gpr_hi[2] == 0xFEDCBA9876543210ull,
+        "PCPYUD packs Rs high below Rt high with alias-safe reads");
 }
 
 void test_r5900_three_operand_multiply() {
@@ -1037,6 +1136,7 @@ int main() {
   test_bios_mapping_and_boot();
   test_iop_memory_and_cpu();
   test_sif1_dma_and_external_interrupts();
+  test_sif0_dma_reply();
   test_exception_entry_and_eret();
   test_cop0_count_advances();
   test_di_ei_status();
@@ -1054,6 +1154,8 @@ int main() {
   test_mmi_por();
   test_native_zero_fill_fast_path();
   test_mmi_div1_accumulator();
+  test_mmi_packed_accumulator_moves();
+  test_mmi_pcpyld();
   test_r5900_three_operand_multiply();
   test_scalar_fpu();
   test_fpu_memory_transfer();

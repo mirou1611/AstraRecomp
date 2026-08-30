@@ -247,9 +247,11 @@ int main(int argc, char** argv) {
     std::puts("watch: physical low kernel stub at 80000700 was cleared");
   if (iop_stop_triggered)
     std::printf("watch: IOP reached %08X\n", iop_stop_pc);
-  std::printf("steps=%llu reason=%s pc=%08X v0=%016llX a0=%016llX ra=%016llX\n",
+  std::printf("steps=%llu reason=%s pc=%08X opcode=%08X v0=%016llX "
+              "a0=%016llX ra=%016llX\n",
       static_cast<unsigned long long>(steps), ps2vita::stop_reason_name(reason),
-      state.pc, static_cast<unsigned long long>(state.gpr[2]),
+      state.pc, emulator.memory().read32(state.pc),
+      static_cast<unsigned long long>(state.gpr[2]),
       static_cast<unsigned long long>(state.gpr[4]),
       static_cast<unsigned long long>(state.gpr[31]));
   std::printf("dmac_enabler=%08X dmac_enablew=%08X mch_ricm=%08X mch_drd=%08X\n",
@@ -349,6 +351,25 @@ int main(int argc, char** argv) {
       emulator.memory().iop_read32(0x1F801530u),
       emulator.memory().iop_read32(0x1F801534u),
       emulator.memory().iop_read32(0x1F801538u));
+  const auto sif0_tadr = emulator.memory().iop_read32(0x1F80152Cu);
+  const auto sif0_madr =
+      emulator.memory().iop_read32(sif0_tadr) & 0x00FFFFFFu;
+  std::printf("iop_sif0_tag=%08X %08X %08X %08X %08X %08X\n",
+      emulator.memory().iop_read32(sif0_tadr),
+      emulator.memory().iop_read32(sif0_tadr + 4u),
+      emulator.memory().iop_read32(sif0_tadr + 8u),
+      emulator.memory().iop_read32(sif0_tadr + 12u),
+      emulator.memory().iop_read32(sif0_tadr + 16u),
+      emulator.memory().iop_read32(sif0_tadr + 20u));
+  std::printf("iop_sif0_data=%08X %08X %08X %08X %08X %08X %08X %08X\n",
+      emulator.memory().iop_read32(sif0_madr),
+      emulator.memory().iop_read32(sif0_madr + 4u),
+      emulator.memory().iop_read32(sif0_madr + 8u),
+      emulator.memory().iop_read32(sif0_madr + 12u),
+      emulator.memory().iop_read32(sif0_madr + 16u),
+      emulator.memory().iop_read32(sif0_madr + 20u),
+      emulator.memory().iop_read32(sif0_madr + 24u),
+      emulator.memory().iop_read32(sif0_madr + 28u));
   std::puts("written TLB entries:");
   for (unsigned index = 0; index < 48u; ++index) {
     std::uint32_t mask = 0, hi = 0, lo0 = 0, lo1 = 0;

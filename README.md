@@ -48,6 +48,8 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 - EE/IOP SBUS flag semantics with guest-generated SIFINIT and BOOTEND events
 - Cycle-scheduled SIF1 REF/REFE DMA from EE RAM into IOP RAM, including DMA
   completion flags and EE/IOP external-interrupt entry
+- Cycle-scheduled SIF0 IOP-to-EE reply DMA with tagged destination delivery,
+  quadword padding, completion state, and interrupt wakeup
 - Absent development-board debug aperture with retail-style null-device behavior
 - Portable EE interpreter foundation with 128-bit GPR storage
 - Fixed-size decoded EE block cache with delay-slot boundaries, hotness tracking,
@@ -56,6 +58,8 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
   register moves, unaligned merge operations, and byte through quadword memory ops
 - Initial MMI support (`PADDUW`, `DIV1/DIVU1`, `HI1/LO1` moves) using full
   128-bit GPR state and the EE's second accumulator pair
+- Packed MMI accumulator save/restore and composition (`PMFHI`, `PMFLO`,
+  `PMTHI`, `PMTLO`, `PCPYLD`, and `PCPYUD`)
 - Scalar COP1 register moves, arithmetic, conversion, comparison, and branches
 - Scalar COP1 memory transfers (`LWC1`/`SWC1`)
 - Verified native semantic zero-fill acceleration for the BIOS's large RAM clear
