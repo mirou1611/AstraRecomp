@@ -100,8 +100,6 @@ void Memory::clear() {
   timer0_count_ = 0;
   timer0_reads_ = 0;
   rdram_sdevid_ = 0;
-  sif_boot_cycles_remaining_ = 0;
-  sif_boot_stage_ = 0;
   iop_cache_control_ = 0;
   // EE hardware reset values observed by the BIOS during board detection.
   write32(0x1000F260u, 0x1D000060u);
@@ -352,28 +350,17 @@ void Memory::write16(std::uint32_t address, std::uint16_t value) {
 void Memory::write32(std::uint32_t address, std::uint32_t value) {
   const auto p = physical(address);
   // EE-side SIF flags are asymmetric: EE writes set MSFLAG and clear SMFLAG.
-  // Until the IOP interpreter lands, model the reset ROM consuming the BIOS
-  // boot flag and replying asynchronously through SMFLAG.
   if (p == 0x1000F220u) {
     value = read32(address) | value;
-    if (value & 0x00010000u) {
-      sif_boot_stage_ = 1;
-      sif_boot_cycles_remaining_ = 256u;
-    }
   } else if (p == 0x1000F230u) {
     value = read32(address) & ~value;
   } else if (p == 0x1000F240u) {
-    const bool reset_iop = (value & (1u << 19)) != 0;
     const auto offset = static_cast<std::size_t>(p - kHwBase);
     const auto current = static_cast<std::uint32_t>(hw_[offset]) |
         (static_cast<std::uint32_t>(hw_[offset + 1]) << 8) |
         (static_cast<std::uint32_t>(hw_[offset + 2]) << 16) |
         (static_cast<std::uint32_t>(hw_[offset + 3]) << 24);
     value = (current & ~0x100u) | (value & 0x100u);
-    if (reset_iop) {
-      sif_boot_cycles_remaining_ = 0;
-      sif_boot_stage_ = 0;
-    }
   }
   // DMAC_ENABLEW is the write port for the read-only DMAC_ENABLER mirror.
   // The BIOS uses the mirrored value as a hardware/board revision key while
@@ -411,35 +398,7 @@ void Memory::write64(std::uint32_t address, std::uint64_t value) {
 }
 
 void Memory::advance(std::uint32_t cycles) {
-  if (sif_boot_cycles_remaining_ == 0) return;
-  if (cycles < sif_boot_cycles_remaining_) {
-    sif_boot_cycles_remaining_ -= cycles;
-    return;
-  }
-  sif_boot_cycles_remaining_ = 0;
-  const auto raw = [&](std::size_t offset) {
-    return static_cast<std::uint32_t>(hw_[offset]) |
-        (static_cast<std::uint32_t>(hw_[offset + 1]) << 8) |
-        (static_cast<std::uint32_t>(hw_[offset + 2]) << 16) |
-        (static_cast<std::uint32_t>(hw_[offset + 3]) << 24);
-  };
-  const auto store = [&](std::size_t offset, std::uint32_t value) {
-    hw_[offset] = static_cast<std::uint8_t>(value);
-    hw_[offset + 1] = static_cast<std::uint8_t>(value >> 8);
-    hw_[offset + 2] = static_cast<std::uint8_t>(value >> 16);
-    hw_[offset + 3] = static_cast<std::uint8_t>(value >> 24);
-  };
-  if (sif_boot_stage_ == 1) {
-    store(0xF220u, raw(0xF220u) & ~0x00010000u);
-    store(0xF230u, raw(0xF230u) | 0x00010000u);
-    // The IOP's EESYNC module raises BOOTEND after the reset-ROM services have
-    // initialized. Keep it asynchronous so the EE executes its real wait path.
-    sif_boot_stage_ = 2;
-    sif_boot_cycles_remaining_ = 4096u;
-  } else if (sif_boot_stage_ == 2) {
-    store(0xF230u, raw(0xF230u) | 0x00040000u);
-    sif_boot_stage_ = 0;
-  }
+  (void)cycles;
 }
 
 bool Memory::iop_valid(std::uint32_t address, std::size_t size) const {

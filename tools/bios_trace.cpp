@@ -91,14 +91,18 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> low_store_trace{};
   std::array<StoreEntry, kTraceSize> syscall_store_trace{};
   std::array<StoreEntry, kTraceSize> sbus_store_trace{};
+  std::array<StoreEntry, kTraceSize> gif_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_low_store_trace{};
+  std::array<StoreEntry, kTraceSize> iop_sbus_store_trace{};
   std::size_t cursor = 0;
   std::size_t iop_cursor = 0;
   std::size_t cache_cursor = 0;
   std::size_t low_store_cursor = 0;
   std::size_t syscall_store_cursor = 0;
   std::size_t sbus_store_cursor = 0;
+  std::size_t gif_store_cursor = 0;
   std::size_t iop_low_store_cursor = 0;
+  std::size_t iop_sbus_store_cursor = 0;
   std::vector<char> serial_output;
   serial_output.reserve(16384);
   std::vector<char> iop_serial_output;
@@ -160,6 +164,13 @@ int main(int argc, char** argv) {
             state.pc, instruction, address, state.gpr[source],
             state.gpr_hi[source]};
       }
+      if ((physical >= 0x10003000u && physical < 0x10003100u) ||
+          (physical >= 0x1000A000u && physical < 0x1000A100u) ||
+          (physical >= 0x12000000u && physical < 0x12002000u)) {
+        gif_store_trace[gif_store_cursor++ % kTraceSize] = {
+            state.pc, instruction, address, state.gpr[source],
+            state.gpr_hi[source]};
+      }
     }
     if (state.pc == stop_pc && ++hits >= stop_hit) break;
     reason = emulator.cpu().step();
@@ -193,6 +204,10 @@ int main(int argc, char** argv) {
           iop_low_store_trace[iop_low_store_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
         }
+        if (address >= 0x1D000000u && address <= 0x1D000060u) {
+          iop_sbus_store_trace[iop_sbus_store_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address, iop.gpr[source], 0u};
+        }
       }
       iop_reason = emulator.iop().step();
     }
@@ -222,6 +237,15 @@ int main(int argc, char** argv) {
       emulator.memory().read32(0x1000F590u),
       emulator.memory().read32(0x1000F430u),
       emulator.memory().read32(0x1000F440u));
+  std::printf("intc_stat=%08X intc_mask=%08X dmac_stat=%08X\n",
+      emulator.memory().read32(0x1000F000u),
+      emulator.memory().read32(0x1000F010u),
+      emulator.memory().read32(0x1000E010u));
+  std::printf("timer3_count=%08X mode=%08X compare=%08X hold=%08X\n",
+      emulator.memory().read32(0x10001800u),
+      emulator.memory().read32(0x10001810u),
+      emulator.memory().read32(0x10001820u),
+      emulator.memory().read32(0x10001830u));
   std::printf("sbus_f200=%08X f210=%08X f220=%08X f230=%08X f240=%08X f260=%08X\n",
       emulator.memory().read32(0x1000F200u),
       emulator.memory().read32(0x1000F210u),
@@ -298,6 +322,7 @@ int main(int argc, char** argv) {
   }
   const std::size_t count = cursor < kTraceSize ? cursor : kTraceSize;
   const std::size_t first = cursor < kTraceSize ? 0 : cursor % kTraceSize;
+  std::puts("recent EE instructions:");
   for (std::size_t i = 0; i < count; ++i) {
     const auto& item = trace[(first + i) % kTraceSize];
     std::printf("%08X  %08X  v0=%016llX a0=%016llX ra=%016llX\n",
@@ -369,6 +394,20 @@ int main(int argc, char** argv) {
                   static_cast<unsigned long long>(item.value_lo));
     }
   }
+  if (gif_store_cursor != 0) {
+    std::puts("recent stores to GIF/GS registers:");
+    const std::size_t store_count =
+        gif_store_cursor < kTraceSize ? gif_store_cursor : kTraceSize;
+    const std::size_t store_first =
+        gif_store_cursor < kTraceSize ? 0 : gif_store_cursor % kTraceSize;
+    for (std::size_t i = 0; i < store_count; ++i) {
+      const auto& item = gif_store_trace[(store_first + i) % kTraceSize];
+      std::printf("%08X  %08X  address=%08X value=%016llX:%016llX\n",
+                  item.pc, item.instruction, item.address,
+                  static_cast<unsigned long long>(item.value_hi),
+                  static_cast<unsigned long long>(item.value_lo));
+    }
+  }
   if (iop_low_store_cursor != 0) {
     std::puts("recent IOP stores to low RAM:");
     const std::size_t store_count =
@@ -377,6 +416,19 @@ int main(int argc, char** argv) {
         ? 0 : iop_low_store_cursor % kTraceSize;
     for (std::size_t i = 0; i < store_count; ++i) {
       const auto& item = iop_low_store_trace[(store_first + i) % kTraceSize];
+      std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
+                  item.instruction, item.address,
+                  static_cast<unsigned long long>(item.value_lo));
+    }
+  }
+  if (iop_sbus_store_cursor != 0) {
+    std::puts("recent IOP stores to SBUS:");
+    const std::size_t store_count = iop_sbus_store_cursor < kTraceSize
+        ? iop_sbus_store_cursor : kTraceSize;
+    const std::size_t store_first = iop_sbus_store_cursor < kTraceSize
+        ? 0 : iop_sbus_store_cursor % kTraceSize;
+    for (std::size_t i = 0; i < store_count; ++i) {
+      const auto& item = iop_sbus_store_trace[(store_first + i) % kTraceSize];
       std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
                   item.instruction, item.address,
                   static_cast<unsigned long long>(item.value_lo));

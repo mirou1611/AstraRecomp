@@ -427,8 +427,18 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
   case 0x10: // COP0: enough for simple bare-metal startup code.
     if (rs == 0x00) set_reg(rt, sx32(state_.cop0[rd]));
     else if (rs == 0x04) state_.cop0[rd] = static_cast<std::uint32_t>(rtv);
-    else if (rs == 0x10 && fn == 0x38) state_.cop0[12] |= 1u; // EI
-    else if (rs == 0x10 && fn == 0x39) state_.cop0[12] &= ~1u; // DI
+    else if (rs == 0x10 && (fn == 0x38 || fn == 0x39)) { // EI / DI
+      constexpr std::uint32_t kEie = 1u << 16;
+      constexpr std::uint32_t kEdi = 1u << 17;
+      constexpr std::uint32_t kExlErl = (1u << 1) | (1u << 2);
+      constexpr std::uint32_t kKsu = 3u << 3;
+      auto& status = state_.cop0[12];
+      if ((status & kEdi) != 0u || (status & kExlErl) != 0u ||
+          (status & kKsu) == 0u) {
+        if (fn == 0x38) status |= kEie;
+        else status &= ~kEie;
+      }
+    }
     else if (rs == 0x10 && fn == 0x01) { // TLBR
       std::uint32_t mask = 0, hi = 0, lo0 = 0, lo1 = 0;
       if (memory_.read_tlb(state_.cop0[0] & 0x3Fu, mask, hi, lo0, lo1)) {

@@ -50,20 +50,6 @@ void test_memory_aliases() {
   memory.write32(0x1000F220, 0x00000008u);
   check(memory.read32(0x1000F220) == 0x0000000Cu,
         "EE writes set SBUS main-to-sub flags");
-  memory.write32(0x1000F220, 0x00010000u);
-  memory.advance(255);
-  check((memory.read32(0x1000F230) & 0x00010000u) == 0,
-        "IOP boot acknowledgement waits for scheduled guest time");
-  memory.advance(1);
-  check((memory.read32(0x1000F220) & 0x00010000u) == 0 &&
-        (memory.read32(0x1000F230) & 0x00010000u) != 0,
-        "IOP consumes MSFLAG and raises the BIOS SMFLAG acknowledgement");
-  memory.advance(4096);
-  check((memory.read32(0x1000F230) & 0x00040000u) != 0,
-        "IOP boot HLE raises the EESYNC BOOTEND flag");
-  memory.write32(0x1000F230, 0x00010000u);
-  check((memory.read32(0x1000F230) & 0x00010000u) == 0,
-        "EE writes clear SBUS sub-to-main flags");
   memory.write32(0x1000F590, 0x0000210C);
   check(memory.read32(0x1000F520) == 0x0000210C,
         "DMAC enable write port updates its read mirror");
@@ -148,6 +134,15 @@ void test_iop_memory_and_cpu() {
   memory.iop_write32(0x1D000030u, 0x00000020u);
   check((memory.read32(0x1000F230u) & 0x20u) != 0,
         "IOP writes set shared SMFLAG bits");
+  memory.write32(0x1000F220u, 0x00010000u);
+  memory.iop_write32(0x1D000020u, 0x00010000u);
+  memory.iop_write32(0x1D000030u, 0x00050000u);
+  check((memory.read32(0x1000F220u) & 0x00010000u) == 0 &&
+        (memory.read32(0x1000F230u) & 0x00050000u) == 0x00050000u,
+        "guest IOP SIFINIT and BOOTEND writes reach the EE");
+  memory.write32(0x1000F230u, 0x00010000u);
+  check((memory.read32(0x1000F230u) & 0x00010000u) == 0,
+        "EE writes clear guest-generated SMFLAG bits");
 
   std::vector<std::uint8_t> bios(ps2vita::Memory::kBiosSize, 0);
   const auto reset_instruction = i_type(0x09, 0, 8, 42);
@@ -230,6 +225,28 @@ void test_cop0_count_advances() {
   cpu.state().pc = 0x1000;
   check(cpu.run(8) == ps2vita::StopReason::Break, "COP0 Count test executes");
   check(cpu.state().gpr[9] > cpu.state().gpr[8], "COP0 Count follows EE cycles");
+}
+
+void test_di_ei_status() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  memory.write32(0x1000, 0x42000039u); // DI
+  memory.write32(0x1004, 0x42000038u); // EI
+  cpu.state().pc = 0x1000;
+  cpu.state().cop0[12] = 0x00030001u; // EDI, EIE, IE
+  check(cpu.step() == ps2vita::StopReason::None &&
+        (cpu.state().cop0[12] & 0x00010000u) == 0u &&
+        (cpu.state().cop0[12] & 1u) != 0u,
+        "DI clears R5900 EIE without changing IE");
+  check(cpu.step() == ps2vita::StopReason::None &&
+        (cpu.state().cop0[12] & 0x00010000u) != 0u,
+        "EI sets R5900 EIE");
+
+  cpu.state().pc = 0x1000;
+  cpu.state().cop0[12] = 0x00010010u; // EIE set, user KSU, EDI clear
+  cpu.step();
+  check((cpu.state().cop0[12] & 0x00010000u) != 0u,
+        "user-mode DI cannot change EIE without EDI permission");
 }
 
 void test_empty_ram_vector_falls_back_to_rom() {
@@ -946,6 +963,7 @@ int main() {
   test_iop_memory_and_cpu();
   test_exception_entry_and_eret();
   test_cop0_count_advances();
+  test_di_ei_status();
   test_empty_ram_vector_falls_back_to_rom();
   test_tlb_translation();
   test_ee_internal_registers();
