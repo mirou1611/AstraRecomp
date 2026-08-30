@@ -1,4 +1,28 @@
-# AstraRecomp
+<p align="center">
+  <img src="docs/assets/astra-hero.png" alt="Abstract streams of legacy machine code passing through a crystalline translation core into a compact runtime" width="100%">
+</p>
+
+<h1 align="center">AstraRecomp</h1>
+
+<p align="center">
+  <strong>Translate the past. Run it close to the metal.</strong><br>
+  An experimental PS2 static-recompilation and hybrid runtime for homebrew-enabled PlayStation Vita systems.
+</p>
+
+<p align="center">
+  <img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-875BFF?style=flat-square">
+  <img alt="Language: C++17" src="https://img.shields.io/badge/C%2B%2B-17-35D9FF?style=flat-square&logo=cplusplus&logoColor=050711">
+  <img alt="Target: PlayStation Vita" src="https://img.shields.io/badge/target-Vita-5271FF?style=flat-square">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-18234A?style=flat-square"></a>
+</p>
+
+<p align="center">
+  <a href="docs/ROADMAP.md">Roadmap</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/PS2RECOMP_INTEGRATION.md">Recompiler boundary</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="docs/BRAND.md">Visual system</a>
+</p>
 
 AstraRecomp is an experimental PC-assisted PlayStation 2 static-recompilation and
 hybrid porting framework for a homebrew-enabled PlayStation Vita. Heavy analysis
@@ -16,12 +40,40 @@ JAL/delay-slot/`jr $ra` sequence.
 
 It now executes a user-supplied retail BIOS through EE hardware initialization,
 relocation into RAM, IOP reset-ROM startup, and the BIOS `Initialize Done` stage.
-It does **not yet
-render the PS2 startup or run retail games**. Those require deeper IOP, DMA,
+It does **not yet render the PS2 startup or run retail games**. Those require deeper IOP, DMA,
 interrupt, GIF/GS, SPU2, and disc emulation described in the roadmap. The existing
 core is real BIOS execution, not a renamed frontend or a fake compatibility screen.
 
-## What works now
+## Project status
+
+| Area | Current state |
+| --- | --- |
+| BIOS bootstrap | Executes through initialization, both SIF directions, and into the EE DMAC interrupt handler |
+| PC recompiler | Phase-0 analysis and a tested R5900-to-C++ subset with interpreter/native differential checks |
+| Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
+| Guest graphics | Reference rasterizer exists; guest GIF packets are not connected yet |
+| Retail games | **Not playable**—IOP devices, GIF/GS, VU, SPU2, media, and compatibility work remain |
+
+## System shape
+
+```text
+PS2 ELF / user BIOS
+        │
+        ▼
+ PC analysis + AOT emission ──────┐
+        │                         │ exact-state fallback
+        ▼                         ▼
+ generated AstraRT C++      portable EE/IOP interpreter
+        └──────────────┬──────────┘
+                       ▼
+             Vita-native AstraRT VPK
+```
+
+## Implemented foundation
+
+<details>
+<summary><strong>Expand the current implementation inventory</strong></summary>
+
 
 - Vita-native VPK target using VitaSDK only (no runtime dependencies)
 - PS2Recomp Phase-0 ELF analysis and R5900-to-C++ emission on the host
@@ -67,6 +119,8 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 - Native 960x544 monitor UI and Vita controls
 - Host-side deterministic tests
 - Redistributable PS2 ELF smoke-test generator
+
+</details>
 
 ## Build the host tests
 

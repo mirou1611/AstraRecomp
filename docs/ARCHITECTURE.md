@@ -1,5 +1,7 @@
 # Architecture
 
+![Two synchronized processing nodes exchanging timed packets through a deterministic scheduler](assets/astra-architecture.png)
+
 ## Boundary
 
 `ps2core` is portable C++17 and has no Vita headers. The Vita frontend owns files,

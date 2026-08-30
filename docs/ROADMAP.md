@@ -1,5 +1,10 @@
 # Roadmap to PS2 software
 
+![Abstract synchronized processor and packet-flow visualization](assets/astra-architecture.png)
+
+> AstraRecomp is a staged engineering effort. Milestones describe evidence and
+> boundaries, not compatibility promises or release dates.
+
 ## M0 — ELF interpreter monitor (implemented)
 
 Load a PS2 ELF, execute the integer subset, honor delay slots, inspect state, and
