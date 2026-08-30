@@ -59,6 +59,11 @@ converts EE cycles to IOP cycles, then the selected 1/8/16/256 prescaler drives
 the timer's internal interrupt latch; pulsed-repeat mode drops and rearms that
 latch on later counter synchronization. Both halfword and word mode writes use
 the same device semantics, and eligible events raise IOP INTC bit 16.
+The first CDVD HLE boundary remains below the guest driver: interpreted IOP BIOS
+code sees a no-disc reset state and exchanges parameters/results through the
+physical secondary-command registers. Configuration commands use bounded
+16-byte FIFOs; disc media, seek timing, RTC, and persistent NVRAM remain explicit
+future device layers rather than being hidden behind IOP module HLE.
 
 This keeps four concerns separate:
 

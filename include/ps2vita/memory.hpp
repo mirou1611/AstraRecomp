@@ -109,6 +109,16 @@ private:
   mutable std::uint32_t timer0_count_ = 0;
   mutable unsigned timer0_reads_ = 0;
   mutable unsigned rdram_sdevid_ = 0;
+  std::array<std::uint8_t, 16> cdvd_scmd_params_{};
+  std::array<std::uint8_t, 16> cdvd_scmd_result_{};
+  std::uint8_t cdvd_scmd_param_count_ = 0;
+  mutable std::uint8_t cdvd_scmd_result_pos_ = 0;
+  std::uint8_t cdvd_scmd_result_count_ = 0;
+  mutable std::uint8_t cdvd_sready_ = 0x40;
+  std::uint8_t cdvd_config_rw_ = 0;
+  std::uint8_t cdvd_config_offset_ = 0;
+  std::uint8_t cdvd_config_blocks_ = 0;
+  std::uint8_t cdvd_config_index_ = 0;
   std::uint32_t iop_cycle_remainder_ = 0;
   std::uint32_t timer5_prescale_remainder_ = 0;
   bool timer5_target_future_ = false;

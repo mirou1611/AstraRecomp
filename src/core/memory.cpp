@@ -100,6 +100,16 @@ void Memory::clear() {
   timer0_count_ = 0;
   timer0_reads_ = 0;
   rdram_sdevid_ = 0;
+  cdvd_scmd_params_.fill(0);
+  cdvd_scmd_result_.fill(0);
+  cdvd_scmd_param_count_ = 0;
+  cdvd_scmd_result_pos_ = 0;
+  cdvd_scmd_result_count_ = 0;
+  cdvd_sready_ = 0x40u;
+  cdvd_config_rw_ = 0;
+  cdvd_config_offset_ = 0;
+  cdvd_config_blocks_ = 0;
+  cdvd_config_index_ = 0;
   iop_cycle_remainder_ = 0;
   timer5_prescale_remainder_ = 0;
   timer5_target_future_ = false;
@@ -699,6 +709,26 @@ std::uint8_t Memory::iop_read8(std::uint32_t address) const {
       return static_cast<std::uint8_t>(word >> ((p & 3u) * 8u));
     }
   }
+  // CDVD reset state with no disc inserted. The IOP BIOS probes N-READY
+  // before issuing any command; MECHA_INIT and DEV9CON accompany READY.
+  if (p >= 0x1F402000u && p < 0x1F402100u) {
+    switch (p & 0xFFu) {
+    case 0x05u: return 0x4Cu; // N-READY: ready | mechacon | DEV9 connected
+    case 0x0Au: return 0x01u; // STATUS: tray open
+    case 0x0Bu: return 0x01u; // sticky STATUS
+    case 0x17u: return cdvd_sready_;
+    case 0x18u: { // S-DATAOUT
+      if ((cdvd_sready_ & 0x40u) != 0u ||
+          cdvd_scmd_result_pos_ >= cdvd_scmd_result_count_)
+        return 0u;
+      const auto value = cdvd_scmd_result_[cdvd_scmd_result_pos_++];
+      if (cdvd_scmd_result_pos_ >= cdvd_scmd_result_count_)
+        cdvd_sready_ |= 0x40u;
+      return value;
+    }
+    default: return 0u;
+    }
+  }
   if (p >= 0x1F800000u && p < 0x1F801000u)
     return iop_scratch_[p - 0x1F800000u];
   if (p >= 0x1FFE0130u && p < 0x1FFE0134u)
@@ -744,6 +774,54 @@ void Memory::iop_write8(std::uint32_t address, std::uint8_t value) {
   const auto p = address & 0x1FFFFFFFu;
   if (p < kIopWindowSize) {
     iop_ram_[p & (kIopRamSize - 1u)] = value;
+  } else if (p >= 0x1F402000u && p < 0x1F402100u) {
+    const auto reg = p & 0xFFu;
+    if (reg == 0x17u) { // S-DATAIN
+      if (cdvd_scmd_param_count_ < cdvd_scmd_params_.size())
+        cdvd_scmd_params_[cdvd_scmd_param_count_++] = value;
+    } else if (reg == 0x16u) { // S-COMMAND
+      const auto set_result = [&](std::uint8_t count) {
+        cdvd_scmd_result_count_ = count;
+        cdvd_scmd_result_pos_ = 0;
+        cdvd_sready_ &= ~0x40u;
+      };
+      cdvd_scmd_result_.fill(0);
+      switch (value) {
+      case 0x40u: // OpenConfig(read/write, area, block count)
+        if (cdvd_scmd_param_count_ >= 3u) {
+          cdvd_config_rw_ = cdvd_scmd_params_[0];
+          cdvd_config_offset_ = cdvd_scmd_params_[1];
+          cdvd_config_blocks_ = cdvd_scmd_params_[2];
+          cdvd_config_index_ = 0;
+        }
+        set_result(1u);
+        break;
+      case 0x41u: // ReadConfig
+        if (cdvd_config_rw_ != 0u)
+          cdvd_scmd_result_[0] = 0x80u;
+        if (cdvd_config_index_ < cdvd_config_blocks_)
+          ++cdvd_config_index_;
+        set_result(16u);
+        break;
+      case 0x42u: // WriteConfig
+        if (cdvd_config_rw_ != 1u)
+          cdvd_scmd_result_[0] = 0x80u;
+        if (cdvd_config_index_ < cdvd_config_blocks_)
+          ++cdvd_config_index_;
+        set_result(1u);
+        break;
+      case 0x43u: // CloseConfig
+        cdvd_config_rw_ = cdvd_config_offset_ = 0u;
+        cdvd_config_blocks_ = cdvd_config_index_ = 0u;
+        set_result(1u);
+        break;
+      default:
+        cdvd_scmd_result_[0] = 0x80u;
+        set_result(1u);
+        break;
+      }
+      cdvd_scmd_param_count_ = 0;
+    }
   } else if (p >= 0x1F800000u && p < 0x1F801000u) {
     iop_scratch_[p - 0x1F800000u] = value;
   } else if (p >= 0x1FFE0130u && p < 0x1FFE0134u) {

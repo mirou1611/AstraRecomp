@@ -96,6 +96,7 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> iop_low_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_sbus_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_dma_store_trace{};
+  std::array<StoreEntry, kTraceSize> iop_cdvd_trace{};
   std::size_t cursor = 0;
   std::size_t iop_cursor = 0;
   std::size_t cache_cursor = 0;
@@ -107,6 +108,7 @@ int main(int argc, char** argv) {
   std::size_t iop_low_store_cursor = 0;
   std::size_t iop_sbus_store_cursor = 0;
   std::size_t iop_dma_store_cursor = 0;
+  std::size_t iop_cdvd_cursor = 0;
   std::vector<char> serial_output;
   serial_output.reserve(16384);
   std::vector<char> iop_serial_output;
@@ -204,6 +206,15 @@ int main(int argc, char** argv) {
           iop_serial_output.push_back(static_cast<char>(iop.gpr[source]));
       }
       const unsigned iop_opcode = iop_instruction >> 26;
+      if (iop_opcode >= 0x20u && iop_opcode <= 0x26u) {
+        const unsigned base = (iop_instruction >> 21) & 31u;
+        const auto offset = static_cast<std::int16_t>(iop_instruction);
+        const auto address = (iop.gpr[base] + offset) & 0x1FFFFFFFu;
+        if (address >= 0x1F402000u && address < 0x1F402100u) {
+          iop_cdvd_trace[iop_cdvd_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address, 0u, 0u};
+        }
+      }
       if (iop_opcode == 0x28u || iop_opcode == 0x29u ||
           iop_opcode == 0x2Au || iop_opcode == 0x2Bu ||
           iop_opcode == 0x2Eu) {
@@ -217,6 +228,10 @@ int main(int argc, char** argv) {
         }
         if (address >= 0x1D000000u && address <= 0x1D000060u) {
           iop_sbus_store_trace[iop_sbus_store_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address, iop.gpr[source], 0u};
+        }
+        if (address >= 0x1F402000u && address < 0x1F402100u) {
+          iop_cdvd_trace[iop_cdvd_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
         }
         if ((address >= 0x1F801070u && address < 0x1F801080u) ||
@@ -567,7 +582,7 @@ int main(int argc, char** argv) {
     }
   }
   if (iop_dma_store_cursor != 0) {
-    std::puts("recent IOP stores to DMA/interrupt registers:");
+  std::puts("recent IOP stores to DMA/interrupt registers:");
     const std::size_t store_count = iop_dma_store_cursor < kTraceSize
         ? iop_dma_store_cursor : kTraceSize;
     const std::size_t store_first = iop_dma_store_cursor < kTraceSize
@@ -578,6 +593,16 @@ int main(int argc, char** argv) {
                   item.instruction, item.address,
                   static_cast<unsigned long long>(item.value_lo));
     }
+  }
+  std::puts("recent IOP CDVD register accesses:");
+  const auto cdvd_count = std::min(iop_cdvd_cursor, kTraceSize);
+  const auto cdvd_start = iop_cdvd_cursor >= kTraceSize
+      ? iop_cdvd_cursor % kTraceSize : 0u;
+  for (std::size_t i = 0; i < cdvd_count; ++i) {
+    const auto& entry = iop_cdvd_trace[(cdvd_start + i) % kTraceSize];
+    std::printf("%08X  %08X  address=%08X value=%08llX\n",
+        entry.pc, entry.instruction, entry.address,
+        static_cast<unsigned long long>(entry.value_lo));
   }
   if (!serial_output.empty()) {
     std::puts("EE serial output:");

@@ -337,6 +337,35 @@ void test_iop_timer5_deadlines() {
         "IOP Timer 5 overflow wraps and raises the same interrupt line");
 }
 
+void test_cdvd_reset_status() {
+  ps2vita::Memory memory;
+  check(memory.iop_read8(0x1F402005u) == 0x4Cu,
+        "CDVD reset state reports drive, mechacon, and DEV9 ready");
+  check(memory.iop_read8(0x1F40200Au) == 0x01u &&
+        memory.iop_read8(0x1F40200Bu) == 0x01u,
+        "CDVD reset state exposes an open tray without media");
+  check(memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD reset state has no secondary-command result pending");
+
+  memory.iop_write8(0x1F402017u, 0u);
+  memory.iop_write8(0x1F402017u, 1u);
+  memory.iop_write8(0x1F402017u, 1u);
+  memory.iop_write8(0x1F402016u, 0x40u);
+  check(memory.iop_read8(0x1F402017u) == 0u &&
+        memory.iop_read8(0x1F402018u) == 0u &&
+        memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD OpenConfig returns one successful result byte");
+  memory.iop_write8(0x1F402016u, 0x41u);
+  unsigned config_bytes = 0;
+  while ((memory.iop_read8(0x1F402017u) & 0x40u) == 0u) {
+    check(memory.iop_read8(0x1F402018u) == 0u,
+          "CDVD blank reset configuration reads as zero");
+    ++config_bytes;
+  }
+  check(config_bytes == 16u,
+        "CDVD ReadConfig exposes a bounded sixteen-byte result");
+}
+
 void test_exception_entry_and_eret() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -1205,6 +1234,7 @@ int main() {
   test_sif1_dma_and_external_interrupts();
   test_sif0_dma_reply();
   test_iop_timer5_deadlines();
+  test_cdvd_reset_status();
   test_exception_entry_and_eret();
   test_cop0_count_advances();
   test_di_ei_status();
