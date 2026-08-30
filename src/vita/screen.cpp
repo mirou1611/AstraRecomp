@@ -1,0 +1,113 @@
+#include "screen.hpp"
+
+#include <psp2/display.h>
+#include <psp2/kernel/sysmem.h>
+
+#include <cctype>
+#include <cstddef>
+
+namespace {
+constexpr int kWidth = 960;
+constexpr int kHeight = 544;
+constexpr int kPitch = 960;
+
+// Five columns, least-significant bit at the top. Compact but sufficient for
+// the emulator monitor; lowercase is intentionally folded to uppercase.
+void glyph(char input, std::uint8_t out[5]) {
+  const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(input)));
+  const std::uint8_t blank[5] = {0, 0, 0, 0, 0};
+  const std::uint8_t* g = blank;
+#define G(ch,a,b,c,d,e) case ch: { static const std::uint8_t v[5]={a,b,c,d,e}; g=v; } break
+  switch (c) {
+  G('A',0x7E,0x11,0x11,0x11,0x7E); G('B',0x7F,0x49,0x49,0x49,0x36);
+  G('C',0x3E,0x41,0x41,0x41,0x22); G('D',0x7F,0x41,0x41,0x22,0x1C);
+  G('E',0x7F,0x49,0x49,0x49,0x41); G('F',0x7F,0x09,0x09,0x09,0x01);
+  G('G',0x3E,0x41,0x49,0x49,0x7A); G('H',0x7F,0x08,0x08,0x08,0x7F);
+  G('I',0x41,0x41,0x7F,0x41,0x41); G('J',0x20,0x40,0x41,0x3F,0x01);
+  G('K',0x7F,0x08,0x14,0x22,0x41); G('L',0x7F,0x40,0x40,0x40,0x40);
+  G('M',0x7F,0x02,0x0C,0x02,0x7F); G('N',0x7F,0x04,0x08,0x10,0x7F);
+  G('O',0x3E,0x41,0x41,0x41,0x3E); G('P',0x7F,0x09,0x09,0x09,0x06);
+  G('Q',0x3E,0x41,0x51,0x21,0x5E); G('R',0x7F,0x09,0x19,0x29,0x46);
+  G('S',0x46,0x49,0x49,0x49,0x31); G('T',0x01,0x01,0x7F,0x01,0x01);
+  G('U',0x3F,0x40,0x40,0x40,0x3F); G('V',0x1F,0x20,0x40,0x20,0x1F);
+  G('W',0x7F,0x20,0x18,0x20,0x7F); G('X',0x63,0x14,0x08,0x14,0x63);
+  G('Y',0x07,0x08,0x70,0x08,0x07); G('Z',0x61,0x51,0x49,0x45,0x43);
+  G('0',0x3E,0x51,0x49,0x45,0x3E); G('1',0x00,0x42,0x7F,0x40,0x00);
+  G('2',0x62,0x51,0x49,0x49,0x46); G('3',0x22,0x41,0x49,0x49,0x36);
+  G('4',0x18,0x14,0x12,0x7F,0x10); G('5',0x2F,0x49,0x49,0x49,0x31);
+  G('6',0x3E,0x49,0x49,0x49,0x32); G('7',0x01,0x71,0x09,0x05,0x03);
+  G('8',0x36,0x49,0x49,0x49,0x36); G('9',0x26,0x49,0x49,0x49,0x3E);
+  G(':',0x00,0x36,0x36,0x00,0x00); G('.',0x00,0x60,0x60,0x00,0x00);
+  G('/',0x20,0x10,0x08,0x04,0x02); G('-',0x08,0x08,0x08,0x08,0x08);
+  G('_',0x40,0x40,0x40,0x40,0x40); G('[',0x00,0x7F,0x41,0x41,0x00);
+  G(']',0x00,0x41,0x41,0x7F,0x00); G('=',0x14,0x14,0x14,0x14,0x14);
+  default: break;
+  }
+#undef G
+  for (int i = 0; i < 5; ++i) out[i] = g[i];
+}
+}
+
+bool Screen::init() {
+  constexpr std::size_t bytes = kPitch * kHeight * sizeof(std::uint32_t);
+  constexpr std::size_t aligned = (bytes + 0x3FFFFu) & ~0x3FFFFu;
+  memblock_ = sceKernelAllocMemBlock("ps2vita framebuffer",
+      SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, aligned, nullptr);
+  if (memblock_ < 0 || sceKernelGetMemBlockBase(memblock_,
+      reinterpret_cast<void**>(&pixels_)) < 0) return false;
+
+  SceDisplayFrameBuf frame{};
+  frame.size = sizeof(frame);
+  frame.base = pixels_;
+  frame.pitch = kPitch;
+  frame.pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
+  frame.width = kWidth;
+  frame.height = kHeight;
+  return sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_NEXTFRAME) >= 0;
+}
+
+void Screen::shutdown() {
+  if (memblock_ >= 0) sceKernelFreeMemBlock(memblock_);
+  memblock_ = -1;
+  pixels_ = nullptr;
+}
+
+void Screen::clear(std::uint32_t color) {
+  if (!pixels_) return;
+  for (int i = 0; i < kPitch * kHeight; ++i) pixels_[i] = color;
+}
+
+void Screen::rect(int x, int y, int width, int height, std::uint32_t color) {
+  if (!pixels_) return;
+  for (int yy = y < 0 ? 0 : y; yy < y + height && yy < kHeight; ++yy)
+    for (int xx = x < 0 ? 0 : x; xx < x + width && xx < kWidth; ++xx)
+      pixels_[yy * kPitch + xx] = color;
+}
+
+void Screen::text(int x, int y, const char* value, std::uint32_t color, int scale) {
+  if (!pixels_ || !value) return;
+  int cursor = x;
+  for (; *value; ++value) {
+    if (*value == '\n') { cursor = x; y += 9 * scale; continue; }
+    std::uint8_t columns[5];
+    glyph(*value, columns);
+    for (int col = 0; col < 5; ++col)
+      for (int row = 0; row < 7; ++row)
+        if (columns[col] & (1u << row)) rect(cursor + col * scale, y + row * scale, scale, scale, color);
+    cursor += 6 * scale;
+  }
+}
+
+void Screen::blit_160x112(const std::uint32_t* source, int y_offset) {
+  if (!pixels_ || !source) return;
+  for (int sy = 0; sy < 112; ++sy) {
+    for (int sx = 0; sx < 160; ++sx) {
+      const auto color = source[sy * 160 + sx];
+      const int dx = sx * 6;
+      const int dy = y_offset + sy * 4;
+      rect(dx, dy, 6, 4, color);
+    }
+  }
+}
+
+void Screen::present() { sceDisplayWaitVblankStart(); }

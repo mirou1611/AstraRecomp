@@ -1,0 +1,955 @@
+#include "ps2vita/aot.hpp"
+#include "ps2vita/emulator.hpp"
+#include "ps2vita/ee_block.hpp"
+
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+namespace {
+int failures = 0;
+
+void check(bool condition, const char* label) {
+  if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
+}
+
+constexpr std::uint32_t i_type(unsigned op, unsigned rs, unsigned rt, std::uint16_t imm) {
+  return (op << 26) | (rs << 21) | (rt << 16) | imm;
+}
+
+void test_memory_aliases() {
+  ps2vita::Memory memory;
+  check(memory.read32(0x1000F520) == 0x00001201,
+        "DMAC enabler has its EE reset value");
+  memory.write32(0x00001000, 0x12345678);
+  check(memory.read32(0x80001000) == 0x12345678, "KSEG0 RAM alias");
+  check(memory.read32(0xA0001000) == 0x12345678, "KSEG1 RAM alias");
+  check(memory.valid(0x02000000), "uninstalled high memory is a null bus region");
+  memory.write32(0x0BC1F000, 0xFFFFFFFF);
+  check(memory.read32(0x0BC1F000) == 0, "null bus ignores writes and reads zero");
+  memory.write32(0x70000000, 0xCAFEBABE);
+  check(memory.read32(0x70000000) == 0xCAFEBABE, "EE scratchpad mapping");
+  memory.write32(0x10000000, 0x12345678);
+  const auto timer0_first = memory.read32(0x10000000);
+  const auto timer0_second = memory.read32(0x10000000);
+  check(timer0_second == timer0_first, "EE Timer 0 COUNT is prescaled");
+  std::uint32_t timer0_later = timer0_second;
+  for (unsigned i = 0; i < 32; ++i) timer0_later = memory.read32(0x10000000);
+  check(timer0_later > timer0_first, "EE Timer 0 COUNT advances after prescaling");
+  memory.write64(0xB2000010, 0x0123456789ABCDEFull);
+  check(memory.read64(0x12000010) == 0x0123456789ABCDEFull,
+        "GS privileged registers are routed through the uncached alias");
+  memory.write32(0x1000F010, 0x00000005);
+  check(memory.read32(0x1000F010) == 0x00000005, "INTC mask toggle on");
+  memory.write32(0x1000F010, 0x00000001);
+  check(memory.read32(0x1000F010) == 0x00000004, "INTC mask toggle off");
+  check(memory.read32(0x1000F240) == 0xF0000102u,
+        "SBUS control exposes its fixed reset bits");
+  memory.write32(0x1000F220, 0x00000004u);
+  memory.write32(0x1000F220, 0x00000008u);
+  check(memory.read32(0x1000F220) == 0x0000000Cu,
+        "EE writes set SBUS main-to-sub flags");
+  memory.write32(0x1000F220, 0x00010000u);
+  memory.advance(255);
+  check((memory.read32(0x1000F230) & 0x00010000u) == 0,
+        "IOP boot acknowledgement waits for scheduled guest time");
+  memory.advance(1);
+  check((memory.read32(0x1000F220) & 0x00010000u) == 0 &&
+        (memory.read32(0x1000F230) & 0x00010000u) != 0,
+        "IOP consumes MSFLAG and raises the BIOS SMFLAG acknowledgement");
+  memory.advance(4096);
+  check((memory.read32(0x1000F230) & 0x00040000u) != 0,
+        "IOP boot HLE raises the EESYNC BOOTEND flag");
+  memory.write32(0x1000F230, 0x00010000u);
+  check((memory.read32(0x1000F230) & 0x00010000u) == 0,
+        "EE writes clear SBUS sub-to-main flags");
+  memory.write32(0x1000F590, 0x0000210C);
+  check(memory.read32(0x1000F520) == 0x0000210C,
+        "DMAC enable write port updates its read mirror");
+  memory.write32(0x1000F430, 0x80210000);
+  check(memory.read32(0x1000F430) == 0,
+        "RDRAM controller clears command busy state");
+  memory.write32(0x1000F410, 0x80000059);
+  check(memory.read32(0x1000F410) == 0,
+        "memory-controller command completes synchronously");
+  check(memory.read32(0x1000F440) == 0x1F &&
+        memory.read32(0x1000F440) == 0x1F &&
+        memory.read32(0x1000F440) == 0,
+        "RDRAM INIT enumerates two retail devices");
+  memory.write32(0x1000F430, 0x00230000);
+  check(memory.read32(0x1000F440) == 0x0D0D, "RDRAM CNFGA response");
+  memory.write32(0x1000F430, 0x00240000);
+  check(memory.read32(0x1000F440) == 0x0090, "RDRAM CNFGB response");
+  memory.write64(0xBC1FF010, 0x0123456789ABCDEFull);
+  check(memory.read64(0x1C1FF010) == 0x0123456789ABCDEFull,
+        "EE uncached alias reaches IOP RAM");
+  check(memory.read64(0x1C3FF010) == 0x0123456789ABCDEFull,
+        "IOP RAM mirrors across the 8 MiB EE window");
+  memory.write16(0xBA000008, 3);
+  check(memory.read16(0x1A000008) == 3,
+        "DVE registers are mapped through the uncached alias");
+  memory.write32(0xBF801010, 0xA5A55A5A);
+  check(memory.read32(0x1F801010) == 0xA5A55A5A,
+        "secret EE mapping reaches IOP hardware registers");
+}
+
+void test_bios_mapping_and_boot() {
+  std::vector<std::uint8_t> bios(ps2vita::Memory::kBiosSize, 0);
+  const std::uint32_t instruction = i_type(0x09, 0, 2, 42);
+  bios[0] = static_cast<std::uint8_t>(instruction);
+  bios[1] = static_cast<std::uint8_t>(instruction >> 8);
+  bios[2] = static_cast<std::uint8_t>(instruction >> 16);
+  bios[3] = static_cast<std::uint8_t>(instruction >> 24);
+  ps2vita::Emulator emulator;
+  check(emulator.load_bios(bios.data(), bios.size()), "4 MiB BIOS accepted");
+  check(emulator.memory().read32(0xBFC00000) == instruction, "BIOS KSEG1 alias");
+  emulator.memory().write32(0xBFC00000, 0xFFFFFFFF);
+  check(emulator.memory().read32(0x1FC00000) == instruction, "BIOS is read-only");
+  check(emulator.boot_bios(), "BIOS boot mode starts");
+  check(emulator.cpu().state().pc == 0xBFC00000, "BIOS reset vector");
+  check(emulator.cpu().state().cop0[12] == 0x70400004u,
+        "BIOS boot seeds R5900 Status reset value");
+  check(emulator.cpu().state().cop0[16] == 0x440u &&
+        emulator.cpu().state().cop0[15] == 0x2E20u,
+        "BIOS boot seeds R5900 Config and PRId");
+  check(emulator.cpu().state().fcr[0] == 0x2E30u &&
+        emulator.cpu().state().fcr[31] == 0x01000001u,
+        "BIOS boot seeds EE FPU reset state");
+  check(emulator.cpu().step() == ps2vita::StopReason::None, "first BIOS instruction executes");
+  check(emulator.cpu().state().gpr[2] == 42, "BIOS-mapped instruction result");
+}
+
+void test_iop_memory_and_cpu() {
+  ps2vita::Memory memory;
+  memory.iop_write32(0x00001000u, 0x12345678u);
+  check(memory.iop_read32(0x00201000u) == 0x12345678u,
+        "IOP RAM mirrors across its 8 MiB physical window");
+  memory.iop_write32(0x1F800100u, 0xA5A55A5Au);
+  check(memory.iop_read32(0xBF800100u) == 0xA5A55A5Au,
+        "IOP scratchpad maps through KSEG1");
+  memory.iop_write32(0xFFFE0130u, 0x00000804u);
+  check(memory.iop_read32(0xFFFE0130u) == 0x00000804u,
+        "IOP cache-control register retains reset-ROM writes");
+  memory.write32(0x1000F220u, 0x0000000Cu);
+  memory.iop_write32(0x1D000020u, 0x00000004u);
+  check(memory.read32(0x1000F220u) == 0x00000008u,
+        "IOP writes clear shared MSFLAG bits");
+  memory.iop_write32(0x1D000030u, 0x00000020u);
+  check((memory.read32(0x1000F230u) & 0x20u) != 0,
+        "IOP writes set shared SMFLAG bits");
+
+  std::vector<std::uint8_t> bios(ps2vita::Memory::kBiosSize, 0);
+  const auto reset_instruction = i_type(0x09, 0, 8, 42);
+  bios[0] = static_cast<std::uint8_t>(reset_instruction);
+  bios[1] = static_cast<std::uint8_t>(reset_instruction >> 8);
+  bios[2] = static_cast<std::uint8_t>(reset_instruction >> 16);
+  bios[3] = static_cast<std::uint8_t>(reset_instruction >> 24);
+  check(memory.load_bios(bios.data(), bios.size()), "IOP test BIOS accepted");
+  ps2vita::IopCpu iop(memory);
+  check(iop.state().pc == 0xBFC00000u &&
+        iop.state().cop0[12] == 0x00400000u,
+        "IOP reset seeds R3000A reset state");
+  check(iop.step() == ps2vita::IopStopReason::None &&
+        iop.state().gpr[8] == 42,
+        "IOP executes from the shared BIOS reset vector");
+
+  iop.state() = {};
+  memory.iop_write32(0x00000000u, i_type(0x09, 0, 8, 5));
+  memory.iop_write32(0x00000004u, i_type(0x04, 8, 8, 2));
+  memory.iop_write32(0x00000008u, i_type(0x09, 0, 9, 7));
+  memory.iop_write32(0x0000000Cu, i_type(0x09, 0, 9, 99));
+  memory.iop_write32(0x00000010u, i_type(0x2B, 0, 9, 0x1000));
+  iop.run(4);
+  check(iop.state().pc == 0x00000014u &&
+        memory.iop_read32(0x1000u) == 7u,
+        "IOP branch delay slot and RAM store execute correctly");
+
+  iop.state() = {};
+  iop.state().gpr[8] = 9u;
+  memory.iop_write32(0x00000100u, 42u);
+  memory.iop_write32(0x00000000u, i_type(0x23, 0, 8, 0x100));
+  memory.iop_write32(0x00000004u, i_type(0x09, 8, 9, 1));
+  memory.iop_write32(0x00000008u, i_type(0x09, 8, 10, 1));
+  iop.run(3);
+  check(iop.state().gpr[9] == 10u && iop.state().gpr[10] == 43u,
+        "IOP models the R3000A one-instruction load delay");
+}
+
+void test_exception_entry_and_eret() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  std::vector<std::uint8_t> bios(ps2vita::Memory::kBiosSize, 0);
+  const std::uint32_t eret = 0x42000018u;
+  bios[0x200] = static_cast<std::uint8_t>(eret);
+  bios[0x201] = static_cast<std::uint8_t>(eret >> 8);
+  bios[0x202] = static_cast<std::uint8_t>(eret >> 16);
+  bios[0x203] = static_cast<std::uint8_t>(eret >> 24);
+  check(memory.load_bios(bios.data(), bios.size()), "exception test BIOS mapping");
+  memory.write32(0x1000, 0x0000000C); // syscall
+  cpu.reset(0x1000);
+  cpu.state().cop0[12] = 1u << 22;
+  cpu.set_exception_mode(true);
+  check(cpu.step() == ps2vita::StopReason::None, "syscall enters exception handler");
+  check(cpu.state().pc == 0xBFC00200, "bootstrap exception vector");
+  check(((cpu.state().cop0[13] >> 2) & 31u) == 8, "syscall cause code");
+  check(cpu.state().cop0[14] == 0x1000, "exception EPC");
+  check((cpu.state().cop0[12] & 2u) != 0, "exception sets EXL");
+  check(cpu.step() == ps2vita::StopReason::None, "ERET executes");
+  check(cpu.state().pc == 0x1000 && (cpu.state().cop0[12] & 2u) == 0,
+        "ERET restores EPC and clears EXL");
+}
+
+void test_cop0_count_advances() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  memory.write32(0x1000, 0x40084800u); // mfc0 t0,Count
+  memory.write32(0x1004, 0);
+  memory.write32(0x1008, 0);
+  memory.write32(0x100C, 0x40094800u); // mfc0 t1,Count
+  memory.write32(0x1010, 0x0000000D);
+  cpu.state().pc = 0x1000;
+  check(cpu.run(8) == ps2vita::StopReason::Break, "COP0 Count test executes");
+  check(cpu.state().gpr[9] > cpu.state().gpr[8], "COP0 Count follows EE cycles");
+}
+
+void test_empty_ram_vector_falls_back_to_rom() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  std::vector<std::uint8_t> bios(ps2vita::Memory::kBiosSize, 0);
+  check(memory.load_bios(bios.data(), bios.size()), "fallback test BIOS mapping");
+  memory.write32(0x1000, 0x0000000C); // syscall
+  cpu.reset(0x1000);
+  cpu.set_exception_mode(true);
+  cpu.state().cop0[12] = 0; // BEV clear, but RAM vector has not been installed.
+  check(cpu.step() == ps2vita::StopReason::None, "empty vector exception handled");
+  check(cpu.state().pc == 0xBFC00200u,
+        "empty RAM exception vector retains bootstrap ROM service");
+}
+
+void test_tlb_translation() {
+  ps2vita::Memory memory;
+  memory.write_tlb(3, 0, 0xC0000000u, (0x00010u << 6) | 7u,
+                   (0x00011u << 6) | 7u);
+  memory.write32(0x00010130, 0xAABBCCDD);
+  check(memory.read32(0xC0000130) == 0xAABBCCDD, "TLB even-page translation");
+  memory.write32(0x00011234, 0x12345678);
+  check(memory.read32(0xC0001234) == 0x12345678, "TLB odd-page translation");
+  check(memory.probe_tlb(0xC0000000u) == 3, "TLBP finds mapped VPN");
+  std::uint32_t mask = 0, hi = 0, lo0 = 0, lo1 = 0;
+  check(memory.read_tlb(3, mask, hi, lo0, lo1) && hi == 0xC0000000u,
+        "TLBR returns entry state");
+
+  memory.write32(0x80000700u, 0xA5A55A5Au);
+  memory.write_tlb(0, 0, 0x70000000u, 0x80000007u, 0x00000007u);
+  for (unsigned page = 0; page < 4; ++page) {
+    const auto address = 0x70000080u + page * 0x1000u;
+    memory.write32(address, 0x51000000u + page);
+    check(memory.read32(address) == 0x51000000u + page,
+          "scratchpad TLB entry covers each 4 KiB quarter");
+  }
+  memory.write32(0x70001700u, 0);
+  check(memory.read32(0x80000700u) == 0xA5A55A5Au,
+        "scratchpad second quarter does not alias physical low RAM");
+}
+
+void test_ee_internal_registers() {
+  ps2vita::Memory memory;
+  constexpr std::uint32_t cache_control = 0xFFFE0130u;
+  check(memory.valid(cache_control, 4), "EE internal control page is mapped");
+  memory.write32(cache_control, 0x00000CC4u);
+  check(memory.read32(cache_control) == 0x00000CC4u,
+        "EE internal cache-control register retains its value");
+}
+
+void test_absent_dev_board_window() {
+  ps2vita::Memory memory;
+  check(memory.valid(ps2vita::Memory::kDevBoardBase),
+        "optional development-board aperture is handled");
+  memory.write8(ps2vita::Memory::kDevBoardBase, 0x5A);
+  check(memory.read8(ps2vita::Memory::kDevBoardBase) == 0,
+        "absent development board behaves as a null device");
+}
+
+void test_cpu_delay_slot() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  const std::uint32_t base = 0x1000;
+  memory.write32(base + 0x00, i_type(0x09, 0, 8, 5));       // addiu t0,zero,5
+  memory.write32(base + 0x04, i_type(0x04, 8, 8, 2));       // beq t0,t0,+2
+  memory.write32(base + 0x08, i_type(0x09, 0, 9, 7));       // delay: addiu t1,zero,7
+  memory.write32(base + 0x0C, i_type(0x09, 0, 9, 99));      // skipped
+  memory.write32(base + 0x10, i_type(0x2B, 0, 9, 0x2000));  // sw t1,0x2000
+  memory.write32(base + 0x14, 0x0000000D);                  // break
+  cpu.reset(base);
+  check(cpu.run(20) == ps2vita::StopReason::Break, "CPU reaches break");
+  check(memory.read32(0x2000) == 7, "branch executes one delay slot");
+  check(cpu.state().gpr[0] == 0, "zero register remains immutable");
+}
+
+void test_unaligned_memory_ops() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  memory.write32(0x3000, 0x44332211);
+  cpu.state().gpr[8] = 0xFFFFFFFFAABBCCDDull;
+  memory.write32(0x1000, i_type(0x22, 0, 8, 0x3001)); // lwl t0,0x3001(zero)
+  memory.write32(0x1004, 0x0000000D);
+  cpu.state().pc = 0x1000;
+  check(cpu.step() == ps2vita::StopReason::None, "LWL executes");
+  check(cpu.state().gpr[8] == 0x000000002211CCDDull, "LWL little-endian merge");
+
+  cpu.reset(0x1100);
+  cpu.state().gpr[8] = 0x12345678AABBCCDDull;
+  memory.write32(0x1100, i_type(0x26, 0, 8, 0x3001)); // lwr t0,0x3001(zero)
+  check(cpu.step() == ps2vita::StopReason::None, "LWR executes");
+  check(cpu.state().gpr[8] == 0x12345678AA443322ull, "LWR little-endian merge preserves upper word");
+
+  cpu.reset(0x1200);
+  cpu.state().gpr[8] = 0xAABBCCDD;
+  memory.write32(0x3000, 0x44332211);
+  memory.write32(0x1200, i_type(0x2A, 0, 8, 0x3001)); // swl
+  check(cpu.step() == ps2vita::StopReason::None, "SWL executes");
+  check(memory.read32(0x3000) == 0x4433AABB, "SWL little-endian merge");
+
+  cpu.reset(0x1300);
+  cpu.state().gpr[8] = 0xAABBCCDD;
+  memory.write32(0x3000, 0x44332211);
+  memory.write32(0x1300, i_type(0x2E, 0, 8, 0x3001)); // swr
+  check(cpu.step() == ps2vita::StopReason::None, "SWR executes");
+  check(memory.read32(0x3000) == 0xBBCCDD11, "SWR little-endian merge");
+}
+
+void test_quadword_load_store() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  memory.write64(0x4000, 0x0123456789ABCDEFull);
+  memory.write64(0x4008, 0xFEDCBA9876543210ull);
+  memory.write32(0x1000, i_type(0x1E, 0, 8, 0x4007)); // lq t0, unaligned address
+  memory.write32(0x1004, i_type(0x1F, 0, 8, 0x401F)); // sq t0, unaligned address
+  memory.write32(0x1008, 0x0000000D);
+  cpu.reset(0x1000);
+  check(cpu.run(10) == ps2vita::StopReason::Break, "LQ/SQ program executes");
+  check(cpu.state().gpr[8] == 0x0123456789ABCDEFull, "LQ low 64 bits");
+  check(cpu.state().gpr_hi[8] == 0xFEDCBA9876543210ull, "LQ high 64 bits");
+  check(memory.read64(0x4010) == 0x0123456789ABCDEFull, "SQ low 64 bits");
+  check(memory.read64(0x4018) == 0xFEDCBA9876543210ull, "SQ high 64 bits");
+}
+
+void test_compiler_support_ops() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[8] = 0x1234;
+  cpu.state().gpr[9] = 0;
+  cpu.state().gpr[10] = 1;
+  // movz s0,t0,t1; movn s1,t0,t2; dsllv s2,t0,t2; sync; cache; pref; break
+  memory.write32(0x1000, (8u << 21) | (9u << 16) | (16u << 11) | 0x0Au);
+  memory.write32(0x1004, (8u << 21) | (10u << 16) | (17u << 11) | 0x0Bu);
+  memory.write32(0x1008, (10u << 21) | (8u << 16) | (18u << 11) | 0x14u);
+  memory.write32(0x100C, 0x0000000F);
+  memory.write32(0x1010, i_type(0x2F, 0, 0, 0));
+  memory.write32(0x1014, i_type(0x33, 0, 0, 0));
+  memory.write32(0x1018, 0x0000000D);
+  cpu.state().pc = 0x1000;
+  check(cpu.run(20) == ps2vita::StopReason::Break, "compiler support op sequence");
+  check(cpu.state().gpr[16] == 0x1234, "MOVZ");
+  check(cpu.state().gpr[17] == 0x1234, "MOVN");
+  check(cpu.state().gpr[18] == 0x2468, "DSLLV");
+}
+
+void test_doubleword_arithmetic() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[8] = 0x100000001ull;
+  cpu.state().gpr[9] = 0x200000002ull;
+  memory.write32(0x1000, (8u << 21) | (9u << 16) | (10u << 11) | 0x2Cu);
+  memory.write32(0x1004, (9u << 21) | (8u << 16) | (11u << 11) | 0x2Eu);
+  memory.write32(0x1008, 0x0000000D);
+  cpu.state().pc = 0x1000;
+  check(cpu.run(10) == ps2vita::StopReason::Break,
+        "DADD/DSUB sequence executes");
+  check(cpu.state().gpr[10] == 0x300000003ull, "DADD keeps 64-bit result");
+  check(cpu.state().gpr[11] == 0x100000001ull, "DSUB keeps 64-bit result");
+}
+
+void test_decoded_block_cache() {
+  ps2vita::Memory memory;
+  ps2vita::EeBlockCache cache;
+  memory.write32(0x1000, i_type(0x04, 0, 0, 1)); // beq zero,zero,+1
+  memory.write32(0x1004, i_type(0x09, 0, 8, 1)); // delay: addiu t0,zero,1
+  memory.write32(0x1008, i_type(0x09, 0, 8, 2));
+  const auto& first = cache.lookup(memory, 0x1000);
+  check(first.valid && first.instruction_count == 2,
+        "decoded block includes branch delay slot and then stops");
+  check((first.instructions[1].flags & ps2vita::EeDelaySlot) != 0,
+        "decoded block marks delay slot");
+
+  memory.write32(0x1004, i_type(0x09, 0, 8, 7));
+  const auto& refreshed = cache.lookup(memory, 0x1000);
+  check(refreshed.instructions[1].opcode == i_type(0x09, 0, 8, 7),
+        "guest RAM write invalidates decoded block by page generation");
+}
+
+void test_mmi_padduw() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[8] = 0xFFFFFFFF00000001ull;
+  cpu.state().gpr_hi[8] = 0x80000000FFFFFFFEull;
+  cpu.state().gpr[9] = 0x0000000200000002ull;
+  cpu.state().gpr_hi[9] = 0x8000000000000003ull;
+  const std::uint32_t padduw = (0x1Cu << 26) | (8u << 21) | (9u << 16) |
+                               (10u << 11) | (0x10u << 6) | 0x28u;
+  memory.write32(0x1000, padduw);
+  memory.write32(0x1004, 0x0000000D);
+  cpu.state().pc = 0x1000;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "PADDUW executes");
+  check(cpu.state().gpr[10] == 0xFFFFFFFF00000003ull,
+        "PADDUW saturates low packed words");
+  check(cpu.state().gpr_hi[10] == 0xFFFFFFFFFFFFFFFFull,
+        "PADDUW saturates high packed words");
+}
+
+void test_mmi_por() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[8] = 0x00FF00FF00FF00FFull;
+  cpu.state().gpr_hi[8] = 0xAAAAAAAAAAAAAAAAull;
+  cpu.state().gpr[9] = 0xFF00FF00FF00FF00ull;
+  cpu.state().gpr_hi[9] = 0x5555555555555555ull;
+  memory.write32(0x1000,
+      (0x1Cu << 26) | (8u << 21) | (9u << 16) | (10u << 11) |
+      (0x12u << 6) | 0x29u); // por t2,t0,t1
+  memory.write32(0x1004, 0x0000000Du);
+  cpu.state().pc = 0x1000;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "POR executes");
+  check(cpu.state().gpr[10] == 0xFFFFFFFFFFFFFFFFull &&
+        cpu.state().gpr_hi[10] == 0xFFFFFFFFFFFFFFFFull,
+        "POR combines all 128 register bits");
+}
+
+void test_native_zero_fill_fast_path() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  constexpr std::uint32_t code = 0x1000u;
+  constexpr unsigned cursor = 16;
+  constexpr unsigned end = 4;
+  constexpr unsigned value = 2;
+  constexpr unsigned condition = 2;
+  memory.write32(code + 0u, i_type(0x1F, cursor, value, 0));
+  memory.write32(code + 4u, i_type(0x09, cursor, cursor, 16));
+  memory.write32(code + 8u,
+      (cursor << 21) | (end << 16) | (condition << 11) | 0x2Bu);
+  memory.write32(code + 12u, 0);
+  memory.write32(code + 16u, 0);
+  memory.write32(code + 20u, i_type(0x05, condition, 0, 0xFFFAu));
+  memory.write32(code + 24u,
+      (0x1Cu << 26) | (value << 11) | (0x12u << 6) | 0x29u);
+  memory.write32(code + 28u, 0x0000000Du);
+  for (std::uint32_t address = 0x4000u; address < 0x4100u; address += 8u)
+    memory.write64(address, 0xFFFFFFFFFFFFFFFFull);
+  cpu.reset(code);
+  cpu.state().gpr[cursor] = 0x4000u;
+  cpu.state().gpr[end] = 0x4100u;
+
+  check(cpu.run(14) == ps2vita::StopReason::StepLimit,
+        "native zero-fill respects a partial guest budget");
+  check(cpu.state().pc == code && cpu.state().gpr[cursor] == 0x4020u &&
+        memory.read64(0x4000u) == 0 && memory.read64(0x4018u) == 0 &&
+        memory.read64(0x4020u) == 0xFFFFFFFFFFFFFFFFull,
+        "native zero-fill resumes at the loop boundary");
+  check(cpu.run(200) == ps2vita::StopReason::Break,
+        "native zero-fill reaches the following instruction");
+  check(cpu.state().pc == code + 28u && cpu.state().gpr[cursor] == 0x4100u &&
+        cpu.state().gpr[condition] == 0 &&
+        memory.read64(0x40F8u) == 0,
+        "native zero-fill preserves final EE state and clears RAM");
+  check(cpu.state().fast_path_instructions == 16u * 7u,
+        "native zero-fill accounts optimized guest instructions");
+}
+
+void test_mmi_div1_accumulator() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[8] = 100;
+  cpu.state().gpr[9] = 7;
+  memory.write32(0x1000, (0x1Cu << 26) | (8u << 21) | (9u << 16) | 0x1Au);
+  memory.write32(0x1004, (0x1Cu << 26) | (10u << 11) | 0x12u); // mflo1 t2
+  memory.write32(0x1008, (0x1Cu << 26) | (11u << 11) | 0x10u); // mfhi1 t3
+  memory.write32(0x100C, 0x0000000D);
+  cpu.state().pc = 0x1000;
+  check(cpu.run(8) == ps2vita::StopReason::Break, "DIV1/MFLO1/MFHI1 execute");
+  check(cpu.state().gpr[10] == 14 && cpu.state().gpr[11] == 2,
+        "DIV1 exposes quotient and remainder through LO1/HI1");
+}
+
+void test_r5900_three_operand_multiply() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[17] = 159;
+  cpu.state().gpr[3] = 0x3D76;
+  memory.write32(0x1000, 0x02238818u); // mult s1,v1,s1 (R5900 rd result)
+  memory.write32(0x1004, 0x0000000Du);
+  cpu.state().pc = 0x1000;
+  check(cpu.run(4) == ps2vita::StopReason::Break,
+        "R5900 three-operand MULT executes");
+  check(cpu.state().gpr[17] == 159u * 0x3D76u &&
+        cpu.state().lo == 159u * 0x3D76u,
+        "R5900 MULT writes both rd and LO");
+}
+
+void test_scalar_fpu() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[8] = 0x3FC00000; // 1.5f
+  cpu.state().gpr[9] = 0x40100000; // 2.25f
+  const auto cop1 = [](unsigned fmt, unsigned ft, unsigned fs, unsigned fd, unsigned fn) {
+    return (0x11u << 26) | (fmt << 21) | (ft << 16) | (fs << 11) | (fd << 6) | fn;
+  };
+  memory.write32(0x1000, cop1(0x04, 8, 0, 0, 0));  // mtc1 t0,f0
+  memory.write32(0x1004, cop1(0x04, 9, 1, 0, 0));  // mtc1 t1,f1
+  memory.write32(0x1008, cop1(0x10, 1, 0, 2, 0));  // add.s f2,f0,f1
+  memory.write32(0x100C, cop1(0x00, 10, 2, 0, 0)); // mfc1 t2,f2
+  memory.write32(0x1010, cop1(0x10, 1, 0, 0, 0x18)); // adda.s f0,f1
+  memory.write32(0x1014, cop1(0x10, 1, 0, 3, 0x1C)); // madd.s f3,f0,f1
+  memory.write32(0x1018, 0x0000000D);
+  cpu.state().pc = 0x1000;
+  check(cpu.run(10) == ps2vita::StopReason::Break, "scalar COP1 sequence");
+  check(cpu.state().gpr[10] == 0x40700000, "ADD.S produces 3.75");
+  check(cpu.state().fpu_acc == 0x40700000u &&
+        cpu.state().fpr[3] == 0x40E40000u,
+        "FPU accumulator feeds MADD.S");
+}
+
+void test_fpu_memory_transfer() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[8] = 0x2000;
+  cpu.state().fpr[3] = 0x40490FDBu;
+  memory.write32(0x1000, i_type(0x39, 8, 3, 4)); // swc1 f3,4(t0)
+  memory.write32(0x1004, i_type(0x31, 8, 4, 4)); // lwc1 f4,4(t0)
+  memory.write32(0x1008, 0x0000000D);
+  cpu.state().pc = 0x1000;
+  check(cpu.run(6) == ps2vita::StopReason::Break, "LWC1/SWC1 execute");
+  check(memory.read32(0x2004) == 0x40490FDBu &&
+        cpu.state().fpr[4] == 0x40490FDBu,
+        "LWC1/SWC1 preserve raw floating-point bits");
+}
+
+void test_vu_memory_windows() {
+  ps2vita::Memory memory;
+  const std::array<std::uint32_t, 4> banks = {
+      ps2vita::Memory::kVu0MicroBase, ps2vita::Memory::kVu0DataBase,
+      ps2vita::Memory::kVu1MicroBase, ps2vita::Memory::kVu1DataBase};
+  for (unsigned i = 0; i < banks.size(); ++i) {
+    check(memory.valid(banks[i], 16), "VU memory bank is EE-visible");
+    memory.write32(banks[i], 0xA0B0C000u + i);
+    check(memory.read32(banks[i]) == 0xA0B0C000u + i,
+          "VU memory bank preserves writes");
+  }
+  check(!memory.valid(0x11001000u, 4) && !memory.valid(0x11005000u, 4),
+        "VU address-map holes remain unmapped");
+}
+
+void test_vu0_cop2_transfers() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.reset(0x1000);
+  cpu.state().gpr[8] = 0xFEDCBA9876543210ull;
+  cpu.state().gpr_hi[8] = 0x0123456789ABCDEFull;
+  cpu.state().gpr[9] = 0x00000C0Cu;
+  const auto cop2 = [](unsigned rs, unsigned rt, unsigned rd) {
+    return (0x12u << 26) | (rs << 21) | (rt << 16) | (rd << 11);
+  };
+  memory.write32(0x1000, cop2(0x04, 8, 3)); // qmtc2 t0,vf3
+  memory.write32(0x1004, cop2(0x01, 10, 3)); // qmfc2.i t2,vf3
+  memory.write32(0x1008, cop2(0x06, 9, 28)); // ctc2 t1,FBRST
+  memory.write32(0x100C, cop2(0x02, 11, 28)); // cfc2 t3,FBRST
+  memory.write32(0x1010, 0x0000000Du);
+  check(cpu.run(8) == ps2vita::StopReason::Break,
+        "COP2 control/vector transfers execute");
+  check(cpu.state().gpr[10] == 0xFEDCBA9876543210ull &&
+        cpu.state().gpr_hi[10] == 0x0123456789ABCDEFull,
+        "QMTC2/QMFC2 preserve all 128 bits");
+  check(cpu.state().gpr[11] == 0x00000C0Cu,
+        "FBRST masks writable control bits");
+
+  cpu.reset(0x1080);
+  cpu.state().vu0_vi[1] = 0x421u;
+  cpu.state().vu0_vi[2] = 0xBEEFu;
+  memory.write32(ps2vita::Memory::kVu0DataBase + 0x21u * 16u, 0xFFFFFFFFu);
+  memory.write32(0x1080, 0x4B020BFFu); // viswr.x vi2,(vi1)
+  memory.write32(0x1084, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break, "VISWR executes");
+  check(memory.read32(ps2vita::Memory::kVu0DataBase + 0x21u * 16u) ==
+            0x0000BEEFu,
+        "VISWR wraps VU0 memory and writes a selected integer lane");
+
+  cpu.reset(0x10C0);
+  cpu.state().vu0_vf[2] = 0x4080000040400000ull; // 3, 4
+  cpu.state().vu0_vf_hi[2] = 0x40C0000040A00000ull; // 5, 6
+  cpu.state().vu0_vf[3] = 0x3F8000003F800000ull; // 1, 1
+  cpu.state().vu0_vf_hi[3] = 0x3F8000003F800000ull; // 1, 1
+  memory.write32(0x10C0, (0x12u << 26) | (0x1Fu << 21) | (3u << 16) |
+                              (2u << 11) | (4u << 6) | 0x2Cu);
+  memory.write32(0x10C4, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break, "VU0 VSUB executes");
+  check(cpu.state().vu0_vf[4] == 0x4040000040000000ull &&
+        cpu.state().vu0_vf_hi[4] == 0x40A0000040800000ull,
+        "VU0 VSUB updates selected vector lanes");
+
+  cpu.reset(0x10D0);
+  cpu.state().vu0_vi[2] = 7;
+  cpu.state().vu0_vi[3] = 9;
+  memory.write32(0x10D0, (0x12u << 26) | (0x10u << 21) | (3u << 16) |
+                              (2u << 11) | (4u << 6) | 0x30u);
+  memory.write32(0x10D4, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break &&
+        (cpu.state().vu0_vi[4] & 0xFFFFu) == 16u,
+        "VU0 VIADD writes a 16-bit integer register result");
+
+  cpu.reset(0x10E0);
+  cpu.state().vu0_vi[1] = 0x101u;
+  cpu.state().vu0_vf[2] = 0x0123456789ABCDEFull;
+  cpu.state().vu0_vf_hi[2] = 0xFEDCBA9876543210ull;
+  memory.write32(0x10E0, 0x4BE1137Du); // vsqi.xyzw vf2,(vi1++)
+  memory.write32(0x10E4, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break, "VU0 VSQI executes");
+  check(memory.read32(ps2vita::Memory::kVu0DataBase + 16u) == 0x89ABCDEFu &&
+        memory.read32(ps2vita::Memory::kVu0DataBase + 28u) == 0xFEDCBA98u &&
+        (cpu.state().vu0_vi[1] & 0xFFFFu) == 0x102u,
+        "VU0 VSQI stores lanes, wraps memory, and increments VI");
+
+  cpu.reset(0x1100);
+  cpu.state().gpr[8] = 0x3003;
+  cpu.state().vu0_vf[4] = 0x1122334455667788ull;
+  cpu.state().vu0_vf_hi[4] = 0x99AABBCCDDEEFF00ull;
+  memory.write32(0x1100, i_type(0x3E, 8, 4, 5)); // sqc2 vf4,5(t0)
+  memory.write32(0x1104, i_type(0x36, 8, 5, 9)); // lqc2 vf5,9(t0)
+  memory.write32(0x1108, 0x0000000Du);
+  check(cpu.run(6) == ps2vita::StopReason::Break, "LQC2/SQC2 execute");
+  check(cpu.state().vu0_vf[5] == 0x1122334455667788ull &&
+        cpu.state().vu0_vf_hi[5] == 0x99AABBCCDDEEFF00ull,
+        "LQC2/SQC2 align and preserve VU vector bits");
+}
+
+void test_quarter_scale_gs() {
+  ps2vita::Gs gs;
+  gs.clear(0xFF000000u);
+  gs.triangle({10, 10, 100, 0xFF0000FFu},
+              {150, 10, 100, 0xFF00FF00u},
+              {80, 100, 100, 0xFFFF0000u});
+  check(gs.pixel(80, 40) != 0xFF000000u, "GS triangle covers interior");
+  const auto before = gs.pixel(80, 40);
+  gs.point({80, 40, 200, 0xFFFFFFFFu});
+  check(gs.pixel(80, 40) == before, "GS rejects farther depth");
+  gs.point({80, 40, 50, 0xFFFFFFFFu});
+  check(gs.pixel(80, 40) == 0xFFFFFFFFu, "GS accepts nearer depth");
+  gs.line({0, 0, 0, 0xFFFFFFFFu}, {159, 111, 0, 0xFFFFFFFFu});
+  check(gs.pixel(0, 0) == 0xFFFFFFFFu && gs.pixel(159, 111) == 0xFFFFFFFFu,
+        "GS line includes endpoints");
+}
+
+void put16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
+  v[at] = static_cast<std::uint8_t>(x); v[at + 1] = static_cast<std::uint8_t>(x >> 8);
+}
+void put32(std::vector<std::uint8_t>& v, std::size_t at, std::uint32_t x) {
+  put16(v, at, static_cast<std::uint16_t>(x)); put16(v, at + 2, static_cast<std::uint16_t>(x >> 16));
+}
+
+std::vector<std::uint8_t> tiny_elf() {
+  std::vector<std::uint8_t> v(0x108, 0);
+  v[0] = 0x7F; v[1] = 'E'; v[2] = 'L'; v[3] = 'F'; v[4] = 1; v[5] = 1; v[6] = 1;
+  put16(v, 16, 2); put16(v, 18, 8); put32(v, 20, 1);
+  put32(v, 24, 0x1000); put32(v, 28, 52);
+  put16(v, 40, 52); put16(v, 42, 32); put16(v, 44, 1);
+  put32(v, 52, 1); put32(v, 56, 0x100); put32(v, 60, 0x1000);
+  put32(v, 68, 8); put32(v, 72, 16); put32(v, 76, 5); put32(v, 80, 16);
+  put32(v, 0x100, i_type(0x09, 0, 2, 42));
+  put32(v, 0x104, 0x0000000D);
+  return v;
+}
+
+void test_elf_and_emulator() {
+  auto elf = tiny_elf();
+  ps2vita::Emulator emulator;
+  const auto loaded = emulator.load_elf(elf.data(), elf.size());
+  check(loaded.ok && loaded.entry == 0x1000 && loaded.segments == 1, "ELF load metadata");
+  check(emulator.memory().read32(0x1008) == 0, "ELF BSS zero-fill");
+  check(emulator.run_slice(10) == ps2vita::StopReason::Break, "loaded ELF executes");
+  check(emulator.cpu().state().gpr[2] == 42, "ELF program result");
+
+  elf[18] = 3;
+  check(!emulator.load_elf(elf.data(), elf.size()).ok, "reject non-MIPS ELF");
+}
+
+void test_phase0_aot_contract() {
+  const auto& package = ps2vita::phase0_aot_package();
+  check(package.name != nullptr && package.entry_count == 14u,
+        "Phase-0 AOT package exposes sorted entry metadata");
+  check(ps2vita::validate_aot_package(package).ok(),
+        "Phase-0 AOT package passes metadata validation");
+  const auto* entry = ps2vita::find_phase0_aot_function(0x1000u);
+  check(entry != nullptr && entry->guest_start == 0x1000u &&
+            entry->guest_end == 0x100Cu && entry->function != nullptr,
+        "Phase-0 AOT function table resolves its entry");
+  check(ps2vita::find_phase0_aot_function(0x0FFCu) == nullptr &&
+            ps2vita::find_phase0_aot_function(0x1004u) == nullptr &&
+            ps2vita::find_phase0_aot_function(0x100Cu) == nullptr,
+        "Phase-0 AOT table accepts only generated entry points");
+  check(ps2vita::find_aot_function(package, 0x3008u) != nullptr &&
+            ps2vita::find_aot_function(package, 0x3010u) == nullptr,
+        "generic AOT package binary lookup resolves resume entries only");
+
+  ps2vita::AotFunctionEntry invalid_entries[] = {
+      package.entries[1], package.entries[0]};
+  auto invalid_package = package;
+  invalid_package.entries = invalid_entries;
+  invalid_package.entry_count = 2u;
+  check(ps2vita::validate_aot_package(invalid_package).error ==
+            ps2vita::AotPackageError::UnsortedEntries,
+        "AOT validation rejects unsorted generated entries");
+  ps2vita::Memory invalid_memory;
+  ps2vita::CpuState invalid_state{};
+  invalid_state.pc = invalid_entries[0].guest_start;
+  check(ps2vita::execute_aot(invalid_package, invalid_memory, invalid_state).kind ==
+            ps2vita::AotExitKind::Interpreter,
+        "AOT execution safely rejects an invalid package");
+
+  invalid_entries[0] = package.entries[0];
+  invalid_entries[1] = package.entries[1];
+  invalid_entries[1].guest_start = invalid_entries[0].guest_start + 4u;
+  check(ps2vita::validate_aot_package(invalid_package).error ==
+            ps2vita::AotPackageError::OverlappingEntries,
+        "AOT validation rejects overlapping generated ranges");
+
+  invalid_package = package;
+  invalid_package.abi_version = ps2vita::kAotAbiVersion + 1u;
+  check(ps2vita::validate_aot_package(invalid_package).error ==
+            ps2vita::AotPackageError::UnsupportedAbi,
+        "AOT validation rejects an incompatible runtime ABI");
+
+  invalid_package = package;
+  invalid_package.source_fingerprint_sha256 = "not-a-sha256";
+  check(ps2vita::validate_aot_package(invalid_package).error ==
+            ps2vita::AotPackageError::InvalidFingerprint,
+        "AOT validation rejects a malformed source fingerprint");
+
+  ps2vita::Memory fallback_memory;
+  ps2vita::CpuState fallback_state{};
+  fallback_state.pc = 0x5000u;
+  const auto fallback =
+      ps2vita::execute_phase0_aot(fallback_memory, fallback_state);
+  check(fallback.kind == ps2vita::AotExitKind::Interpreter &&
+            fallback.target == 0x5000u && fallback.instructions == 0u,
+        "unknown AOT entry returns an interpreter exit");
+
+  ps2vita::Memory bounded_memory;
+  ps2vita::CpuState bounded_state{};
+  bounded_state.pc = 0x3000u;
+  const auto bounded =
+      ps2vita::dispatch_phase0_aot(bounded_memory, bounded_state, 1u);
+  check(bounded.kind == ps2vita::AotExitKind::Interpreter &&
+            bounded.target == 0x3020u && bounded.instructions == 2u,
+        "AOT dispatch budget yields safely to interpreter");
+
+  const auto result = ps2vita::run_phase0_aot_probe();
+  check(result.matched, "Phase-0 interpreter/AOT contract matches");
+  check(result.interpreter_stop == ps2vita::StopReason::Break &&
+            result.aot_stop == ps2vita::StopReason::Break,
+        "Phase-0 paths observe BREAK");
+  check(result.interpreter_value == 42u && result.aot_value == 42u,
+        "Phase-0 paths produce identical guest RAM");
+
+  const auto chain = ps2vita::run_phase0_aot_chain_probe();
+  check(chain.matched, "Phase-0 direct/indirect AOT chain matches interpreter");
+  check(chain.interpreter_stop == ps2vita::StopReason::Break &&
+            chain.aot_stop == ps2vita::StopReason::Break &&
+            chain.interpreter_value == 42u && chain.aot_value == 42u,
+        "Phase-0 chained paths return and store identical state");
+
+  // Generated load/store and signed-arithmetic semantics are compared over a
+  // deterministic spread of inputs rather than a single friendly value.
+  std::uint32_t seed = 0xC001D00Du;
+  bool fuzz_matched = true;
+  for (unsigned iteration = 0; iteration < 32u; ++iteration) {
+    seed = seed * 1664525u + 1013904223u;
+    const std::uint32_t a0 = seed;
+    seed = seed * 1664525u + 1013904223u;
+    const std::uint32_t a1 = seed;
+
+    ps2vita::Memory interpreter_memory;
+    interpreter_memory.write32(0x4000u, 0x00851021u);
+    interpreter_memory.write32(0x4004u, 0xACC20000u);
+    interpreter_memory.write32(0x4008u, 0x8CC30000u);
+    interpreter_memory.write32(0x400Cu, 0x2462FFF9u);
+    interpreter_memory.write32(0x4010u, 0x0000000Du);
+    ps2vita::Cpu interpreter(interpreter_memory);
+    interpreter.reset(0x4000u);
+    interpreter.state().gpr[4] = a0;
+    interpreter.state().gpr[5] = a1;
+    interpreter.state().gpr[6] = 0x2100u;
+    const auto interpreter_stop = interpreter.run(8u);
+
+    ps2vita::Memory generated_memory;
+    ps2vita::CpuState generated_state{};
+    generated_state.pc = 0x4000u;
+    generated_state.gpr[4] = a0;
+    generated_state.gpr[5] = a1;
+    generated_state.gpr[6] = 0x2100u;
+    const auto generated_exit =
+        ps2vita::dispatch_aot(package, generated_memory, generated_state, 2u);
+    fuzz_matched = fuzz_matched &&
+        interpreter_stop == generated_exit.reason &&
+        generated_exit.kind == ps2vita::AotExitKind::Stop &&
+        interpreter.state().gpr[2] == generated_state.gpr[2] &&
+        interpreter.state().gpr[3] == generated_state.gpr[3] &&
+        interpreter_memory.read32(0x2100u) ==
+            generated_memory.read32(0x2100u) &&
+        interpreter.state().pc == generated_state.pc &&
+        interpreter.state().cycles == generated_state.cycles;
+  }
+  check(fuzz_matched,
+        "generated arithmetic/load/store blocks match seeded interpreter cases");
+
+  ps2vita::Memory fault_memory;
+  fault_memory.write32(0x4000u, 0x00851021u);
+  fault_memory.write32(0x4004u, 0xACC20000u);
+  fault_memory.write32(0x4008u, 0x8CC30000u);
+  fault_memory.write32(0x400Cu, 0x2462FFF9u);
+  fault_memory.write32(0x4010u, 0x0000000Du);
+  ps2vita::Cpu fault_interpreter(fault_memory);
+  fault_interpreter.reset(0x4000u);
+  fault_interpreter.state().gpr[4] = 10u;
+  fault_interpreter.state().gpr[5] = 20u;
+  fault_interpreter.state().gpr[6] = 0x2101u;
+  const auto fault_stop = fault_interpreter.run(8u);
+
+  ps2vita::Memory fault_generated_memory;
+  ps2vita::CpuState fault_generated_state{};
+  fault_generated_state.pc = 0x4000u;
+  fault_generated_state.gpr[4] = 10u;
+  fault_generated_state.gpr[5] = 20u;
+  fault_generated_state.gpr[6] = 0x2101u;
+  const auto fault_exit = ps2vita::execute_aot(
+      package, fault_generated_memory, fault_generated_state);
+  check(fault_exit.kind == ps2vita::AotExitKind::Interpreter &&
+            fault_exit.target == 0x4004u && fault_exit.instructions == 1u &&
+            fault_generated_state.pc == 0x4004u &&
+            fault_generated_state.cycles == 1u &&
+            fault_stop == ps2vita::StopReason::MemoryFault,
+        "generated misaligned store yields before the faulting instruction");
+
+  ps2vita::Memory unsupported_memory;
+  ps2vita::CpuState unsupported_state{};
+  unsupported_state.pc = 0x5000u;
+  const auto unsupported =
+      ps2vita::execute_aot(package, unsupported_memory, unsupported_state);
+  check(unsupported.kind == ps2vita::AotExitKind::Interpreter &&
+            unsupported.target == 0x5000u && unsupported.instructions == 0u &&
+            unsupported_state.pc == 0x5000u,
+        "generated unsupported opcode exits exactly to the interpreter");
+
+  bool branch_matched = true;
+  for (unsigned iteration = 0; iteration < 16u; ++iteration) {
+    const std::uint32_t a0 = iteration * 0x1020304u;
+    const std::uint32_t a1 = (iteration & 1u) ? a0 : a0 + 1u;
+    ps2vita::Memory interpreter_memory;
+    interpreter_memory.write32(0x6000u, 0x10850003u);
+    interpreter_memory.write32(0x6004u, 0x24020001u);
+    interpreter_memory.write32(0x6008u, 0x08001806u);
+    interpreter_memory.write32(0x600Cu, 0x24420002u);
+    interpreter_memory.write32(0x6010u, 0x08001806u);
+    interpreter_memory.write32(0x6014u, 0x24420004u);
+    interpreter_memory.write32(0x6018u, 0x0000000Du);
+    ps2vita::Cpu interpreter(interpreter_memory);
+    interpreter.reset(0x6000u);
+    interpreter.state().gpr[4] = a0;
+    interpreter.state().gpr[5] = a1;
+    const auto interpreter_stop = interpreter.run(8u);
+
+    ps2vita::Memory generated_memory;
+    ps2vita::CpuState generated_state{};
+    generated_state.pc = 0x6000u;
+    generated_state.gpr[4] = a0;
+    generated_state.gpr[5] = a1;
+    const auto generated_exit =
+        ps2vita::dispatch_aot(package, generated_memory, generated_state, 4u);
+    branch_matched = branch_matched &&
+        interpreter_stop == generated_exit.reason &&
+        generated_exit.kind == ps2vita::AotExitKind::Stop &&
+        interpreter.state().gpr[2] == generated_state.gpr[2] &&
+        interpreter.state().pc == generated_state.pc &&
+        interpreter.state().cycles == generated_state.cycles &&
+        generated_exit.instructions == 5u;
+  }
+  check(branch_matched,
+        "generated direct branches and delay slots match both interpreter paths");
+
+  bool bne_matched = true;
+  for (unsigned iteration = 0; iteration < 8u; ++iteration) {
+    const std::uint32_t a0 = iteration * 0x112233u;
+    const std::uint32_t a1 = (iteration & 1u) ? a0 + 1u : a0;
+    ps2vita::Memory interpreter_memory;
+    interpreter_memory.write32(0x7000u, 0x14850003u);
+    interpreter_memory.write32(0x7004u, 0x24020001u);
+    interpreter_memory.write32(0x7008u, 0x08001C06u);
+    interpreter_memory.write32(0x700Cu, 0x24420002u);
+    interpreter_memory.write32(0x7010u, 0x08001C06u);
+    interpreter_memory.write32(0x7014u, 0x24420004u);
+    interpreter_memory.write32(0x7018u, 0x0000000Du);
+    ps2vita::Cpu interpreter(interpreter_memory);
+    interpreter.reset(0x7000u);
+    interpreter.state().gpr[4] = a0;
+    interpreter.state().gpr[5] = a1;
+    const auto interpreter_stop = interpreter.run(8u);
+
+    ps2vita::Memory generated_memory;
+    ps2vita::CpuState generated_state{};
+    generated_state.pc = 0x7000u;
+    generated_state.gpr[4] = a0;
+    generated_state.gpr[5] = a1;
+    const auto generated_exit =
+        ps2vita::dispatch_aot(package, generated_memory, generated_state, 4u);
+    bne_matched = bne_matched &&
+        interpreter_stop == generated_exit.reason &&
+        generated_exit.kind == ps2vita::AotExitKind::Stop &&
+        interpreter.state().gpr[2] == generated_state.gpr[2] &&
+        interpreter.state().pc == generated_state.pc &&
+        interpreter.state().cycles == generated_state.cycles;
+  }
+  check(bne_matched,
+        "generated BNE blocks match taken and fallthrough interpreter paths");
+}
+}
+
+int main() {
+  test_memory_aliases();
+  test_bios_mapping_and_boot();
+  test_iop_memory_and_cpu();
+  test_exception_entry_and_eret();
+  test_cop0_count_advances();
+  test_empty_ram_vector_falls_back_to_rom();
+  test_tlb_translation();
+  test_ee_internal_registers();
+  test_absent_dev_board_window();
+  test_cpu_delay_slot();
+  test_unaligned_memory_ops();
+  test_quadword_load_store();
+  test_compiler_support_ops();
+  test_doubleword_arithmetic();
+  test_decoded_block_cache();
+  test_mmi_padduw();
+  test_mmi_por();
+  test_native_zero_fill_fast_path();
+  test_mmi_div1_accumulator();
+  test_r5900_three_operand_multiply();
+  test_scalar_fpu();
+  test_fpu_memory_transfer();
+  test_vu_memory_windows();
+  test_vu0_cop2_transfers();
+  test_quarter_scale_gs();
+  test_elf_and_emulator();
+  test_phase0_aot_contract();
+  if (failures) return EXIT_FAILURE;
+  std::puts("All PS2Vita core tests passed.");
+  return EXIT_SUCCESS;
+}

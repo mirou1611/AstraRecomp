@@ -1,0 +1,93 @@
+# Architecture
+
+## Boundary
+
+`ps2core` is portable C++17 and has no Vita headers. The Vita frontend owns files,
+input, presentation, and frame pacing. This separation lets the interpreter and
+loaders run under ordinary sanitizers and unit tests before risking hard-to-debug
+Vita crashes.
+
+## Execution architecture
+
+```text
+boot.elf -> ELF validation -> PT_LOAD segments -> 32 MiB EE RAM
+                                                |
+Vita controls -> scheduler -> EE frontend -> interpreter -> stop/debug state -> UI
+                                      |
+                                      +-> decoded blocks -> optional ARMv7 JIT
+```
+
+Every frame executes a bounded slice of 25,000 instructions. This keeps input and
+the monitor responsive even when guest code loops forever. MIPS branch delay slots
+are represented explicitly rather than hidden in a host-language control flow.
+
+The interpreter is the architectural truth, not a temporary throwaway. Each EE
+instruction has one tested semantic implementation. The first execution tier now
+caches decoded basic blocks and will dispatch those same semantics without repeatedly
+decoding opcode fields. Hot blocks can then be lowered through an optional ARMv7
+backend. Unsupported instructions, exceptions, MMIO, and debugging always fall
+back to the interpreter at an exact guest PC.
+
+The first native semantic fast path recognizes large compiler-generated SQ/POR
+zero-fill loops independent of their guest address. It validates the complete
+instruction pattern and ordinary-RAM bounds, clears a budget-limited chunk with
+the host runtime, preserves final EE registers and branch state, charges every
+guest instruction to Count/cycles, and uses `Memory::zero` so translated-code
+pages are invalidated. This accelerates BIOS clearing without embedding a BIOS-
+specific address or weakening the interpreter oracle.
+
+The current IOP boundary is explicit. EE SBUS register behavior implements the
+hardware's asymmetric MSFLAG/SMFLAG set/clear rules. A small cycle-scheduled boot
+bridge performs only the reset-ROM acknowledgements (`SIFINIT` and `BOOTEND`) that
+the absent IOP CPU would produce. This lets the unmodified EE BIOS reach its real
+post-boot idle kernel while keeping one narrow seam that a later R3000A interpreter
+can replace; it is not a BIOS-PC skip or a synthetic startup screen.
+
+This keeps four concerns separate:
+
+- `Memory` translates guest addresses and routes RAM, BIOS, EE internal state,
+  hardware registers, IOP windows, and GS/VU apertures to explicit devices.
+- `Cpu` owns precise R5900 architectural state and interpreter semantics.
+- A decoded-block frontend will own block discovery, invalidation, and hotness.
+- A Vita-only code-cache provider will own executable allocation and instruction-
+  cache synchronization; portable core code will never call Vita APIs directly.
+
+The preferred JIT emitter candidate is Play!-CodeGen because it already supplies
+an AArch32 EABI backend and a permissive license. It must first pass a standalone
+VitaSDK compile probe. JIT remains optional: devices without an executable-memory
+path will use decoded blocks, preserving a VPK that launches without extra plugins.
+
+## Vita-minded register strategy
+
+The EE has 128-bit GPRs while the Vita CPU is 32-bit ARMv7. Keeping all guest GPRs
+permanently in host registers is impossible. Scalar blocks should cache the most
+active low 32-bit halves in ARM registers, materialize 64-bit pairs only when
+needed, and spill full 128-bit values to the CPU state. MMI and VU operations can
+use NEON in small groups, with the interpreter remaining the reference for lane,
+saturation, and flag behavior.
+
+Direct RAM accesses may use checked fast paths. TLB, MMIO, unaligned, cross-page,
+or watchpoint accesses call the shared `Memory` helpers. Stores to executable EE
+RAM invalidate decoded/JIT blocks by guest page so self-modifying BIOS and game
+code cannot execute stale translations.
+
+## Deliberate constraints
+
+- GPR storage models all 128 bits; scalar instructions use the low 64 while LQ/SQ
+  move the full register. MMI arithmetic over the high lanes is a roadmap item.
+- Invalid, unaligned, or unimplemented operations stop deterministically rather
+  than silently corrupting state.
+- There is no dynarec yet. The interpreter is the correctness oracle for decoded
+  blocks and a later optional ARMv7 JIT.
+- The 160x112 framebuffer currently consumes direct reference primitives. GIF/GS
+  register decoding still needs to connect guest output to it.
+- COP1 currently uses host IEEE float operations; R5900-specific rounding,
+  denormal, overflow, and accumulator behavior still needs conformance work.
+- No BIOS or proprietary Sony code is present.
+
+## Performance direction
+
+The target is functionality before speed. The first GS backend should render at
+160x112 for nominal 640x448 content (0.25x in each dimension), batch compatible
+primitives, and upscale once per frame. EE, IOP, VU, and GS work should use separate
+bounded queues only after the single-threaded scheduler is deterministic.

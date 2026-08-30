@@ -1,0 +1,12 @@
+/build-*/
+/.tools/
+__pycache__/
+*.py[cod]
+*.log
+*.vpk
+*.self
+*.elf
+
+# User-supplied copyrighted firmware must never enter source control.
+/bios*.bin
+/ps2-*.bin
