@@ -442,6 +442,21 @@ void test_cdvd_reset_status() {
         "CDVD ReadConfig exposes a bounded sixteen-byte result");
 }
 
+void test_sio2_disconnected_transfer() {
+  ps2vita::Memory memory;
+  check(memory.iop_read32(0x1F808268u) == 0x000003BCu &&
+        memory.iop_read32(0x1F80826Cu) == 0x0001D100u &&
+        memory.iop_read32(0x1F808270u) == 0x0000000Fu,
+        "SIO2 exposes its reset control and disconnected-device status");
+  check(memory.iop_read8(0x1F808264u) == 0xFFu,
+        "SIO2 disconnected FIFO reads return idle bus data");
+  memory.iop_write32(0x1F808268u, 0xB1u);
+  check(memory.iop_read32(0x1F808268u) == 0xB1u &&
+        (memory.iop_read32(0x1F80826Cu) & (1u << 12)) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 17)) != 0u,
+        "SIO2 start completes the no-device PIO probe and raises IRQ 17");
+}
+
 void test_video_vblank_deadlines() {
   ps2vita::Memory memory;
   memory.write32(0x1000F010u, (1u << 2) | (1u << 3));
@@ -894,6 +909,64 @@ void test_mmi_pcpyld() {
   check(cpu.state().gpr[2] == 0x0123456789ABCDEFull &&
         cpu.state().gpr_hi[2] == 0xFEDCBA9876543210ull,
         "PCPYUD packs Rs high below Rt high with alias-safe reads");
+
+  cpu.state().gpr[2] = 0x111122223333ABCDull;
+  cpu.state().gpr_hi[2] = 0x9999AAAABBBB7654ull;
+  // pcpyh v0,zero,v0: destination aliases rt, as in relocated BIOS code.
+  memory.write32(0x1010u, (0x1Cu << 26) | (2u << 16) | (2u << 11) |
+                                (0x1Bu << 6) | 0x29u);
+  memory.write32(0x1014u, 0x0000000Du);
+  cpu.state().pc = 0x1010u;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "PCPYH executes");
+  check(cpu.state().gpr[2] == 0xABCDABCDABCDABCDull &&
+        cpu.state().gpr_hi[2] == 0x7654765476547654ull,
+        "PCPYH replicates each doubleword's low halfword alias-safely");
+
+  cpu.state().gpr[2] = 0xFFFF0000AAAA5555ull;
+  cpu.state().gpr_hi[2] = 0x0123456789ABCDEFull;
+  cpu.state().gpr[9] = 0x00FFFF00A5A55A5Aull;
+  cpu.state().gpr_hi[9] = 0xFEDCBA9876543210ull;
+  // pxor v0,v0,t1: destination aliases rs, as in relocated BIOS code.
+  memory.write32(0x1018u, (0x1Cu << 26) | (2u << 21) | (9u << 16) |
+                                (2u << 11) | (0x13u << 6) | 0x09u);
+  memory.write32(0x101Cu, 0x0000000Du);
+  cpu.state().pc = 0x1018u;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "PXOR executes");
+  check(cpu.state().gpr[2] == 0xFF00FF000F0F0F0Full &&
+        cpu.state().gpr_hi[2] == 0xFFFFFFFFFFFFFFFFull,
+        "PXOR combines all 128 register bits alias-safely");
+
+  cpu.state().gpr[2] = 0x0001020304050607ull;
+  cpu.state().gpr_hi[2] = 0x1011121314151617ull;
+  cpu.state().gpr[3] = 0x0101010101010101ull;
+  cpu.state().gpr_hi[3] = 0x0808080808080808ull;
+  memory.write32(0x1020u, (0x1Cu << 26) | (2u << 21) | (3u << 16) |
+                                (2u << 11) | (0x09u << 6) | 0x08u);
+  memory.write32(0x1024u, 0x0000000Du);
+  cpu.state().pc = 0x1020u;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "PSUBB executes");
+  check(cpu.state().gpr[2] == 0xFF00010203040506ull &&
+        cpu.state().gpr_hi[2] == 0x08090A0B0C0D0E0Full,
+        "PSUBB wraps eight independent byte lanes per register half");
+
+  cpu.state().gpr[2] = 0xFF00FF00FF00FF00ull;
+  cpu.state().gpr_hi[2] = 0xAAAAAAAAAAAAAAAAull;
+  cpu.state().gpr[3] = 0x0F0F0F0F0F0F0F0Full;
+  cpu.state().gpr_hi[3] = 0xCCCCCCCCCCCCCCCCull;
+  cpu.state().gpr[5] = cpu.state().gpr[2];
+  cpu.state().gpr_hi[5] = cpu.state().gpr_hi[2];
+  memory.write32(0x1028u, (0x1Cu << 26) | (2u << 21) | (3u << 16) |
+                                (2u << 11) | (0x12u << 6) | 0x09u);
+  memory.write32(0x102Cu, (0x1Cu << 26) | (5u << 21) | (3u << 16) |
+                                (4u << 11) | (0x13u << 6) | 0x29u);
+  memory.write32(0x1030u, 0x0000000Du);
+  cpu.state().pc = 0x1028u;
+  check(cpu.run(8) == ps2vita::StopReason::Break, "PAND and PNOR execute");
+  check(cpu.state().gpr[2] == 0x0F000F000F000F00ull &&
+        cpu.state().gpr_hi[2] == 0x8888888888888888ull &&
+        cpu.state().gpr[4] == 0x00F000F000F000F0ull &&
+        cpu.state().gpr_hi[4] == 0x1111111111111111ull,
+        "PAND and PNOR combine all 128 bits with alias-safe sources");
 }
 
 void test_mmi_pextlw() {
@@ -1431,6 +1504,7 @@ int main() {
   test_sif0_iop_side_completes_first();
   test_iop_timer5_deadlines();
   test_cdvd_reset_status();
+  test_sio2_disconnected_transfer();
   test_video_vblank_deadlines();
   test_ee_timer3_hblank_clock();
   test_exception_entry_and_eret();

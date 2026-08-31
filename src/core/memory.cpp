@@ -103,6 +103,14 @@ void Memory::clear() {
   std::fill(iop_ram_.begin(), iop_ram_.end(), 0);
   iop_scratch_.fill(0);
   std::fill(iop_hw_.begin(), iop_hw_.end(), 0);
+  // SIO2 reset state: no controller/memory-card devices are attached. The
+  // command status still advertises a completed serial transaction state.
+  iop_hw_[0x7268u] = 0xBCu;
+  iop_hw_[0x7269u] = 0x03u;
+  iop_hw_[0x726Cu] = 0x00u;
+  iop_hw_[0x726Du] = 0xD1u;
+  iop_hw_[0x726Eu] = 0x01u;
+  iop_hw_[0x7270u] = 0x0Fu;
   std::fill(ee_internal_.begin(), ee_internal_.end(), 0);
   std::fill(dve_.begin(), dve_.end(), 0);
   dve_device_regs_ = {};
@@ -853,6 +861,8 @@ std::uint8_t Memory::iop_read8(std::uint32_t address) const {
   }
   if (p >= 0x1F800000u && p < 0x1F801000u)
     return iop_scratch_[p - 0x1F800000u];
+  if (p == 0x1F808264u)
+    return 0xFFu; // SIO2 FIFO: disconnected device response.
   if (p >= 0x1FFE0130u && p < 0x1FFE0134u)
     return static_cast<std::uint8_t>(iop_cache_control_ >> ((p & 3u) * 8u));
   if (p >= kIopHwBase && p < kIopHwBase + kIopHwSize)
@@ -1036,6 +1046,13 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
     timer5_target_future_ = value > iop_read32(0x1F8014A8u);
   } else if (p == 0x1F8014A8u) {
     timer5_target_future_ = value <= iop_read32(0x1F8014A0u);
+  } else if (p == 0x1F808268u && (value & 1u) != 0u) {
+    // Starting a SIO2 PIO transfer makes the disconnected-device response
+    // available and raises the hardware's IOP interrupt line 17.
+    iop_hw_[0x726Cu] = 0x00u;
+    iop_hw_[0x726Du] = 0xD1u;
+    iop_hw_[0x726Eu] = 0x01u;
+    iop_hw_[0x0072u] |= 0x02u;
   }
   iop_write8(address, static_cast<std::uint8_t>(value));
   iop_write8(address + 1u, static_cast<std::uint8_t>(value >> 8));

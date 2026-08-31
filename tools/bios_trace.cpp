@@ -187,6 +187,7 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> iop_sbus_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_dma_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_cdvd_trace{};
+  std::array<StoreEntry, kTraceSize> iop_sio2_trace{};
   std::array<StoreEntry, kTraceSize> iop_scmd_trace{};
   std::array<std::uint64_t, 256> iop_scmd_counts{};
   std::array<std::uint64_t, 4096> ee_opcode_counts{};
@@ -205,6 +206,7 @@ int main(int argc, char** argv) {
   std::size_t iop_sbus_store_cursor = 0;
   std::size_t iop_dma_store_cursor = 0;
   std::size_t iop_cdvd_cursor = 0;
+  std::size_t iop_sio2_cursor = 0;
   std::size_t iop_scmd_cursor = 0;
   unsigned last_iop_scmd = 256u;
   std::vector<char> serial_output;
@@ -347,6 +349,11 @@ int main(int argc, char** argv) {
           iop_cdvd_trace[iop_cdvd_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, 0u, 0u};
         }
+        if (address >= 0x1F808200u && address < 0x1F808280u) {
+          iop_sio2_trace[iop_sio2_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address,
+              emulator.memory().iop_read32(address & ~3u), 0u};
+        }
       }
       if (iop_opcode == 0x28u || iop_opcode == 0x29u ||
           iop_opcode == 0x2Au || iop_opcode == 0x2Bu ||
@@ -379,6 +386,10 @@ int main(int argc, char** argv) {
               last_iop_scmd = command;
             }
           }
+        }
+        if (address >= 0x1F808200u && address < 0x1F808280u) {
+          iop_sio2_trace[iop_sio2_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address, iop.gpr[source], 0u};
         }
         if ((address >= 0x1F801070u && address < 0x1F801080u) ||
             (address >= 0x1F8010F0u && address < 0x1F801100u) ||
@@ -561,6 +572,26 @@ int main(int argc, char** argv) {
       emulator.memory().iop_read32(sif0_madr + 20u),
       emulator.memory().iop_read32(sif0_madr + 24u),
       emulator.memory().iop_read32(sif0_madr + 28u));
+  std::puts("EE code surrounding final PC:");
+  const auto ee_code_base = (state.pc & ~0xFFu) - 0x100u;
+  for (std::uint32_t offset = 0u; offset < 0x300u; offset += 16u) {
+    const auto address = ee_code_base + offset;
+    std::printf("%08X  %08X %08X %08X %08X\n", address,
+        emulator.memory().read32(address),
+        emulator.memory().read32(address + 4u),
+        emulator.memory().read32(address + 8u),
+        emulator.memory().read32(address + 12u));
+  }
+  std::puts("IOP code surrounding final PC:");
+  const auto iop_code_base = (iop_state.pc & ~0xFFu) - 0x100u;
+  for (std::uint32_t offset = 0u; offset < 0x300u; offset += 16u) {
+    const auto address = iop_code_base + offset;
+    std::printf("%08X  %08X %08X %08X %08X\n", address,
+        emulator.memory().iop_read32(address),
+        emulator.memory().iop_read32(address + 4u),
+        emulator.memory().iop_read32(address + 8u),
+        emulator.memory().iop_read32(address + 12u));
+  }
   std::puts("delivered SIF0 packet EE 000935C0 / IOP source 00019870:");
   for (std::uint32_t offset = 0u; offset < 0x40u; offset += 16u) {
     std::printf("EE %08X  %08X %08X %08X %08X   IOP %08X  %08X %08X %08X %08X\n",
@@ -758,13 +789,25 @@ int main(int argc, char** argv) {
     }
   }
   if (iop_dma_store_cursor != 0) {
-  std::puts("recent IOP stores to DMA/interrupt registers:");
+    std::puts("recent IOP stores to DMA/interrupt registers:");
     const std::size_t store_count = iop_dma_store_cursor < kTraceSize
         ? iop_dma_store_cursor : kTraceSize;
     const std::size_t store_first = iop_dma_store_cursor < kTraceSize
         ? 0 : iop_dma_store_cursor % kTraceSize;
     for (std::size_t i = 0; i < store_count; ++i) {
       const auto& item = iop_dma_store_trace[(store_first + i) % kTraceSize];
+      std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
+                  item.instruction, item.address,
+                  static_cast<unsigned long long>(item.value_lo));
+    }
+  }
+  if (iop_sio2_cursor != 0) {
+    std::puts("recent IOP SIO2 register accesses:");
+    const auto sio2_count = std::min(iop_sio2_cursor, kTraceSize);
+    const auto sio2_start = iop_sio2_cursor >= kTraceSize
+        ? iop_sio2_cursor % kTraceSize : 0u;
+    for (std::size_t i = 0; i < sio2_count; ++i) {
+      const auto& item = iop_sio2_trace[(sio2_start + i) % kTraceSize];
       std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
                   item.instruction, item.address,
                   static_cast<unsigned long long>(item.value_lo));

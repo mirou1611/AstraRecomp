@@ -109,6 +109,8 @@ PS2 ELF / user BIOS
   clock prescaling, pulsed-repeat target/overflow IRQs, and INTC bit 16 delivery
 - Initial no-disc CDVD device state with N-READY/status registers and bounded
   OpenConfig/ReadConfig/WriteConfig/CloseConfig secondary-command transport
+- Initial no-device SIO2 PIO state with reset/status registers, disconnected
+  FIFO responses, transfer-start completion, and IOP interrupt 17
 - Deterministic 59.94 Hz NTSC field phase with fractional-cycle correction and
   synchronized EE/IOP VBlank start and end interrupts
 - HBlank-driven EE Timer 3 with rational scanline phase, 16-bit target/overflow

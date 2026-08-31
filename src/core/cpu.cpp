@@ -61,6 +61,17 @@ std::uint64_t packed_add_unsigned_words(std::uint64_t lhs, std::uint64_t rhs) {
   return result;
 }
 
+std::uint64_t packed_subtract_bytes(std::uint64_t lhs, std::uint64_t rhs) {
+  std::uint64_t result = 0;
+  for (unsigned lane = 0; lane < 8; ++lane) {
+    const auto difference = static_cast<std::uint8_t>(
+        static_cast<std::uint8_t>(lhs >> (lane * 8)) -
+        static_cast<std::uint8_t>(rhs >> (lane * 8)));
+    result |= static_cast<std::uint64_t>(difference) << (lane * 8);
+  }
+  return result;
+}
+
 } // namespace
 
 Cpu::Cpu(Memory& memory) : memory_(memory) {}
@@ -775,6 +786,12 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
         state_.gpr[rd] = low;
         state_.gpr_hi[rd] = high;
       }
+    } else if (fn == 0x08 && sub == 0x09) { // PSUBB
+      if (rd != 0) {
+        state_.gpr[rd] = packed_subtract_bytes(rsv, rtv);
+        state_.gpr_hi[rd] = packed_subtract_bytes(
+            state_.gpr_hi[rs], state_.gpr_hi[rt]);
+      }
     } else if (fn == 0x09 && sub == 0x08) { // PMFHI
       if (rd != 0) {
         state_.gpr[rd] = state_.hi;
@@ -791,6 +808,16 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
         state_.gpr[rd] = rtv;
         state_.gpr_hi[rd] = high;
       }
+    } else if (fn == 0x09 && sub == 0x13) { // PXOR
+      if (rd != 0) {
+        state_.gpr[rd] = rsv ^ rtv;
+        state_.gpr_hi[rd] = state_.gpr_hi[rs] ^ state_.gpr_hi[rt];
+      }
+    } else if (fn == 0x09 && sub == 0x12) { // PAND
+      if (rd != 0) {
+        state_.gpr[rd] = rsv & rtv;
+        state_.gpr_hi[rd] = state_.gpr_hi[rs] & state_.gpr_hi[rt];
+      }
     } else if (fn == 0x29 && sub == 0x08) { // PMTHI
       state_.hi = rsv;
       state_.hi1 = state_.gpr_hi[rs];
@@ -803,6 +830,14 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
         state_.gpr_hi[rd] = state_.gpr_hi[rt];
         state_.gpr[rd] = low;
       }
+    } else if (fn == 0x29 && sub == 0x1B) { // PCPYH
+      if (rd != 0) {
+        constexpr std::uint64_t replicate = 0x0001000100010001ull;
+        const auto low_half = rtv & 0xFFFFu;
+        const auto high_half = state_.gpr_hi[rt] & 0xFFFFu;
+        state_.gpr[rd] = low_half * replicate;
+        state_.gpr_hi[rd] = high_half * replicate;
+      }
     } else if (fn == 0x28 && sub == 0x10) { // PADDUW
       if (rd != 0) {
         state_.gpr[rd] = packed_add_unsigned_words(rsv, rtv);
@@ -813,6 +848,11 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
       if (rd != 0) {
         state_.gpr[rd] = rsv | rtv;
         state_.gpr_hi[rd] = state_.gpr_hi[rs] | state_.gpr_hi[rt];
+      }
+    } else if (fn == 0x29 && sub == 0x13) { // PNOR
+      if (rd != 0) {
+        state_.gpr[rd] = ~(rsv | rtv);
+        state_.gpr_hi[rd] = ~(state_.gpr_hi[rs] | state_.gpr_hi[rt]);
       }
     } else {
       return StopReason::InvalidInstruction;
