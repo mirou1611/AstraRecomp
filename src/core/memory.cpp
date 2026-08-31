@@ -690,6 +690,12 @@ void Memory::advance(std::uint32_t cycles) {
       const auto qwc = tag & 0xFFFFu;
       const auto id = (tag >> 28) & 7u;
       const auto source = read32(tadr + 4u) & 0x0FFFFFF0u;
+      // EELOAD uses a zero-length NEXT tag to jump between separately built
+      // SIF packet chains. No payload is consumed at the NEXT tag itself.
+      if (id == 2u && qwc == 0u && valid(source, 16u)) {
+        tadr = source;
+        continue;
+      }
       // The BIOS uses REF/REFE chains. A transfer begins with a four-word SIF
       // tag (IOP destination, word count, attributes) and can continue through
       // following raw REF payloads when it is larger than the first EE tag.
@@ -743,6 +749,11 @@ void Memory::advance(std::uint32_t cycles) {
       const auto tag = read32(tadr);
       const auto qwc = tag & 0xFFFFu;
       const auto id = (tag >> 28) & 7u;
+      const auto source = read32(tadr + 4u) & 0x0FFFFFF0u;
+      if (id == 2u && qwc == 0u && valid(source, 16u)) {
+        tadr = source;
+        continue;
+      }
       if ((id != 0u && id != 3u) || qwc == 0u ||
           total_qwc > (UINT32_MAX / 8u) - qwc)
         break;

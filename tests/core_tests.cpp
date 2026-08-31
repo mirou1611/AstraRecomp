@@ -305,6 +305,45 @@ void test_sif1_continuation_chain() {
         "SIF1 continuation completes and advances through REFE");
 }
 
+void test_sif1_zero_length_next_chain() {
+  ps2vita::Memory memory;
+  // First packet: REF, followed by the zero-QWC NEXT shape observed in the
+  // retail BIOS. NEXT jumps to a separately allocated REFE packet.
+  memory.write32(0x2000u, 0x30000002u);
+  memory.write32(0x2004u, 0x00003000u);
+  memory.write32(0x2010u, 0x20000000u);
+  memory.write32(0x2014u, 0x00002100u);
+  memory.write32(0x2100u, 0x00000002u);
+  memory.write32(0x2104u, 0x00003040u);
+
+  memory.write32(0x3000u, 0x00001000u);
+  memory.write32(0x3004u, 4u);
+  memory.write32(0x3010u, 0x11111111u);
+  memory.write32(0x3014u, 0x22222222u);
+  memory.write32(0x3018u, 0x33333333u);
+  memory.write32(0x301Cu, 0x44444444u);
+  memory.write32(0x3040u, 0xC0001100u);
+  memory.write32(0x3044u, 4u);
+  memory.write32(0x3050u, 0x55555555u);
+  memory.write32(0x3054u, 0x66666666u);
+  memory.write32(0x3058u, 0x77777777u);
+  memory.write32(0x305Cu, 0x88888888u);
+
+  memory.write32(0x1000C430u, 0x2000u);
+  memory.write32(0x1000C400u, 0x184u);
+  memory.iop_write32(0x1F801538u, 0x41000300u);
+  memory.advance(1u);
+  memory.advance(32u);
+  check(memory.iop_read32(0x1000u) == 0x11111111u &&
+        memory.iop_read32(0x100Cu) == 0x44444444u &&
+        memory.iop_read32(0x1100u) == 0x55555555u &&
+        memory.iop_read32(0x110Cu) == 0x88888888u,
+        "SIF1 zero-length NEXT jumps to and executes the following REFE packet");
+  check((memory.read32(0x1000C400u) & 0x100u) == 0u &&
+        memory.read32(0x1000C430u) == 0x2110u,
+        "SIF1 NEXT chain completes at the jumped REFE tag");
+}
+
 void test_sif0_dma_reply() {
   ps2vita::Memory memory;
   // Observed BIOS reply: one IOP end tag supplies six words, followed by an
@@ -1563,6 +1602,7 @@ int main() {
   test_iop_memory_and_cpu();
   test_sif1_dma_and_external_interrupts();
   test_sif1_continuation_chain();
+  test_sif1_zero_length_next_chain();
   test_sif0_dma_reply();
   test_sif0_iop_side_completes_first();
   test_iop_timer5_deadlines();

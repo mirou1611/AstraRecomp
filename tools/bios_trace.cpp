@@ -156,10 +156,11 @@ void print_opcode_profile(const char* processor,
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 9) {
+  if (argc < 2 || argc > 10) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
-        "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP]\n");
+        "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP] "
+        "[TIMER5_PROBE_STEP]\n");
     return 2;
   }
 
@@ -186,6 +187,8 @@ int main(int argc, char** argv) {
   const std::uint32_t iop_stop_pc = argc >= 8 ? parse_address(argv[7]) : 0u;
   const std::uint64_t sbus_probe_step = argc >= 9
       ? std::strtoull(argv[8], nullptr, 0) : 0u;
+  const std::uint64_t timer5_probe_step = argc >= 10
+      ? std::strtoull(argv[9], nullptr, 0) : 0u;
 
   ps2vita::Emulator emulator;
   if (!emulator.load_bios(bios.data(), bios.size()) || !emulator.boot_bios()) {
@@ -251,6 +254,13 @@ int main(int argc, char** argv) {
           "diagnostic: injecting IOP ICFG bit-1 SBUS probe at step %llu\n",
           static_cast<unsigned long long>(steps));
       emulator.memory().iop_write32(0x1F801450u, 2u);
+    }
+    if (timer5_probe_step != 0u && steps == timer5_probe_step) {
+      const auto target = emulator.memory().iop_read32(0x1F8014A8u);
+      std::fprintf(stderr,
+          "diagnostic: advancing IOP Timer 5 to target %08X at step %llu\n",
+          target, static_cast<unsigned long long>(steps));
+      emulator.memory().iop_write32(0x1F8014A0u, target - 1u);
     }
     const auto& state = emulator.cpu().state();
     const bool sif0_active =
