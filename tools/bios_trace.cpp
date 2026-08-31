@@ -210,6 +210,7 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> iop_dma_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_cdvd_trace{};
   std::array<StoreEntry, kTraceSize> iop_sio2_trace{};
+  std::array<StoreEntry, kTraceSize> iop_spu_trace{};
   std::array<StoreEntry, kTraceSize> iop_scmd_trace{};
   std::array<std::uint64_t, 256> iop_scmd_counts{};
   std::array<std::uint64_t, 4096> ee_opcode_counts{};
@@ -229,6 +230,7 @@ int main(int argc, char** argv) {
   std::size_t iop_dma_store_cursor = 0;
   std::size_t iop_cdvd_cursor = 0;
   std::size_t iop_sio2_cursor = 0;
+  std::size_t iop_spu_cursor = 0;
   std::size_t iop_scmd_cursor = 0;
   unsigned last_iop_scmd = 256u;
   std::vector<char> serial_output;
@@ -237,6 +239,7 @@ int main(int argc, char** argv) {
   iop_serial_output.reserve(16384);
   std::vector<StoreEntry> mailbox_store_trace;
   std::vector<StoreEntry> ee_packet_state_store_trace;
+  std::vector<StoreEntry> iop_rpc_wait_store_trace;
   std::vector<Sif0Event> sif0_events;
   std::vector<SyscallEvent> syscall_events;
   constexpr std::array<std::uint32_t, 3> kGraphicsDmaChcr = {
@@ -420,6 +423,13 @@ int main(int argc, char** argv) {
               iop.pc, iop_instruction, address,
               emulator.memory().iop_read32(address & ~3u), 0u};
         }
+        if ((address >= 0x1F900000u && address < 0x1F900800u) ||
+            (address >= 0x1F8010C0u && address < 0x1F8010D0u) ||
+            (address >= 0x1F801500u && address < 0x1F801510u)) {
+          iop_spu_trace[iop_spu_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address,
+              emulator.memory().iop_read32(address & ~3u), 0u};
+        }
       }
       if (iop_opcode == 0x28u || iop_opcode == 0x29u ||
           iop_opcode == 0x2Au || iop_opcode == 0x2Bu ||
@@ -434,6 +444,10 @@ int main(int argc, char** argv) {
         }
         if (address >= 0x3C0u && address < 0x420u) {
           mailbox_store_trace.push_back({iop.pc, iop_instruction, address,
+              iop.gpr[source], 0u});
+        }
+        if (address >= 0x000A0A00u && address < 0x000A0A30u) {
+          iop_rpc_wait_store_trace.push_back({iop.pc, iop_instruction, address,
               iop.gpr[source], 0u});
         }
         if (address >= 0x1D000000u && address <= 0x1D000060u) {
@@ -455,6 +469,12 @@ int main(int argc, char** argv) {
         }
         if (address >= 0x1F808200u && address < 0x1F808280u) {
           iop_sio2_trace[iop_sio2_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address, iop.gpr[source], 0u};
+        }
+        if ((address >= 0x1F900000u && address < 0x1F900800u) ||
+            (address >= 0x1F8010C0u && address < 0x1F8010D0u) ||
+            (address >= 0x1F801500u && address < 0x1F801510u)) {
+          iop_spu_trace[iop_spu_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
         }
         if ((address >= 0x1F801070u && address < 0x1F801080u) ||
@@ -717,6 +737,60 @@ int main(int argc, char** argv) {
         emulator.memory().iop_read32(0x00019878u + offset),
         emulator.memory().iop_read32(0x0001987Cu + offset));
   }
+  const auto final_sif1_iop_packet =
+      emulator.memory().read32(sif1_madr) & 0x00FFFFFFu;
+  std::printf("final SIF1 IOP packet at %08X:\n", final_sif1_iop_packet);
+  for (std::uint32_t offset = 0u; offset < 0x40u; offset += 16u) {
+    std::printf("%08X  %08X %08X %08X %08X\n",
+        final_sif1_iop_packet + offset,
+        emulator.memory().iop_read32(final_sif1_iop_packet + offset),
+        emulator.memory().iop_read32(final_sif1_iop_packet + offset + 4u),
+        emulator.memory().iop_read32(final_sif1_iop_packet + offset + 8u),
+        emulator.memory().iop_read32(final_sif1_iop_packet + offset + 12u));
+  }
+  const auto final_rpc_extra =
+      emulator.memory().iop_read32(final_sif1_iop_packet + 4u) & 0x00FFFFFFu;
+  const auto final_rpc_server =
+      emulator.memory().iop_read32(final_sif1_iop_packet + 13u * 4u) &
+      0x00FFFFFFu;
+  const auto final_rpc_queue = emulator.memory().iop_valid(
+      final_rpc_server + 16u * 4u, 4u)
+      ? emulator.memory().iop_read32(final_rpc_server + 16u * 4u) & 0x00FFFFFFu
+      : 0u;
+  for (const auto& item : std::array<std::pair<const char*, std::uint32_t>, 3>{{
+           {"RPC extra", final_rpc_extra},
+           {"RPC server", final_rpc_server},
+           {"RPC queue", final_rpc_queue}}}) {
+    std::printf("final %s at %08X:\n", item.first, item.second);
+    if (!emulator.memory().iop_valid(item.second, 0x50u)) {
+      std::puts("  unavailable");
+      continue;
+    }
+    for (std::uint32_t offset = 0u; offset < 0x50u; offset += 16u) {
+      std::printf("%08X  %08X %08X %08X %08X\n", item.second + offset,
+          emulator.memory().iop_read32(item.second + offset),
+          emulator.memory().iop_read32(item.second + offset + 4u),
+          emulator.memory().iop_read32(item.second + offset + 8u),
+          emulator.memory().iop_read32(item.second + offset + 12u));
+    }
+  }
+  std::puts("IOP RPC caller and wait-state code/data:");
+  for (const auto base : {0x0009CF80u, 0x000A0A00u}) {
+    for (std::uint32_t offset = 0u; offset < 0x180u; offset += 16u) {
+      std::printf("%08X  %08X %08X %08X %08X\n", base + offset,
+          emulator.memory().iop_read32(base + offset),
+          emulator.memory().iop_read32(base + offset + 4u),
+          emulator.memory().iop_read32(base + offset + 8u),
+          emulator.memory().iop_read32(base + offset + 12u));
+    }
+  }
+  std::printf("IOP RPC wait-state stores: %zu\n",
+              iop_rpc_wait_store_trace.size());
+  for (const auto& item : iop_rpc_wait_store_trace) {
+    std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
+        item.instruction, item.address,
+        static_cast<unsigned long long>(item.value_lo));
+  }
   std::puts("EE SIF wait, flag-dispatch, and manager routines:");
   for (const auto base : {0x8000FAC8u, 0x8000FC58u, 0x8000FDE8u,
                           0x80012128u, 0x80012400u, 0x800130D8u,
@@ -919,6 +993,18 @@ int main(int argc, char** argv) {
         ? iop_sio2_cursor % kTraceSize : 0u;
     for (std::size_t i = 0; i < sio2_count; ++i) {
       const auto& item = iop_sio2_trace[(sio2_start + i) % kTraceSize];
+      std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
+                  item.instruction, item.address,
+                  static_cast<unsigned long long>(item.value_lo));
+    }
+  }
+  if (iop_spu_cursor != 0) {
+    std::puts("recent IOP SPU2/DMA register accesses:");
+    const auto spu_count = std::min(iop_spu_cursor, kTraceSize);
+    const auto spu_start = iop_spu_cursor >= kTraceSize
+        ? iop_spu_cursor % kTraceSize : 0u;
+    for (std::size_t i = 0; i < spu_count; ++i) {
+      const auto& item = iop_spu_trace[(spu_start + i) % kTraceSize];
       std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
                   item.instruction, item.address,
                   static_cast<unsigned long long>(item.value_lo));

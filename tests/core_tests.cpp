@@ -544,6 +544,39 @@ void test_video_vblank_deadlines() {
         "VBlank end raises both interrupt controllers at its deadline");
 }
 
+void test_spu2_dma7_completion() {
+  ps2vita::Memory memory;
+  for (std::uint32_t byte = 0; byte < 8u; ++byte)
+    memory.iop_write8(0x1000u + byte, static_cast<std::uint8_t>(0xA0u + byte));
+  memory.iop_write16(0x1F9005A8u, 0u);
+  memory.iop_write16(0x1F9005AAu, 0x2808u);
+  memory.iop_write32(0x1F801500u, 0x1000u);
+  memory.iop_write32(0x1F801504u, 0x00010002u);
+  memory.iop_write32(0x1F801508u, 0x01000201u);
+  memory.iop_write32(0x1F801074u, 1u << 3);
+  memory.iop_write32(0x1F801078u, 1u);
+
+  memory.advance(767u);
+  check((memory.iop_read32(0x1F801508u) & 0x01000000u) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 3)) == 0u,
+        "SPU2 DMA7 stays active until its 24-IOP-cycle word deadline");
+  memory.advance(1u);
+
+  bool payload_matches = true;
+  for (std::uint32_t byte = 0; byte < 8u; ++byte)
+    payload_matches = payload_matches &&
+        memory.spu2_ram_read8(0x5010u + byte) == 0xA0u + byte;
+  check(payload_matches && memory.iop_read32(0x1F801500u) == 0x1008u &&
+        memory.iop_read32(0x1F801504u) == 0u &&
+        (memory.iop_read32(0x1F801508u) & 0x01000000u) == 0u &&
+        memory.iop_read16(0x1F9005AAu) == 0x280Cu,
+        "SPU2 DMA7 copies IOP data and advances its source and sound addresses");
+  check((memory.iop_read32(0x1F801574u) & (1u << 24)) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 3)) != 0u &&
+        memory.iop_interrupt_pending(),
+        "SPU2 DMA7 completion raises DICR2 and the shared IOP DMA interrupt");
+}
+
 void test_ee_timer3_hblank_clock() {
   ps2vita::Memory memory;
   memory.write32(0x10001820u, 2u);
@@ -1609,6 +1642,7 @@ int main() {
   test_cdvd_reset_status();
   test_sio2_disconnected_transfer();
   test_video_vblank_deadlines();
+  test_spu2_dma7_completion();
   test_ee_timer3_hblank_clock();
   test_exception_entry_and_eret();
   test_cop0_count_advances();

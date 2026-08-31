@@ -67,6 +67,9 @@ public:
   void iop_write8(std::uint32_t address, std::uint8_t value);
   void iop_write16(std::uint32_t address, std::uint16_t value);
   void iop_write32(std::uint32_t address, std::uint32_t value);
+  std::uint8_t spu2_ram_read8(std::uint32_t address) const {
+    return spu2_ram_[address % spu2_ram_.size()];
+  }
   bool copy_in(std::uint32_t address, const void* source, std::size_t size);
   bool zero(std::uint32_t address, std::size_t size);
   bool load_bios(const void* source, std::size_t size);
@@ -96,6 +99,8 @@ private:
   std::vector<std::uint8_t> gs_hw_;
   std::vector<std::uint8_t> vu_mem_;
   std::vector<std::uint8_t> iop_ram_;
+  std::array<std::uint8_t, 0x800> spu2_hw_{};
+  std::vector<std::uint8_t> spu2_ram_;
   std::array<std::uint8_t, 4096> iop_scratch_{};
   mutable std::vector<std::uint8_t> iop_hw_;
   std::vector<std::uint8_t> ee_internal_;
@@ -132,6 +137,10 @@ private:
   bool timer5_target_future_ = false;
   std::uint32_t sif0_cycles_remaining_ = 0;
   std::uint32_t sif1_cycles_remaining_ = 0;
+  std::uint32_t spu2_dma7_cycles_remaining_ = 0;
+  std::uint32_t spu2_dma7_source_ = 0;
+  std::uint32_t spu2_dma7_target_ = 0;
+  std::uint32_t spu2_dma7_bytes_ = 0;
   std::uint32_t iop_cache_control_ = 0;
 };
 

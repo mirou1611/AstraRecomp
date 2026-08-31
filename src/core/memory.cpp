@@ -21,7 +21,7 @@ constexpr std::uint32_t kNtscScanlineDivisor = 1573425u;
 Memory::Memory()
     : ram_(kRamSize, 0), bios_(kBiosSize, 0), scratch_(kScratchSize, 0),
       hw_(kHwSize, 0), gs_hw_(kGsHwSize, 0), vu_mem_(kVuSize, 0),
-      iop_ram_(kIopRamSize, 0),
+      iop_ram_(kIopRamSize, 0), spu2_ram_(2u * 1024u * 1024u, 0),
       iop_hw_(kIopHwSize, 0),
       ee_internal_(kEeInternalSize, 0), dve_(kDveSize, 0) {
   clear();
@@ -101,6 +101,8 @@ void Memory::clear() {
   std::fill(gs_hw_.begin(), gs_hw_.end(), 0);
   std::fill(vu_mem_.begin(), vu_mem_.end(), 0);
   std::fill(iop_ram_.begin(), iop_ram_.end(), 0);
+  spu2_hw_.fill(0);
+  std::fill(spu2_ram_.begin(), spu2_ram_.end(), 0);
   iop_scratch_.fill(0);
   std::fill(iop_hw_.begin(), iop_hw_.end(), 0);
   // SIO2 reset state: no controller/memory-card devices are attached. The
@@ -142,6 +144,10 @@ void Memory::clear() {
   timer5_target_future_ = false;
   sif0_cycles_remaining_ = 0;
   sif1_cycles_remaining_ = 0;
+  spu2_dma7_cycles_remaining_ = 0;
+  spu2_dma7_source_ = 0;
+  spu2_dma7_target_ = 0;
+  spu2_dma7_bytes_ = 0;
   iop_cache_control_ = 0;
   // EE hardware reset values observed by the BIOS during board detection.
   write32(0x1000F260u, 0x1D000060u);
@@ -615,6 +621,35 @@ void Memory::advance(std::uint32_t cycles) {
     }
   }
 
+  if (spu2_dma7_cycles_remaining_ != 0u) {
+    if (cycles < spu2_dma7_cycles_remaining_) {
+      spu2_dma7_cycles_remaining_ -= cycles;
+    } else {
+      spu2_dma7_cycles_remaining_ = 0;
+      for (std::uint32_t byte = 0; byte < spu2_dma7_bytes_; ++byte) {
+        const auto source = (spu2_dma7_source_ + byte) &
+                            (kIopRamSize - 1u);
+        const auto destination =
+            (spu2_dma7_target_ * 2u + byte) % spu2_ram_.size();
+        spu2_ram_[destination] = iop_ram_[source];
+      }
+      const auto final_source = spu2_dma7_source_ + spu2_dma7_bytes_;
+      const auto final_target =
+          (spu2_dma7_target_ + spu2_dma7_bytes_ / 2u) & 0xFFFFFu;
+      store_iop(0x0500u, final_source & 0x00FFFFFFu);
+      store_iop(0x0504u, 0u);
+      store_iop(0x0508u, raw_iop(0x0508u) & ~0x01000000u);
+      spu2_hw_[0x5A8u] = static_cast<std::uint8_t>(final_target >> 16);
+      spu2_hw_[0x5A9u] = 0u;
+      spu2_hw_[0x5AAu] = static_cast<std::uint8_t>(final_target);
+      spu2_hw_[0x5ABu] = static_cast<std::uint8_t>(final_target >> 8);
+      // DMA7 is channel zero in the second IOP DMA controller. Completion
+      // raises DICR2 status bit 24 and the shared IOP DMA interrupt line.
+      store_iop(0x0574u, raw_iop(0x0574u) | (1u << 24));
+      store_iop(0x0070u, raw_iop(0x0070u) | (1u << 3));
+    }
+  }
+
   if (sif0_cycles_remaining_ != 0u) {
     if (cycles < sif0_cycles_remaining_) {
       sif0_cycles_remaining_ -= cycles;
@@ -835,6 +870,8 @@ bool Memory::iop_valid(std::uint32_t address, std::size_t size) const {
   if (p == 0x1FFE0130u) return size <= 4;
   if (p >= 0x1D000000u && p <= 0x1D000060u)
     return size <= 0x1D000064u - p;
+  if (p >= 0x1F900000u && p < 0x1F900800u)
+    return size <= 0x1F900800u - p;
   return false;
 }
 
@@ -872,6 +909,8 @@ std::uint8_t Memory::iop_read8(std::uint32_t address) const {
   }
   if (p >= 0x1F800000u && p < 0x1F801000u)
     return iop_scratch_[p - 0x1F800000u];
+  if (p >= 0x1F900000u && p < 0x1F900800u)
+    return spu2_hw_[p - 0x1F900000u];
   if (p == 0x1F808264u)
     return 0xFFu; // SIO2 FIFO: disconnected device response.
   if (p >= 0x1FFE0130u && p < 0x1FFE0134u)
@@ -993,6 +1032,8 @@ void Memory::iop_write8(std::uint32_t address, std::uint8_t value) {
     }
   } else if (p >= 0x1F800000u && p < 0x1F801000u) {
     iop_scratch_[p - 0x1F800000u] = value;
+  } else if (p >= 0x1F900000u && p < 0x1F900800u) {
+    spu2_hw_[p - 0x1F900000u] = value;
   } else if (p >= 0x1FFE0130u && p < 0x1FFE0134u) {
     const unsigned shift = (p & 3u) * 8u;
     iop_cache_control_ = (iop_cache_control_ & ~(0xFFu << shift)) |
@@ -1090,6 +1131,27 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
     iop_hw_[0x726Du] = 0xD1u;
     iop_hw_[0x726Eu] = 0x01u;
     iop_hw_[0x0072u] |= 0x02u;
+  } else if (p == 0x1F801508u && (value & 0x01000000u) != 0u) {
+    // SPU2 core 1 uses IOP DMA channel 7. BCR describes 32-bit words while
+    // the SPU2 transfer address is measured in 16-bit sound-RAM words.
+    const auto bcr = iop_read32(0x1F801504u);
+    const auto blocks = bcr >> 16;
+    const auto words = bcr & 0xFFFFu;
+    const auto transfer_words = static_cast<std::uint64_t>(blocks) * words;
+    const auto transfer_bytes = transfer_words * 4u;
+    if ((value & 0x00000201u) == 0x00000201u && transfer_bytes != 0u &&
+        transfer_bytes <= UINT32_MAX) {
+      spu2_dma7_source_ = iop_read32(0x1F801500u) & 0x00FFFFFFu;
+      const auto tsa_high = iop_read16(0x1F9005A8u) & 0xFu;
+      const auto tsa_low = iop_read16(0x1F9005AAu);
+      spu2_dma7_target_ = (tsa_high << 16) | tsa_low;
+      spu2_dma7_bytes_ = static_cast<std::uint32_t>(transfer_bytes);
+      // PCSX2's documented SPU2 timing uses 24 IOP cycles per 16-bit word;
+      // one IOP cycle corresponds to eight EE master cycles here.
+      const auto duration = transfer_bytes * 96u;
+      spu2_dma7_cycles_remaining_ = duration > UINT32_MAX
+          ? UINT32_MAX : static_cast<std::uint32_t>(duration);
+    }
   }
   iop_write8(address, static_cast<std::uint8_t>(value));
   iop_write8(address + 1u, static_cast<std::uint8_t>(value >> 8));
