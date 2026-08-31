@@ -12,6 +12,8 @@ prove behavior with host tests plus a Vita VPK target.
 
 ## M1 — EE correctness
 
+- Run the generated mixed-workload AstraRT performance gate on Vita3K for
+  correctness, then on physical Vita for the architectural go/no-go measurement
 - MMI instructions using the implemented 128-bit GPR storage
 - Unaligned loads/stores, traps, exceptions, TLB, COP0 state
 - COP1 floating point and deterministic NaN behavior
@@ -49,7 +51,7 @@ prove behavior with host tests plus a Vita VPK target.
 
 ## M6 — Performance
 
-- Profile on real Vita hardware
+- Profile complete workloads on real Vita hardware after the early AOT premise gate
 - Probe Play!-CodeGen's AArch32 EABI backend under VitaSDK, then add an optional
   ARMv7 EE/IOP block JIT with exact-PC interpreter fallback
 - Threaded VU1/GS where synchronization permits

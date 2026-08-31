@@ -1,6 +1,10 @@
 #include "ps2vita/aot.hpp"
 
 #include "ps2vita/memory.hpp"
+#include "aot_benchmark_program.hpp"
+
+#include <algorithm>
+#include <array>
 
 namespace ps2vita {
 namespace {
@@ -26,6 +30,50 @@ void install_chain_program(Memory& memory) {
   memory.write32(kChainLeaf + 0u, 0x00801021u);   // addu  v0, a0, zero
   memory.write32(kChainLeaf + 4u, 0x03E00008u);   // jr    ra
   memory.write32(kChainLeaf + 8u, 0x00000000u);   // nop (delay slot)
+}
+
+void prepare_benchmark(Memory& memory, CpuState& state,
+                       std::uint32_t iterations) {
+  memory.clear();
+  for (std::size_t i = 0; i < benchmark_program::kWords.size(); ++i)
+    memory.write32(benchmark_program::kEntry + static_cast<std::uint32_t>(i * 4u),
+                   benchmark_program::kWords[i]);
+  for (std::uint32_t word = 0; word < 16u; ++word)
+    memory.write32(benchmark_program::kSource + word * 4u,
+                   0x10203040u + word * 0x01030507u);
+  for (std::uint32_t word = 0; word < 16u; ++word)
+    memory.write32(benchmark_program::kDestination + word * 4u, 0u);
+  state = {};
+  state.pc = benchmark_program::kEntry;
+  state.gpr[4] = iterations;
+  state.gpr[5] = 0x1122334455667788ull;
+  state.gpr_hi[5] = 0x8877665544332211ull;
+  state.gpr[6] = 0x00FF00FF00FF00FFull;
+  state.gpr_hi[6] = 0x0F0F0F0F0F0F0F0Full;
+  state.gpr[7] = 0xF0F0F0F0F0F0F0F0ull;
+  state.gpr_hi[7] = 0xFF00FF00FF00FF00ull;
+}
+
+std::uint64_t benchmark_checksum(const Memory& memory, const CpuState& state) {
+  std::uint64_t hash = 1469598103934665603ull;
+  auto mix = [&](std::uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  mix(state.gpr[2]);
+  mix(state.gpr_hi[2]);
+  mix(state.gpr[3]);
+  mix(state.hi);
+  mix(state.lo);
+  for (std::uint32_t offset = 0u; offset < 64u; offset += 8u)
+    mix(memory.read64(benchmark_program::kDestination + offset));
+  return hash;
+}
+
+std::uint64_t median_sample(std::array<std::uint64_t, 9>& values,
+                            std::uint32_t count) {
+  std::sort(values.begin(), values.begin() + count);
+  return values[count / 2u];
 }
 
 bool is_lower_hex(char value) {
@@ -208,6 +256,75 @@ AotProbeResult run_phase0_aot_chain_probe() {
       interpreter.state().pc == aot_state.pc &&
       interpreter.state().cycles == aot_state.cycles &&
       exit.kind == AotExitKind::Stop && exit.instructions == 8u;
+  return result;
+}
+
+AotBenchmarkResult run_phase0_aot_benchmark(
+    AotClockMicroseconds clock_microseconds, std::uint32_t iterations,
+    std::uint32_t samples) {
+  AotBenchmarkResult result;
+  result.iterations = std::max(1u, std::min(1000000u, iterations));
+  result.samples = std::max(1u, std::min(9u, samples));
+  const auto instruction_budget = result.iterations * 128u + 256u;
+  const auto function_budget = result.iterations * 16u + 256u;
+  std::array<std::uint64_t, 9> interpreter_times{};
+  std::array<std::uint64_t, 9> aot_times{};
+  Memory memory;
+  CpuState interpreter_state{};
+  CpuState aot_state{};
+  AotExit aot_exit{};
+
+  // Untimed warm-up pays first-touch and cold instruction-cache costs for both
+  // paths before the median samples used by the go/no-go result.
+  prepare_benchmark(memory, interpreter_state, 8u);
+  {
+    Cpu interpreter(memory);
+    interpreter.reset(benchmark_program::kEntry);
+    interpreter.state() = interpreter_state;
+    interpreter.run(8u * 128u + 256u);
+  }
+  prepare_benchmark(memory, aot_state, 8u);
+  dispatch_phase0_aot(memory, aot_state, 8u * 16u + 256u);
+
+  for (std::uint32_t sample = 0; sample < result.samples; ++sample) {
+    prepare_benchmark(memory, interpreter_state, result.iterations);
+    Cpu interpreter(memory);
+    interpreter.reset(benchmark_program::kEntry);
+    interpreter.state() = interpreter_state;
+    const auto interpreter_begin = clock_microseconds ? clock_microseconds() : 0u;
+    result.interpreter_stop = interpreter.run(instruction_budget);
+    const auto interpreter_end = clock_microseconds ? clock_microseconds() : 0u;
+    interpreter_times[sample] = interpreter_end - interpreter_begin;
+    interpreter_state = interpreter.state();
+    result.interpreter_checksum = benchmark_checksum(memory, interpreter_state);
+
+    prepare_benchmark(memory, aot_state, result.iterations);
+    const auto aot_begin = clock_microseconds ? clock_microseconds() : 0u;
+    aot_exit = dispatch_phase0_aot(memory, aot_state, function_budget);
+    const auto aot_end = clock_microseconds ? clock_microseconds() : 0u;
+    aot_times[sample] = aot_end - aot_begin;
+    result.aot_stop = aot_exit.reason;
+    result.aot_checksum = benchmark_checksum(memory, aot_state);
+  }
+
+  result.guest_instructions = interpreter_state.cycles;
+  result.interpreter_microseconds = median_sample(interpreter_times, result.samples);
+  result.aot_microseconds = median_sample(aot_times, result.samples);
+  if (result.aot_microseconds != 0u) {
+    result.speedup_x100 = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        999999u, result.interpreter_microseconds * 100u /
+                     result.aot_microseconds));
+  }
+  result.matched = result.interpreter_stop == StopReason::Break &&
+      result.aot_stop == StopReason::Break &&
+      aot_exit.kind == AotExitKind::Stop &&
+      result.interpreter_checksum == result.aot_checksum &&
+      interpreter_state.pc == aot_state.pc &&
+      interpreter_state.cycles == aot_state.cycles &&
+      interpreter_state.gpr == aot_state.gpr &&
+      interpreter_state.gpr_hi == aot_state.gpr_hi &&
+      interpreter_state.hi == aot_state.hi &&
+      interpreter_state.lo == aot_state.lo;
   return result;
 }
 

@@ -18,6 +18,11 @@ constexpr const char* kBiosPath = "ux0:data/ps2vita/bios.bin";
 constexpr const char* kProbePath = "ux0:data/ps2vita/startup.txt";
 constexpr const char* kFaultPath = "ux0:data/ps2vita/fault.txt";
 constexpr const char* kProgressPath = "ux0:data/ps2vita/progress.txt";
+constexpr const char* kBenchmarkPath = "ux0:data/ps2vita/benchmark.txt";
+
+std::uint64_t benchmark_clock_microseconds() {
+  return sceKernelGetProcessTimeWide();
+}
 
 void write_probe(const char* status) {
   sceIoMkdir("ux0:data/ps2vita", 0777);
@@ -93,6 +98,29 @@ void write_progress(const ps2vita::Emulator& emulator) {
   sceIoClose(fd);
 }
 
+void write_benchmark(const ps2vita::AotBenchmarkResult& result) {
+  char report[768];
+  std::snprintf(report, sizeof(report),
+      "schema=astrart-performance-v1\nmatched=%u\niterations=%u\nsamples=%u\n"
+      "guest_instructions=%llu\ninterpreter_us=%llu\nnative_us=%llu\n"
+      "speedup_x100=%u\ninterpreter_checksum=%016llX\n"
+      "native_checksum=%016llX\n"
+      "timing_note=Vita3K validates correctness only; physical Vita decides performance\n",
+      result.matched ? 1u : 0u, result.iterations, result.samples,
+      static_cast<unsigned long long>(result.guest_instructions),
+      static_cast<unsigned long long>(result.interpreter_microseconds),
+      static_cast<unsigned long long>(result.aot_microseconds),
+      result.speedup_x100,
+      static_cast<unsigned long long>(result.interpreter_checksum),
+      static_cast<unsigned long long>(result.aot_checksum));
+  sceIoRemove(kBenchmarkPath);
+  const int fd = sceIoOpen(kBenchmarkPath,
+                           SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  if (fd < 0) return;
+  sceIoWrite(fd, report, std::strlen(report));
+  sceIoClose(fd);
+}
+
 void put16(std::vector<std::uint8_t>& bytes, std::size_t at, std::uint16_t value) {
   bytes[at] = static_cast<std::uint8_t>(value);
   bytes[at + 1] = static_cast<std::uint8_t>(value >> 8);
@@ -138,7 +166,8 @@ bool read_file(const char* path, std::vector<std::uint8_t>& bytes) {
 
 void draw(Screen& screen, const ps2vita::Emulator& emu, const char* message,
           const ps2vita::AotProbeResult& aot_probe,
-          const ps2vita::AotProbeResult& aot_chain_probe, bool running,
+          const ps2vita::AotProbeResult& aot_chain_probe,
+          const ps2vita::AotBenchmarkResult& benchmark, bool running,
           bool show_gs) {
   constexpr std::uint32_t bg = 0xFF100C18;
   constexpr std::uint32_t panel = 0xFF21182E;
@@ -156,7 +185,7 @@ void draw(Screen& screen, const ps2vita::Emulator& emu, const char* message,
   screen.clear(bg);
   screen.rect(0, 0, 960, 70, accent);
   screen.text(28, 19, "ASTRARECOMP / EE MONITOR", 0xFF180C13, 3);
-  screen.rect(28, 96, 904, 238, panel);
+  screen.rect(28, 96, 904, 274, panel);
   screen.text(52, 116, message, ink, 2);
 
   char line[96];
@@ -183,10 +212,16 @@ void draw(Screen& screen, const ps2vita::Emulator& emu, const char* message,
   screen.text(52, 316, line,
               aot_chain_probe.matched ? 0xFF6CFFB5 : accent, 2);
 
-  screen.text(38, 375, "CROSS  RUN / PAUSE", ink, 2);
-  screen.text(38, 407, "SQUARE STEP    TRIANGLE RELOAD", ink, 2);
-  screen.text(38, 439, "CIRCLE BIOS   R GS VIEW   START RESET", ink, 2);
-  screen.text(38, 491, "UX0:DATA/PS2VITA/BOOT.ELF OR BIOS.BIN", dim, 2);
+  std::snprintf(line, sizeof(line), "AOT PERF: %s  %u.%02uX  %llu GUEST OPS",
+                benchmark.matched ? "PASS" : "FAIL",
+                benchmark.speedup_x100 / 100u, benchmark.speedup_x100 % 100u,
+                static_cast<unsigned long long>(benchmark.guest_instructions));
+  screen.text(52, 344, line, benchmark.matched ? 0xFF6CFFB5 : accent, 2);
+
+  screen.text(38, 387, "CROSS  RUN / PAUSE", ink, 2);
+  screen.text(38, 419, "SQUARE STEP    TRIANGLE RELOAD", ink, 2);
+  screen.text(38, 451, "CIRCLE BIOS   R GS VIEW   START RESET", ink, 2);
+  screen.text(38, 503, "BENCHMARK.TXT / VITA3K CORRECTNESS GATE", dim, 2);
   screen.present();
 }
 }
@@ -203,6 +238,12 @@ int main() {
   ps2vita::Emulator emulator;
   const auto aot_probe = ps2vita::run_phase0_aot_probe();
   const auto aot_chain_probe = ps2vita::run_phase0_aot_chain_probe();
+  write_probe("running AOT performance validation\n");
+  const auto benchmark = ps2vita::run_phase0_aot_benchmark(
+      benchmark_clock_microseconds, 4096u, 5u);
+  write_benchmark(benchmark);
+  write_probe(benchmark.matched ? "AOT benchmark passed\n" :
+                                  "AOT benchmark failed\n");
   std::vector<std::uint8_t> image;
   char message[96];
   std::snprintf(message, sizeof(message), "PHASE-0 AOT %s / I=%u A=%u",
@@ -289,8 +330,8 @@ int main() {
         std::snprintf(message, sizeof(message), "STOPPED: %s", ps2vita::stop_reason_name(reason));
       }
     }
-    draw(screen, emulator, message, aot_probe, aot_chain_probe, running,
-         show_gs);
+    draw(screen, emulator, message, aot_probe, aot_chain_probe, benchmark,
+         running, show_gs);
   }
 
   screen.shutdown();

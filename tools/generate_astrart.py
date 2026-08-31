@@ -74,10 +74,16 @@ def is_break(word: int) -> bool:
 def is_supported_data(word: int) -> bool:
     op = opcode(word)
     function = word & 0x3F
+    sub = (word >> 6) & 0x1F
     return (
         word == 0
-        or op in (0x09, 0x0C, 0x0D, 0x0F, 0x23, 0x2B)
-        or (op == 0 and function in (0x21, 0x24, 0x2B))
+        or op in (0x09, 0x0C, 0x0D, 0x0F, 0x23, 0x2B, 0x37, 0x3F)
+        or (op == 0 and function in (0x18, 0x21, 0x24, 0x2B, 0x2D, 0x2F))
+        or (op == 0x1C and (function, sub) in (
+            (0x09, 0x12),  # PAND
+            (0x09, 0x13),  # PXOR
+            (0x29, 0x12),  # POR
+        ))
     )
 
 
@@ -182,6 +188,37 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
             lines.append(
                 f"{indent}state.gpr[{rd}] = state.gpr[{rs}] < state.gpr[{rt}] ? 1u : 0u;"
             )
+    elif op == 0 and (word & 0x3F) in (0x2D, 0x2F):  # DADDU/DSUBU
+        if rd:
+            operator = "+" if (word & 0x3F) == 0x2D else "-"
+            lines.append(
+                f"{indent}state.gpr[{rd}] = state.gpr[{rs}] {operator} state.gpr[{rt}];"
+            )
+    elif op == 0 and (word & 0x3F) == 0x18:  # MULT
+        lines.append(
+            f"{indent}const std::int64_t product_{pc:08x} = static_cast<std::int64_t>(static_cast<std::int32_t>(state.gpr[{rs}])) * static_cast<std::int32_t>(state.gpr[{rt}]);"
+        )
+        lines.append(
+            f"{indent}state.lo = sign_extend_32(static_cast<std::uint32_t>(product_{pc:08x}));"
+        )
+        lines.append(
+            f"{indent}state.hi = sign_extend_32(static_cast<std::uint32_t>(static_cast<std::uint64_t>(product_{pc:08x}) >> 32));"
+        )
+        if rd:
+            lines.append(f"{indent}state.gpr[{rd}] = state.lo;")
+    elif op == 0x1C:  # MMI packed bitwise subset
+        operation = {
+            (0x09, 0x12): "&",
+            (0x09, 0x13): "^",
+            (0x29, 0x12): "|",
+        }[(word & 0x3F, (word >> 6) & 0x1F)]
+        if rd:
+            lines.append(
+                f"{indent}state.gpr[{rd}] = state.gpr[{rs}] {operation} state.gpr[{rt}];"
+            )
+            lines.append(
+                f"{indent}state.gpr_hi[{rd}] = state.gpr_hi[{rs}] {operation} state.gpr_hi[{rt}];"
+            )
     elif op == 0x0C:  # ANDI
         if rt:
             lines.append(
@@ -230,6 +267,35 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
         lines.append(
             f"{indent}memory.write32({address}, static_cast<std::uint32_t>(state.gpr[{rt}]));"
         )
+    elif op == 0x37:  # LD
+        address = f"address_{pc:08x}"
+        lines.append(
+            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({sx16(word)});"
+        )
+        lines.append(
+            f"{indent}if (({address} & 7u) != 0u || !memory.valid({address}, 8u)) {{"
+        )
+        lines.append(f"{indent}  commit(memory, state, executed, fast);")
+        lines.append(
+            f"{indent}  return {{AotExitKind::Interpreter, StopReason::None, state.pc, executed}};"
+        )
+        lines.append(f"{indent}}}")
+        if rt:
+            lines.append(f"{indent}state.gpr[{rt}] = memory.read64({address});")
+    elif op == 0x3F:  # SD
+        address = f"address_{pc:08x}"
+        lines.append(
+            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({sx16(word)});"
+        )
+        lines.append(
+            f"{indent}if (({address} & 7u) != 0u || !memory.valid({address}, 8u)) {{"
+        )
+        lines.append(f"{indent}  commit(memory, state, executed, fast);")
+        lines.append(
+            f"{indent}  return {{AotExitKind::Interpreter, StopReason::None, state.pc, executed}};"
+        )
+        lines.append(f"{indent}}}")
+        lines.append(f"{indent}memory.write64({address}, state.gpr[{rt}]);")
     else:
         raise ValueError(f"internal: unsupported data instruction 0x{word:08x}")
     lines.append(f"{indent}++executed;")

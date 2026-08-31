@@ -102,4 +102,27 @@ struct AotProbeResult {
 AotProbeResult run_phase0_aot_probe();
 AotProbeResult run_phase0_aot_chain_probe();
 
+using AotClockMicroseconds = std::uint64_t (*)();
+
+struct AotBenchmarkResult {
+  bool matched = false;
+  StopReason interpreter_stop = StopReason::None;
+  StopReason aot_stop = StopReason::None;
+  std::uint32_t iterations = 0;
+  std::uint32_t samples = 0;
+  std::uint64_t guest_instructions = 0;
+  std::uint64_t interpreter_microseconds = 0;
+  std::uint64_t aot_microseconds = 0;
+  std::uint64_t interpreter_checksum = 0;
+  std::uint64_t aot_checksum = 0;
+  std::uint32_t speedup_x100 = 0;
+};
+
+// Executes the same generated synthetic guest workload through the portable
+// EE interpreter and AstraRT. Setup, allocation, and screen rendering are
+// outside the measured regions; reported time is the median sample.
+AotBenchmarkResult run_phase0_aot_benchmark(
+    AotClockMicroseconds clock_microseconds,
+    std::uint32_t iterations = 4096u, std::uint32_t samples = 5u);
+
 } // namespace ps2vita

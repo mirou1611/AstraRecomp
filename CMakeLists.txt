@@ -20,9 +20,11 @@ set(ASTRART_UNSUPPORTED_ELF "${ASTRART_GENERATED_DIR}/aot-unsupported.elf")
 set(ASTRART_BRANCH_ELF "${ASTRART_GENERATED_DIR}/aot-branch.elf")
 set(ASTRART_BNE_ELF "${ASTRART_GENERATED_DIR}/aot-bne.elf")
 set(ASTRART_HOT_SCALAR_ELF "${ASTRART_GENERATED_DIR}/aot-hot-scalars.elf")
+set(ASTRART_BENCHMARK_ELF "${ASTRART_GENERATED_DIR}/aot-benchmark.elf")
+set(ASTRART_BENCHMARK_HEADER "${ASTRART_GENERATED_DIR}/aot_benchmark_program.hpp")
 set(ASTRART_PHASE0_CPP "${ASTRART_GENERATED_DIR}/phase0_aot_package.cpp")
 add_custom_command(
-  OUTPUT "${ASTRART_PHASE0_CPP}"
+  OUTPUT "${ASTRART_PHASE0_CPP}" "${ASTRART_BENCHMARK_HEADER}"
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${ASTRART_GENERATED_DIR}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_smoke_elf.py" "${ASTRART_SMOKE_ELF}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_chain_elf.py" "${ASTRART_CHAIN_ELF}"
@@ -31,22 +33,26 @@ add_custom_command(
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_memory_elf.py" --branches "${ASTRART_BRANCH_ELF}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_memory_elf.py" --branches-bne "${ASTRART_BNE_ELF}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_memory_elf.py" --hot-scalars "${ASTRART_HOT_SCALAR_ELF}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_benchmark_elf.py"
+          "${ASTRART_BENCHMARK_ELF}" --header "${ASTRART_BENCHMARK_HEADER}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_astrart.py"
           --output "${ASTRART_PHASE0_CPP}"
           "${ASTRART_SMOKE_ELF}" "${ASTRART_CHAIN_ELF}"
           "${ASTRART_MEMORY_ELF}" "${ASTRART_UNSUPPORTED_ELF}"
           "${ASTRART_BRANCH_ELF}" "${ASTRART_BNE_ELF}"
-          "${ASTRART_HOT_SCALAR_ELF}"
+          "${ASTRART_HOT_SCALAR_ELF}" "${ASTRART_BENCHMARK_ELF}"
   DEPENDS
     tools/generate_astrart.py
     tools/make_smoke_elf.py
     tools/make_aot_chain_elf.py
     tools/make_aot_memory_elf.py
+    tools/make_aot_benchmark_elf.py
   VERBATIM
 )
 
 add_library(ps2core
   "${ASTRART_PHASE0_CPP}"
+  "${ASTRART_BENCHMARK_HEADER}"
   src/core/aot.cpp
   src/core/cpu.cpp
   src/core/ee_block.cpp
@@ -56,7 +62,7 @@ add_library(ps2core
   src/core/iop_cpu.cpp
   src/core/memory.cpp
 )
-target_include_directories(ps2core PUBLIC include)
+target_include_directories(ps2core PUBLIC include PRIVATE "${ASTRART_GENERATED_DIR}")
 if(MSVC)
   target_compile_options(ps2core PRIVATE /W4)
 else()

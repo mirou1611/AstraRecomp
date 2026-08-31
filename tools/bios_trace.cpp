@@ -314,7 +314,7 @@ int main(int argc, char** argv) {
             state.gpr_hi[source]};
       }
     }
-    if (state.pc == stop_pc && ++hits >= stop_hit) break;
+    if (stop_pc != 0u && state.pc == stop_pc && ++hits >= stop_hit) break;
     reason = emulator.cpu().step();
     if (reason != ps2vita::StopReason::None) break;
     if ((steps % iop_divisor) == iop_divisor - 1u) {
@@ -869,5 +869,5 @@ int main(int argc, char** argv) {
     std::fwrite(iop_serial_output.data(), 1, iop_serial_output.size(), stdout);
     if (iop_serial_output.back() != '\n') std::putchar('\n');
   }
-  return state.pc == stop_pc || iop_stop_triggered ? 0 : 1;
+  return (stop_pc != 0u && state.pc == stop_pc) || iop_stop_triggered ? 0 : 1;
 }

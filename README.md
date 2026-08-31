@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/astra-hero.png" alt="Abstract streams of legacy machine code passing through a crystalline translation core into a compact runtime" width="100%">
+  <img src="docs/assets/astrarecomp-title-banner.png" alt="AstraRecomp title surrounded by crystalline code and luminous translation streams" width="100%">
 </p>
 
 <h1 align="center">AstraRecomp</h1>
@@ -20,6 +20,7 @@
   <a href="docs/ROADMAP.md">Roadmap</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="docs/PS2RECOMP_INTEGRATION.md">Recompiler boundary</a> ·
+  <a href="docs/PERFORMANCE_VALIDATION.md">Performance gate</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="docs/BRAND.md">Visual system</a>
 </p>
@@ -38,6 +39,17 @@ register, memory, PC, cycle, and stop state agree. A second probe shows
 `PS2R AOT T1 CALL/RET: PASS` after chaining generated blocks through a real
 JAL/delay-slot/`jr $ra` sequence.
 
+<p align="center">
+  <img src="docs/assets/astrart-performance-gate.png" alt="Interpreter and native execution paths reconverging at an exact-state validation gate" width="100%">
+</p>
+
+A generated synthetic PS2 workload now exercises integer ALU, 64-bit math, MMI,
+loads/stores, branches, calls/returns, memcpy-style loops, and multiply-heavy
+matrix work. The Vita app compares it against the interpreter, records the median
+of five samples in `benchmark.txt`, and shows `AOT PERF: PASS` when state agrees.
+Vita3K is the first correctness gate; only a physical Vita result is a meaningful
+performance decision.
+
 It now executes a user-supplied retail BIOS through EE hardware initialization,
 relocation into RAM, IOP reset-ROM startup, DECI2 startup, bidirectional SIF boot
 traffic, and repeated `Restart Without Memory Clear` completion.
@@ -50,12 +62,14 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 | Area | Current state |
 | --- | --- |
 | BIOS bootstrap | Executes through DECI2 startup, multi-tag SIF transfers, relocated EE code, and repeated no-clear restart completion |
-| PC recompiler | Phase-0 analysis and a tested R5900-to-C++ subset with interpreter/native differential checks |
+| PC recompiler | Phase-0 analysis, a tested R5900-to-C++ subset, and a generated mixed-workload performance gate |
 | Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
 | Guest graphics | Reference rasterizer exists; guest GIF packets are not connected yet |
 | Retail games | **Not playable**—IOP devices, GIF/GS, VU, SPU2, media, and compatibility work remain |
 
 ## System shape
+
+![Abstract streams of legacy machine code passing through a crystalline translation core into a compact runtime](docs/assets/astra-hero.png)
 
 ```text
 PS2 ELF / user BIOS
@@ -79,7 +93,8 @@ PS2 ELF / user BIOS
 - Vita-native VPK target using VitaSDK only (no runtime dependencies)
 - PS2Recomp Phase-0 ELF analysis and R5900-to-C++ emission on the host
 - Deterministic ELF-to-AstraRT generator for ADDIU/ADDU, LW/SW, J/JAL/JR,
-  BEQ/BNE, delay slots, BREAK, and exact interpreter fallback
+  BEQ/BNE, 64-bit load/store and arithmetic, selected MMI/multiply operations,
+  delay slots, BREAK, and exact interpreter fallback
 - AstraRT AOT function boundary with seeded interpreter/native differential validation
 - Exact-entry function table with direct-call, indirect-return, interpreter,
   and terminal exit contracts
@@ -163,18 +178,21 @@ workflow.
 
 1. Install `ps2vita.vpk` using VitaShell on a homebrew-enabled Vita.
 2. Launch AstraRecomp. The built-in Phase-0 probe runs automatically. A correct
-   build shows both `PS2R AOT T0: PASS` and `PS2R AOT T1 CALL/RET: PASS`.
-3. Press Cross to run the interpreter/bootstrap path. Its built-in test stops on
+   build shows `PS2R AOT T0: PASS`, `PS2R AOT T1 CALL/RET: PASS`, and
+   `AOT PERF: PASS`.
+3. Vita3K validates correctness only. Copy
+   `ux0:data/ps2vita/benchmark.txt`; do not use its speedup as a hardware result.
+4. Press Cross to run the interpreter/bootstrap path. Its built-in test stops on
    `break` and shows `V0: 0000002A`.
-4. To test the external loader too, generate the same program on the computer:
+5. To test the external loader too, generate the same program on the computer:
 
    ```sh
    python3 tools/make_smoke_elf.py smoke.elf
    ```
 
-5. Create `ux0:data/ps2vita/` and copy `smoke.elf` there as `boot.elf`.
-6. Press Triangle to load, then Cross to run.
-7. The program also writes 42 to
+6. Create `ux0:data/ps2vita/` and copy `smoke.elf` there as `boot.elf`.
+7. Press Triangle to load, then Cross to run.
+8. The program also writes 42 to
    emulated address `0x2000` (the write is covered by the host tests).
 
 Controls: Triangle reloads an ELF, Circle loads `ux0:data/ps2vita/bios.bin`, Cross
@@ -200,6 +218,8 @@ Phase-0 frontend boundary, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for core
 design boundaries, [docs/BIOS_OPCODE_PROFILE.md](docs/BIOS_OPCODE_PROFILE.md) for
 the measured EE/IOP optimization priorities, and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the route from this milestone to games.
+The benchmark methodology and physical-hardware decision thresholds are in
+[docs/PERFORMANCE_VALIDATION.md](docs/PERFORMANCE_VALIDATION.md).
 
 ## License
 

@@ -1204,7 +1204,7 @@ void test_elf_and_emulator() {
 
 void test_phase0_aot_contract() {
   const auto& package = ps2vita::phase0_aot_package();
-  check(package.name != nullptr && package.entry_count == 15u,
+  check(package.name != nullptr && package.entry_count >= 22u,
         "Phase-0 AOT package exposes sorted entry metadata");
   check(ps2vita::validate_aot_package(package).ok(),
         "Phase-0 AOT package passes metadata validation");
@@ -1286,6 +1286,15 @@ void test_phase0_aot_contract() {
             chain.aot_stop == ps2vita::StopReason::Break &&
             chain.interpreter_value == 42u && chain.aot_value == 42u,
         "Phase-0 chained paths return and store identical state");
+
+  const auto benchmark = ps2vita::run_phase0_aot_benchmark(nullptr, 16u, 1u);
+  check(benchmark.matched,
+        "fully translated performance workload matches interpreter state");
+  check(benchmark.interpreter_stop == ps2vita::StopReason::Break &&
+            benchmark.aot_stop == ps2vita::StopReason::Break &&
+            benchmark.guest_instructions > 1000u &&
+            benchmark.interpreter_checksum == benchmark.aot_checksum,
+        "performance workload covers a substantial deterministic guest trace");
 
   // Generated load/store and signed-arithmetic semantics are compared over a
   // deterministic spread of inputs rather than a single friendly value.
