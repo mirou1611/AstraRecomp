@@ -449,6 +449,15 @@ void test_cdvd_reset_status() {
     mechacon_matches = mechacon_matches && memory.iop_read8(0x1F402018u) == byte;
   check(mechacon_matches && memory.iop_read8(0x1F402017u) == 0x40u,
         "CDVD GetMechaVersion returns the four-byte retail response");
+
+  memory.iop_write8(0x1F402016u, 0x36u);
+  const std::array<std::uint8_t, 15> expected_region = {
+      0u, 0x08u, 0u, 'E', 'E', 'e', 'n', 'g', 'E', 'E', 0u, 0u, 0u, 0u, 0u};
+  bool region_matches = memory.iop_read8(0x1F402017u) == 0u;
+  for (const auto byte : expected_region)
+    region_matches = region_matches && memory.iop_read8(0x1F402018u) == byte;
+  check(region_matches && memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD ReadRegionParams returns a complete European region block");
 }
 
 void test_sio2_disconnected_transfer() {

@@ -934,6 +934,17 @@ void Memory::iop_write8(std::uint32_t address, std::uint8_t value) {
           set_result(1u);
         }
         break;
+      case 0x36u: { // ReadRegionParams
+        // The 02.00E retail BIOS asks for the optical-drive region block while
+        // bringing up cdvdman. Return the complete 15-byte response; a generic
+        // one-byte error makes the guest repeatedly reissue this command.
+        constexpr std::array<std::uint8_t, 8> region = {
+            'E', 'E', 'e', 'n', 'g', 'E', 'E', 0u};
+        cdvd_scmd_result_[1] = 0x08u;
+        std::copy(region.begin(), region.end(), cdvd_scmd_result_.begin() + 3u);
+        set_result(15u);
+        break;
+      }
       case 0x40u: // OpenConfig(read/write, area, block count)
         if (cdvd_scmd_param_count_ >= 3u) {
           cdvd_config_rw_ = cdvd_scmd_params_[0];
