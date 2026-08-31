@@ -440,6 +440,15 @@ void test_cdvd_reset_status() {
   }
   check(config_bytes == 16u,
         "CDVD ReadConfig exposes a bounded sixteen-byte result");
+
+  memory.iop_write8(0x1F402017u, 0x00u);
+  memory.iop_write8(0x1F402016u, 0x03u);
+  const std::array<std::uint8_t, 4> expected_mechacon = {0x03u, 0x06u, 0x02u, 0x00u};
+  bool mechacon_matches = memory.iop_read8(0x1F402017u) == 0u;
+  for (const auto byte : expected_mechacon)
+    mechacon_matches = mechacon_matches && memory.iop_read8(0x1F402018u) == byte;
+  check(mechacon_matches && memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD GetMechaVersion returns the four-byte retail response");
 }
 
 void test_sio2_disconnected_transfer() {
@@ -639,6 +648,42 @@ void test_cpu_delay_slot() {
   check(cpu.run(20) == ps2vita::StopReason::Break, "CPU reaches break");
   check(memory.read32(0x2000) == 7, "branch executes one delay slot");
   check(cpu.state().gpr[0] == 0, "zero register remains immutable");
+}
+
+void test_interrupt_waits_for_branch_delay_slot() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  constexpr std::uint32_t base = 0x1000u;
+  memory.write32(base + 0x00, i_type(0x04, 0, 0, 3));  // beq zero,zero,0x1010
+  memory.write32(base + 0x04, i_type(0x09, 0, 8, 7));  // delay: addiu t0,zero,7
+  memory.write32(base + 0x08, 0x0000000Cu);             // unreachable syscall
+  memory.write32(base + 0x10, i_type(0x09, 0, 9, 9));  // branch target
+  memory.write32(0x80000200u, i_type(0x09, 0, 10, 1)); // installed interrupt vector
+
+  cpu.reset(base);
+  cpu.set_exception_mode(true);
+  cpu.state().cop0[12] = 0x00010401u; // EIE, INTC mask, IE.
+  check(cpu.step() == ps2vita::StopReason::None && cpu.state().pc == base + 4u,
+        "branch reaches its delay slot before the interrupt");
+
+  // Raise INTC bit 12 from Timer 3 after the branch has been decoded but
+  // before its delay-slot instruction retires.
+  memory.write32(0x10001820u, 1u);
+  memory.write32(0x10001810u, 0xD83u);
+  memory.write32(0x1000F010u, 1u << 12);
+  memory.advance(18743u);
+  check(memory.ee_interrupt_lines() == 0x400u,
+        "test interrupt becomes pending in the branch delay slot");
+
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().pc == base + 0x10u && cpu.state().gpr[8] == 7u,
+        "pending interrupt does not discard the branch delay slot or target");
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().pc == 0x80000200u && cpu.state().cop0[14] == base + 0x10u,
+        "interrupt is taken at the completed branch target");
+  check((cpu.state().cop0[13] & 0x80000000u) == 0u &&
+        cpu.state().gpr[9] == 0u,
+        "deferred asynchronous interrupt has no delay-slot cause flag");
 }
 
 void test_unaligned_memory_ops() {
@@ -1524,6 +1569,7 @@ int main() {
   test_ee_internal_registers();
   test_absent_dev_board_window();
   test_cpu_delay_slot();
+  test_interrupt_waits_for_branch_delay_slot();
   test_unaligned_memory_ops();
   test_quadword_load_store();
   test_compiler_support_ops();

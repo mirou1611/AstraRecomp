@@ -108,7 +108,12 @@ StopReason Cpu::step() {
   const auto interrupt_lines = memory_.ee_interrupt_lines();
   state_.cop0[13] = (state_.cop0[13] & ~0x00000C00u) | interrupt_lines;
   const auto status = state_.cop0[12];
-  if (exception_mode_ && interrupt_lines != 0u &&
+  // An asynchronous interrupt cannot split a branch from its delay slot. If
+  // it did, ERET would resume at the delay-slot address without enough state
+  // to recover the already-decoded branch target, and execution would fall
+  // through to the instruction after the slot. Retire the pair first, then
+  // take the level interrupt at the branch target on the following step.
+  if (exception_mode_ && !branch_pending_ && interrupt_lines != 0u &&
       (status & interrupt_lines) != 0u && (status & 0x00010001u) == 0x00010001u &&
       (status & 0x00000006u) == 0u) {
     raise_interrupt(interrupt_lines);

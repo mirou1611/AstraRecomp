@@ -45,6 +45,25 @@ struct StoreEntry {
   std::uint64_t value_hi = 0;
 };
 
+struct Sif0Event {
+  std::uint64_t step = 0;
+  bool active = false;
+  std::uint32_t tadr = 0;
+  std::uint32_t source = 0;
+  std::uint32_t words = 0;
+  std::uint32_t ee_tag = 0;
+  std::uint32_t destination = 0;
+};
+
+struct SyscallEvent {
+  std::uint64_t step = 0;
+  std::uint32_t pc = 0;
+  std::uint64_t number = 0;
+  std::uint64_t a0 = 0;
+  std::uint64_t ra = 0;
+  std::uint64_t sp = 0;
+};
+
 std::uint32_t parse_address(const char* text) {
   return static_cast<std::uint32_t>(std::strtoul(text, nullptr, 0));
 }
@@ -215,6 +234,9 @@ int main(int argc, char** argv) {
   iop_serial_output.reserve(16384);
   std::vector<StoreEntry> mailbox_store_trace;
   std::vector<StoreEntry> ee_packet_state_store_trace;
+  std::vector<Sif0Event> sif0_events;
+  std::vector<SyscallEvent> syscall_events;
+  bool sif0_was_active = false;
   std::uint64_t steps = 0;
   std::uint64_t hits = 0;
   std::uint32_t low_stub_word = 0;
@@ -231,7 +253,24 @@ int main(int argc, char** argv) {
       emulator.memory().iop_write32(0x1F801450u, 2u);
     }
     const auto& state = emulator.cpu().state();
+    const bool sif0_active =
+        (emulator.memory().iop_read32(0x1F801528u) & 0x01000000u) != 0u;
+    if (sif0_active != sif0_was_active) {
+      const auto tadr =
+          emulator.memory().iop_read32(0x1F80152Cu) & 0x00FFFFFCu;
+      const auto iop_tag = emulator.memory().iop_read32(tadr);
+      sif0_events.push_back({steps, sif0_active, tadr,
+          iop_tag & 0x00FFFFFFu,
+          emulator.memory().iop_read32(tadr + 4u) & 0x000FFFFFu,
+          emulator.memory().iop_read32(tadr + 8u),
+          emulator.memory().iop_read32(tadr + 12u) & 0x0FFFFFF0u});
+      sif0_was_active = sif0_active;
+    }
     const auto instruction = emulator.memory().read32(state.pc);
+    if ((instruction & 0xFC00003Fu) == 0x0000000Cu) {
+      syscall_events.push_back({steps, state.pc, state.gpr[3], state.gpr[4],
+                                state.gpr[31], state.gpr[29]});
+    }
     const auto ee_lines = emulator.memory().ee_interrupt_lines();
     const auto ee_status = state.cop0[12];
     const bool ee_takes_interrupt = ee_lines != 0u &&
@@ -572,6 +611,38 @@ int main(int argc, char** argv) {
       emulator.memory().iop_read32(sif0_madr + 20u),
       emulator.memory().iop_read32(sif0_madr + 24u),
       emulator.memory().iop_read32(sif0_madr + 28u));
+  std::printf("IOP SIF0 activity transitions: %zu\n", sif0_events.size());
+  const auto sif0_begin =
+      sif0_events.size() > 64u ? sif0_events.size() - 64u : 0u;
+  for (std::size_t i = sif0_begin; i < sif0_events.size(); ++i) {
+    const auto& event = sif0_events[i];
+    std::printf("%03zu step=%llu %s tadr=%08X source=%08X words=%05X "
+                "ee_tag=%08X destination=%08X\n",
+        i, static_cast<unsigned long long>(event.step),
+        event.active ? "start" : "done ", event.tadr, event.source,
+        event.words, event.ee_tag, event.destination);
+  }
+  std::puts("EE RAM 00100000 staging window:");
+  for (std::uint32_t offset = 0u; offset < 0x100u; offset += 16u) {
+    std::printf("%08X  %08X %08X %08X %08X\n", 0x00100000u + offset,
+        emulator.memory().read32(0x00100000u + offset),
+        emulator.memory().read32(0x00100004u + offset),
+        emulator.memory().read32(0x00100008u + offset),
+        emulator.memory().read32(0x0010000Cu + offset));
+  }
+  std::printf("EE syscall events: %zu\n", syscall_events.size());
+  const auto syscall_begin =
+      syscall_events.size() > 96u ? syscall_events.size() - 96u : 0u;
+  for (std::size_t i = syscall_begin; i < syscall_events.size(); ++i) {
+    const auto& event = syscall_events[i];
+    std::printf("%03zu step=%llu pc=%08X number=%016llX a0=%016llX "
+                "ra=%016llX sp=%016llX\n",
+        i, static_cast<unsigned long long>(event.step), event.pc,
+        static_cast<unsigned long long>(event.number),
+        static_cast<unsigned long long>(event.a0),
+        static_cast<unsigned long long>(event.ra),
+        static_cast<unsigned long long>(event.sp));
+  }
   std::puts("EE code surrounding final PC:");
   const auto ee_code_base = (state.pc & ~0xFFu) - 0x100u;
   for (std::uint32_t offset = 0u; offset < 0x300u; offset += 16u) {

@@ -919,6 +919,21 @@ void Memory::iop_write8(std::uint32_t address, std::uint8_t value) {
       };
       cdvd_scmd_result_.fill(0);
       switch (value) {
+      case 0x03u: // Mechacon command.
+        if (cdvd_scmd_param_count_ != 0u && cdvd_scmd_params_[0] == 0x00u) {
+          // GetMechaVersion returns a little-endian RR.MM.mm.TT word. This
+          // retail-compatible baseline matches the response expected by the
+          // BIOS CDVD module before it starts its higher-level RPC service.
+          cdvd_scmd_result_[0] = 0x03u;
+          cdvd_scmd_result_[1] = 0x06u;
+          cdvd_scmd_result_[2] = 0x02u;
+          cdvd_scmd_result_[3] = 0x00u;
+          set_result(4u);
+        } else {
+          cdvd_scmd_result_[0] = 0x81u;
+          set_result(1u);
+        }
+        break;
       case 0x40u: // OpenConfig(read/write, area, block count)
         if (cdvd_scmd_param_count_ >= 3u) {
           cdvd_config_rw_ = cdvd_scmd_params_[0];
