@@ -50,9 +50,11 @@ state machine remains. SIF1 command delivery is also event-driven: the scheduler
 derives a completion deadline from the complete observed REF/REFE source chain,
 then copies its tagged payload into IOP RAM and raises the modeled EE DMAC and IOP
 INTC state. The transfer is never made visible synchronously with an MMIO write.
-The reverse SIF0 path follows the same rule: it consumes the observed IOP end tag
-and EE CNT/IRQ destination tag at a cycle deadline, including short-packet zero
-padding, before raising EE DMAC channel 5 and the shared IOP DMA interrupt.
+The reverse SIF0 path follows the same rule: it consumes observed IOP source tags
+and EE CNT destination tags at a cycle deadline, including short-packet zero
+padding. Its source and destination chains terminate independently, so only the
+side whose end condition was reached retires and raises its interrupt; the other
+channel remains armed for the next burst.
 IOP Timer 5 shares this deterministic master timeline. A persistent 8:1 phase
 converts EE cycles to IOP cycles, then the selected 1/8/16/256 prescaler drives
 32-bit target and overflow events. Mode reads acknowledge event flags and rearm

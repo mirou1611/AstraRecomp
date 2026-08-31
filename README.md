@@ -39,7 +39,8 @@ register, memory, PC, cycle, and stop state agree. A second probe shows
 JAL/delay-slot/`jr $ra` sequence.
 
 It now executes a user-supplied retail BIOS through EE hardware initialization,
-relocation into RAM, IOP reset-ROM startup, and the BIOS `Initialize Done` stage.
+relocation into RAM, IOP reset-ROM startup, DECI2 startup, bidirectional SIF boot
+traffic, and repeated `Restart Without Memory Clear` completion.
 It does **not yet render the PS2 startup or run retail games**. Those require deeper IOP, DMA,
 interrupt, GIF/GS, SPU2, and disc emulation described in the roadmap. The existing
 core is real BIOS execution, not a renamed frontend or a fake compatibility screen.
@@ -48,7 +49,7 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 
 | Area | Current state |
 | --- | --- |
-| BIOS bootstrap | Executes through initialization, both SIF directions, EE DMAC handling, and the first IOP Timer 5 interrupt |
+| BIOS bootstrap | Executes through DECI2 startup, multi-tag SIF transfers, relocated EE code, and repeated no-clear restart completion |
 | PC recompiler | Phase-0 analysis and a tested R5900-to-C++ subset with interpreter/native differential checks |
 | Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
 | Guest graphics | Reference rasterizer exists; guest GIF packets are not connected yet |
@@ -98,10 +99,12 @@ PS2 ELF / user BIOS
 - Hardware-derived R5900 COP0/FPU reset identity and coprocessor-enable state
 - COP0 Count driven by interpreted EE cycles for BIOS delay calibration
 - EE/IOP SBUS flag semantics with guest-generated SIFINIT and BOOTEND events
-- Cycle-scheduled SIF1 REF/REFE DMA from EE RAM into IOP RAM, including DMA
-  completion flags and EE/IOP external-interrupt entry
+- Cycle-scheduled SIF1 REF/REFE DMA from EE RAM into IOP RAM, including payload
+  continuation across source tags, completion flags, and external-interrupt entry
 - Cycle-scheduled SIF0 IOP-to-EE reply DMA with tagged destination delivery,
-  quadword padding, completion state, and interrupt wakeup
+  quadword padding, independently terminating IOP/EE channels, and interrupt wakeup
+- Dedicated R5900 level-one interrupt vector and boot-path PLZCW semantics
+- Shared EE/IOP physical CDVD register window used by relocated BIOS code
 - Master-cycle-driven 32-bit IOP Timer 5 with 16/32-bit register access,
   clock prescaling, pulsed-repeat target/overflow IRQs, and INTC bit 16 delivery
 - Initial no-disc CDVD device state with N-READY/status registers and bounded

@@ -239,14 +239,14 @@ void test_sif1_dma_and_external_interrupts() {
   memory.write32(0x1000E010u, 1u << 22);
   check(memory.ee_interrupt_lines() == 0x800u,
         "EE DMAC mask exposes the pending channel on Cause IP3");
-  memory.write32(0x80000180u, 0x24000000u);
+  memory.write32(0x80000200u, 0x24000000u);
   ps2vita::Cpu ee(memory);
   ee.reset(0x1000u);
   ee.set_exception_mode(true);
   ee.state().cop0[12] = 0x00010801u;
   check(ee.step() == ps2vita::StopReason::None &&
-        ee.state().pc == 0x80000180u && ee.state().cop0[14] == 0x1000u,
-        "EE takes an enabled external DMAC interrupt");
+        ee.state().pc == 0x80000200u && ee.state().cop0[14] == 0x1000u,
+        "EE takes an enabled external DMAC interrupt at the interrupt vector");
 
   ps2vita::IopCpu iop(memory);
   iop.state().pc = 0x100u;
@@ -263,6 +263,46 @@ void test_sif1_dma_and_external_interrupts() {
   memory.write32(0x1000F010u, 1u << 1);
   check(memory.ee_interrupt_lines() == 0x400u,
         "IOP ICFG bit 1 raises the EE SBUS interrupt");
+}
+
+void test_sif1_continuation_chain() {
+  ps2vita::Memory memory;
+  memory.write32(0x2000u, 0x30000002u);
+  memory.write32(0x2004u, 0x00003000u);
+  memory.write32(0x2010u, 0x30000001u);
+  memory.write32(0x2014u, 0x00003040u);
+  memory.write32(0x2020u, 0x00000002u);
+  memory.write32(0x2024u, 0x00003080u);
+
+  memory.write32(0x3000u, 0x00001000u);
+  memory.write32(0x3004u, 8u);
+  for (unsigned word = 0; word < 4u; ++word)
+    memory.write32(0x3010u + word * 4u, 0x11110000u + word);
+  for (unsigned word = 0; word < 4u; ++word)
+    memory.write32(0x3040u + word * 4u, 0x22220000u + word);
+  memory.write32(0x3080u, 0xC0001100u);
+  memory.write32(0x3084u, 4u);
+  for (unsigned word = 0; word < 4u; ++word)
+    memory.write32(0x3090u + word * 4u, 0x33330000u + word);
+
+  memory.write32(0x1000C430u, 0x2000u);
+  memory.write32(0x1000C400u, 0x184u);
+  memory.iop_write32(0x1F801538u, 0x41000300u);
+  memory.advance(1u);
+  memory.advance(39u);
+  check(memory.iop_read32(0x1000u) == 0u,
+        "SIF1 continuation chain waits for its complete QWC deadline");
+  memory.advance(1u);
+  check(memory.iop_read32(0x1000u) == 0x11110000u &&
+        memory.iop_read32(0x100Cu) == 0x11110003u &&
+        memory.iop_read32(0x1010u) == 0x22220000u &&
+        memory.iop_read32(0x101Cu) == 0x22220003u &&
+        memory.iop_read32(0x1100u) == 0x33330000u &&
+        memory.iop_read32(0x110Cu) == 0x33330003u,
+        "SIF1 REF continuation carries one transfer across source tags");
+  check((memory.read32(0x1000C400u) & 0x100u) == 0u &&
+        memory.read32(0x1000C430u) == 0x2030u,
+        "SIF1 continuation completes and advances through REFE");
 }
 
 void test_sif0_dma_reply() {
@@ -303,6 +343,40 @@ void test_sif0_dma_reply() {
         "SIF0 completion raises the shared IOP DMA interrupt");
 }
 
+void test_sif0_iop_side_completes_first() {
+  ps2vita::Memory memory;
+  // The retail BIOS sends large packets whose IOP source tag ends while the
+  // EE destination chain remains armed for the next packet.
+  memory.iop_write32(0x200Cu, 0x80003000u);
+  memory.iop_write32(0x2010u, 4u);
+  memory.iop_write32(0x2014u, 0x10000001u);
+  memory.iop_write32(0x2018u, 0x00004000u);
+  for (std::uint32_t word = 0; word < 4u; ++word)
+    memory.iop_write32(0x3000u + word * 4u, 0xB0000000u + word);
+  memory.write32(0x1000C000u, 0x184u);
+  memory.iop_write32(0x1F80152Cu, 0x200Cu);
+  memory.iop_write32(0x1F801528u, 0x01000701u);
+
+  memory.advance(1u);
+  memory.advance(31u);
+  check(memory.read32(0x4000u) == 0u,
+        "one-sided SIF0 packet waits for its word deadline");
+  memory.advance(1u);
+  check(memory.read32(0x4000u) == 0xB0000000u &&
+        memory.read32(0x400Cu) == 0xB0000003u,
+        "one-sided SIF0 packet reaches EE memory");
+  check((memory.iop_read32(0x1F801528u) & 0x01000000u) == 0u &&
+        memory.iop_read32(0x1F801520u) == 0x3010u &&
+        memory.iop_read32(0x1F80152Cu) == 0x201Cu &&
+        (memory.iop_read32(0x1F801574u) & (1u << 26)) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 3)) != 0u,
+        "one-sided SIF0 completion retires and interrupts the IOP channel");
+  check((memory.read32(0x1000C000u) & 0x100u) != 0u &&
+        memory.read32(0x1000C010u) == 0x4010u &&
+        (memory.read32(0x1000E010u) & (1u << 5)) == 0u,
+        "one-sided SIF0 completion leaves the EE channel armed");
+}
+
 void test_iop_timer5_deadlines() {
   ps2vita::Memory memory;
   memory.iop_write32(0x1F8014A8u, 5u);
@@ -339,6 +413,8 @@ void test_iop_timer5_deadlines() {
 
 void test_cdvd_reset_status() {
   ps2vita::Memory memory;
+  check(memory.valid(0x1F402005u) && memory.read8(0x1F402005u) == 0x4Cu,
+        "EE physical CDVD window shares the drive-ready register");
   check(memory.iop_read8(0x1F402005u) == 0x4Cu,
         "CDVD reset state reports drive, mechacon, and DEV9 ready");
   check(memory.iop_read8(0x1F40200Au) == 0x01u &&
@@ -687,6 +763,21 @@ void test_mmi_por() {
   check(cpu.state().gpr[10] == 0xFFFFFFFFFFFFFFFFull &&
         cpu.state().gpr_hi[10] == 0xFFFFFFFFFFFFFFFFull,
         "POR combines all 128 register bits");
+}
+
+void test_mmi_plzcw() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.state().gpr[1] = 0xFFF000000000FFFFull;
+  cpu.state().gpr_hi[26] = 0x0123456789ABCDEFull;
+  memory.write32(0x1000u,
+      (0x1Cu << 26) | (1u << 21) | (26u << 11) | 0x04u);
+  memory.write32(0x1004u, 0x0000000Du);
+  cpu.state().pc = 0x1000u;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "PLZCW executes");
+  check(cpu.state().gpr[26] == 0x0000000B0000000Full &&
+        cpu.state().gpr_hi[26] == 0x0123456789ABCDEFull,
+        "PLZCW counts leading sign bits in both low words only");
 }
 
 void test_native_zero_fill_fast_path() {
@@ -1335,7 +1426,9 @@ int main() {
   test_bios_mapping_and_boot();
   test_iop_memory_and_cpu();
   test_sif1_dma_and_external_interrupts();
+  test_sif1_continuation_chain();
   test_sif0_dma_reply();
+  test_sif0_iop_side_completes_first();
   test_iop_timer5_deadlines();
   test_cdvd_reset_status();
   test_video_vblank_deadlines();
@@ -1355,6 +1448,7 @@ int main() {
   test_decoded_block_cache();
   test_mmi_padduw();
   test_mmi_por();
+  test_mmi_plzcw();
   test_native_zero_fill_fast_path();
   test_mmi_div1_accumulator();
   test_mmi_packed_accumulator_moves();

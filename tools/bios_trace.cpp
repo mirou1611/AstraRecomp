@@ -137,10 +137,10 @@ void print_opcode_profile(const char* processor,
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 8) {
+  if (argc < 2 || argc > 9) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
-        "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC]\n");
+        "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP]\n");
     return 2;
   }
 
@@ -165,6 +165,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   const std::uint32_t iop_stop_pc = argc >= 8 ? parse_address(argv[7]) : 0u;
+  const std::uint64_t sbus_probe_step = argc >= 9
+      ? std::strtoull(argv[8], nullptr, 0) : 0u;
 
   ps2vita::Emulator emulator;
   if (!emulator.load_bios(bios.data(), bios.size()) || !emulator.boot_bios()) {
@@ -209,6 +211,8 @@ int main(int argc, char** argv) {
   serial_output.reserve(16384);
   std::vector<char> iop_serial_output;
   iop_serial_output.reserve(16384);
+  std::vector<StoreEntry> mailbox_store_trace;
+  std::vector<StoreEntry> ee_packet_state_store_trace;
   std::uint64_t steps = 0;
   std::uint64_t hits = 0;
   std::uint32_t low_stub_word = 0;
@@ -218,6 +222,12 @@ int main(int argc, char** argv) {
   ps2vita::StopReason reason = ps2vita::StopReason::None;
   ps2vita::IopStopReason iop_reason = ps2vita::IopStopReason::None;
   for (; steps < max_steps; ++steps) {
+    if (sbus_probe_step != 0u && steps == sbus_probe_step) {
+      std::fprintf(stderr,
+          "diagnostic: injecting IOP ICFG bit-1 SBUS probe at step %llu\n",
+          static_cast<unsigned long long>(steps));
+      emulator.memory().iop_write32(0x1F801450u, 2u);
+    }
     const auto& state = emulator.cpu().state();
     const auto instruction = emulator.memory().read32(state.pc);
     const auto ee_lines = emulator.memory().ee_interrupt_lines();
@@ -265,6 +275,17 @@ int main(int argc, char** argv) {
         low_store_trace[low_store_cursor++ % kTraceSize] = {
             state.pc, instruction, address, state.gpr[source],
             state.gpr_hi[source]};
+      }
+      if (physical >= 0x1C0003C0u && physical < 0x1C000420u) {
+        mailbox_store_trace.push_back({state.pc, instruction, address,
+            state.gpr[source], state.gpr_hi[source]});
+      }
+      if ((physical >= 0x00023E20u && physical < 0x00023E70u) ||
+          (physical >= 0x00024100u && physical < 0x00024140u) ||
+          (physical >= 0x000242E0u && physical < 0x00024320u) ||
+          (physical >= 0x00024510u && physical < 0x00024540u)) {
+        ee_packet_state_store_trace.push_back({state.pc, instruction, address,
+            state.gpr[source], state.gpr_hi[source]});
       }
       if (physical >= 0x600u && physical < 0x800u) {
         syscall_store_trace[syscall_store_cursor++ % kTraceSize] = {
@@ -337,6 +358,10 @@ int main(int argc, char** argv) {
         if (address < 0x2000u) {
           iop_low_store_trace[iop_low_store_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
+        }
+        if (address >= 0x3C0u && address < 0x420u) {
+          mailbox_store_trace.push_back({iop.pc, iop_instruction, address,
+              iop.gpr[source], 0u});
         }
         if (address >= 0x1D000000u && address <= 0x1D000060u) {
           iop_sbus_store_trace[iop_sbus_store_cursor++ % kTraceSize] = {
@@ -432,6 +457,23 @@ int main(int argc, char** argv) {
       emulator.memory().read32(sif1_madr + 20u),
       emulator.memory().read32(sif1_madr + 24u),
       emulator.memory().read32(sif1_madr + 28u));
+  std::puts("EE SIF1 chain tags and transfer headers:");
+  auto chain_tadr = emulator.memory().read32(0x1000C430u) & 0x0FFFFFF0u;
+  for (unsigned index = 0; index < 16u; ++index, chain_tadr += 16u) {
+    const auto tag = emulator.memory().read32(chain_tadr);
+    const auto source = emulator.memory().read32(chain_tadr + 4u) & 0x0FFFFFF0u;
+    std::printf("%02u tag@%08X=%08X %08X %08X %08X src=%08X "
+                "header=%08X %08X %08X %08X\n",
+        index, chain_tadr, tag,
+        emulator.memory().read32(chain_tadr + 4u),
+        emulator.memory().read32(chain_tadr + 8u),
+        emulator.memory().read32(chain_tadr + 12u), source,
+        emulator.memory().read32(source),
+        emulator.memory().read32(source + 4u),
+        emulator.memory().read32(source + 8u),
+        emulator.memory().read32(source + 12u));
+    if (((tag >> 28) & 7u) == 0u) break;
+  }
   std::printf("timer3_count=%08X mode=%08X compare=%08X hold=%08X\n",
       emulator.memory().read32(0x10001800u),
       emulator.memory().read32(0x10001810u),
@@ -533,9 +575,22 @@ int main(int argc, char** argv) {
         emulator.memory().iop_read32(0x00019878u + offset),
         emulator.memory().iop_read32(0x0001987Cu + offset));
   }
-  std::puts("EE wait/SIF routines 8000FDE8 and 800125C0:");
-  for (const auto base : {0x8000FDE8u, 0x800125C0u}) {
-    for (std::uint32_t offset = 0u; offset < 0xC0u; offset += 16u) {
+  std::puts("EE SIF wait, flag-dispatch, and manager routines:");
+  for (const auto base : {0x8000FAC8u, 0x8000FC58u, 0x8000FDE8u,
+                          0x80012128u, 0x80012400u, 0x800130D8u,
+                          0x80012B00u, 0x800139C0u}) {
+    const auto length = base >= 0x80012400u ? 0x500u : 0x180u;
+    for (std::uint32_t offset = 0u; offset < length; offset += 16u) {
+      std::printf("%08X  %08X %08X %08X %08X\n", base + offset,
+          emulator.memory().read32(base + offset),
+          emulator.memory().read32(base + offset + 4u),
+          emulator.memory().read32(base + offset + 8u),
+          emulator.memory().read32(base + offset + 12u));
+    }
+  }
+  std::puts("EE packet/DECI2 live state 80023E00 and 80024300:");
+  for (const auto base : {0x80023E00u, 0x80024300u}) {
+    for (std::uint32_t offset = 0u; offset < 0x400u; offset += 16u) {
       std::printf("%08X  %08X %08X %08X %08X\n", base + offset,
           emulator.memory().read32(base + offset),
           emulator.memory().read32(base + offset + 4u),
@@ -713,6 +768,24 @@ int main(int argc, char** argv) {
       std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
                   item.instruction, item.address,
                   static_cast<unsigned long long>(item.value_lo));
+    }
+  }
+  if (!mailbox_store_trace.empty()) {
+    std::puts("EE/IOP low-memory mailbox stores:");
+    for (const auto& item : mailbox_store_trace) {
+      std::printf("%08X  %08X  address=%08X value=%016llX:%016llX\n",
+          item.pc, item.instruction, item.address,
+          static_cast<unsigned long long>(item.value_hi),
+          static_cast<unsigned long long>(item.value_lo));
+    }
+  }
+  if (!ee_packet_state_store_trace.empty()) {
+    std::puts("EE packet/DECI2 state stores:");
+    for (const auto& item : ee_packet_state_store_trace) {
+      std::printf("%08X  %08X  address=%08X value=%016llX:%016llX\n",
+          item.pc, item.instruction, item.address,
+          static_cast<unsigned long long>(item.value_hi),
+          static_cast<unsigned long long>(item.value_lo));
     }
   }
   std::puts("recent IOP CDVD register accesses:");

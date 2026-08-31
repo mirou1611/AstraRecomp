@@ -168,12 +168,14 @@ void Cpu::raise_interrupt(std::uint32_t lines) {
   state_.cop0[12] |= 2u;
   bool bootstrap_vectors = (state_.cop0[12] & (1u << 22)) != 0;
   if (!bootstrap_vectors) {
-    bootstrap_vectors = memory_.read32(0x80000180u) == 0 &&
-                        memory_.read32(0x80000184u) == 0 &&
-                        memory_.read32(0x80000188u) == 0 &&
-                        memory_.read32(0x8000018Cu) == 0;
+    bootstrap_vectors = memory_.read32(0x80000200u) == 0 &&
+                        memory_.read32(0x80000204u) == 0 &&
+                        memory_.read32(0x80000208u) == 0 &&
+                        memory_.read32(0x8000020Cu) == 0;
   }
-  state_.pc = bootstrap_vectors ? 0xBFC00200u : 0x80000180u;
+  // The R5900 gives level-one interrupts their own vector. General
+  // exceptions use +0x180, but Cause.ExcCode == Interrupt uses +0x200.
+  state_.pc = bootstrap_vectors ? 0xBFC00400u : 0x80000200u;
   branch_pending_ = false;
 }
 
@@ -712,7 +714,22 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
   }
   case 0x1C: { // MMI multimedia instruction groups.
     const unsigned sub = (ins >> 6) & 31u;
-    if (fn == 0x10) { // MFHI1
+    if (fn == 0x04) { // PLZCW
+      if (rd != 0) {
+        const auto count_after_sign = [](std::uint32_t word) {
+          const bool sign = (word & 0x80000000u) != 0u;
+          std::uint32_t count = 0;
+          for (int bit = 30; bit >= 0; --bit) {
+            if (((word >> bit) & 1u) != static_cast<unsigned>(sign)) break;
+            ++count;
+          }
+          return count;
+        };
+        const auto low = count_after_sign(static_cast<std::uint32_t>(rsv));
+        const auto high = count_after_sign(static_cast<std::uint32_t>(rsv >> 32));
+        state_.gpr[rd] = low | (static_cast<std::uint64_t>(high) << 32);
+      }
+    } else if (fn == 0x10) { // MFHI1
       set_reg(rd, state_.hi1);
     } else if (fn == 0x11) { // MTHI1
       state_.hi1 = rsv;

@@ -188,6 +188,8 @@ bool Memory::valid(std::uint32_t address, std::size_t size) const {
     const auto offset = static_cast<std::size_t>(p - kDveBase);
     if (offset <= dve_.size() && size <= dve_.size() - offset) return true;
   }
+  if (p >= kCdvdBase && p < kCdvdBase + kCdvdSize)
+    return size <= kCdvdBase + kCdvdSize - p;
   if (p >= kIopBase) {
     const auto offset = static_cast<std::size_t>(p - kIopBase);
     if (offset <= kIopWindowSize && size <= kIopWindowSize - offset) return true;
@@ -218,6 +220,8 @@ std::uint8_t Memory::read8(std::uint32_t address) const {
     return gs_hw_[p - kGsHwBase];
   if (p >= kDveBase && p < kDveBase + kDveSize)
     return dve_[p - kDveBase];
+  if (p >= kCdvdBase && p < kCdvdBase + kCdvdSize)
+    return iop_read8(p);
   if (p >= kIopHwBase && p < kIopHwBase + kIopHwSize)
     return iop_hw_[p - kIopHwBase];
   return iop_ram_[(p - kIopBase) & (kIopRamSize - 1u)];
@@ -331,6 +335,8 @@ void Memory::write8(std::uint32_t address, std::uint8_t value) {
     gs_hw_[p - kGsHwBase] = value;
   else if (p >= kDveBase && p < kDveBase + kDveSize)
     dve_[p - kDveBase] = value;
+  else if (p >= kCdvdBase && p < kCdvdBase + kCdvdSize)
+    iop_write8(p, value);
   else if (p >= kIopHwBase && p < kIopHwBase + kIopHwSize)
     iop_hw_[p - kIopHwBase] = value;
   else if (p >= kIopBase && p < kIopBase + kIopWindowSize)
@@ -611,8 +617,10 @@ void Memory::advance(std::uint32_t cycles) {
     auto tadr = raw_iop(0x052Cu) & 0x00FFFFFCu;
     std::uint32_t final_iop_madr = 0;
     std::uint32_t final_ee_madr = 0;
-    bool complete = false;
-    for (unsigned tag_index = 0; tag_index < 64u && !complete; ++tag_index) {
+    bool iop_complete = false;
+    bool ee_complete = false;
+    for (unsigned tag_index = 0;
+         tag_index < 64u && !iop_complete && !ee_complete; ++tag_index) {
       if (!iop_valid(tadr, 24u)) break;
       const auto iop_tag = iop_read32(tadr);
       const auto source = iop_tag & 0x00FFFFFFu;
@@ -636,20 +644,24 @@ void Memory::advance(std::uint32_t cycles) {
       const bool iop_end = (iop_tag & 0xC0000000u) != 0u;
       const bool ee_end = (ee_tag & 0x80000000u) != 0u &&
                           (raw_ee(0xC000u) & 0x80u) != 0u;
-      if (iop_end != ee_end) break;
-      complete = iop_end;
+      iop_complete = iop_end;
+      ee_complete = ee_end;
     }
-    if (complete) {
+    if (iop_complete || ee_complete) {
       store_ee(0xC010u, final_ee_madr);
       store_ee(0xC020u, 0u);
-      store_ee(0xC000u, raw_ee(0xC000u) & ~0x100u);
-      store_ee(0xE010u, raw_ee(0xE010u) | (1u << 5));
+      if (ee_complete) {
+        store_ee(0xC000u, raw_ee(0xC000u) & ~0x100u);
+        store_ee(0xE010u, raw_ee(0xE010u) | (1u << 5));
+      }
       store_ee(0xF240u, raw_ee(0xF240u) & ~(0x20u | 0x2000u));
       store_iop(0x0520u, final_iop_madr);
       store_iop(0x052Cu, tadr);
-      store_iop(0x0528u, raw_iop(0x0528u) & ~0x01000000u);
-      store_iop(0x0574u, raw_iop(0x0574u) | (1u << 26));
-      store_iop(0x0070u, raw_iop(0x0070u) | (1u << 3));
+      if (iop_complete) {
+        store_iop(0x0528u, raw_iop(0x0528u) & ~0x01000000u);
+        store_iop(0x0574u, raw_iop(0x0574u) | (1u << 26));
+        store_iop(0x0070u, raw_iop(0x0070u) | (1u << 3));
+      }
     }
   }
 
@@ -662,28 +674,41 @@ void Memory::advance(std::uint32_t cycles) {
 
     auto tadr = raw_ee(0xC430u) & 0x0FFFFFF0u;
     std::uint32_t final_madr = 0;
+    std::uint32_t destination = 0;
+    std::uint32_t remaining_words = 0;
     bool complete = false;
     for (unsigned tag_index = 0; tag_index < 64u && !complete; ++tag_index) {
       const auto tag = read32(tadr);
       const auto qwc = tag & 0xFFFFu;
       const auto id = (tag >> 28) & 7u;
       const auto source = read32(tadr + 4u) & 0x0FFFFFF0u;
-      // The reset path uses REF followed by REFE. Other source-chain tag
-      // modes remain deliberately unsupported until traced and tested.
+      // The BIOS uses REF/REFE chains. A transfer begins with a four-word SIF
+      // tag (IOP destination, word count, attributes) and can continue through
+      // following raw REF payloads when it is larger than the first EE tag.
       if ((id != 0u && id != 3u) || qwc == 0u || !valid(source, qwc * 16u))
         break;
-      const auto destination = read32(source) & 0x00FFFFFFu;
-      const auto words = read32(source + 4u) & 0x000FFFFFu;
-      if (words > (qwc - 1u) * 4u || !iop_valid(destination, words * 4u))
+      auto payload = source;
+      auto available_words = qwc * 4u;
+      if (remaining_words == 0u) {
+        destination = read32(source) & 0x00FFFFFFu;
+        remaining_words = read32(source + 4u) & 0x000FFFFFu;
+        payload += 16u;
+        available_words -= 4u;
+      }
+      const auto words = std::min(remaining_words, available_words);
+      if (!iop_valid(destination, words * 4u) || !valid(payload, words * 4u))
         break;
       for (std::uint32_t word = 0; word < words; ++word)
         iop_write32(destination + word * 4u,
-                    read32(source + 16u + word * 4u));
+                    read32(payload + word * 4u));
+      destination += words * 4u;
+      remaining_words -= words;
       final_madr = source + qwc * 16u;
-      store_iop(0x0530u, destination + words * 4u);
+      store_iop(0x0530u, destination);
       tadr += 16u;
-      complete = id == 0u || ((tag & 0x80000000u) != 0u &&
-                             (raw_ee(0xC400u) & 0x80u) != 0u);
+      const bool end = id == 0u || ((tag & 0x80000000u) != 0u &&
+                                   (raw_ee(0xC400u) & 0x80u) != 0u);
+      if (end) complete = remaining_words == 0u;
     }
     if (complete) {
       store_ee(0xC410u, final_madr);
@@ -729,8 +754,8 @@ void Memory::advance(std::uint32_t cycles) {
       (raw_iop(0x0528u) & 0x01000000u) != 0u) {
     auto tadr = raw_iop(0x052Cu) & 0x00FFFFFCu;
     std::uint32_t total_words = 0;
-    bool complete_chain = false;
-    for (unsigned tag_index = 0; tag_index < 64u && !complete_chain;
+    bool reached_boundary = false;
+    for (unsigned tag_index = 0; tag_index < 64u && !reached_boundary;
          ++tag_index) {
       if (!iop_valid(tadr, 24u)) break;
       const auto iop_tag = iop_read32(tadr);
@@ -746,10 +771,12 @@ void Memory::advance(std::uint32_t cycles) {
       const bool iop_end = (iop_tag & 0xC0000000u) != 0u;
       const bool ee_end = (ee_tag & 0x80000000u) != 0u &&
                           (raw_ee(0xC000u) & 0x80u) != 0u;
-      if (iop_end != ee_end) break;
-      complete_chain = iop_end;
+      // SIF0's IOP source chain and EE destination chain terminate
+      // independently. A burst ends when either side reaches its tag; the
+      // other channel remains armed for a subsequent burst.
+      reached_boundary = iop_end || ee_end;
     }
-    if (complete_chain) {
+    if (reached_boundary) {
       sif0_cycles_remaining_ = (total_words == 0u ? 1u : total_words) * 8u;
       store_ee(0xF240u, raw_ee(0xF240u) | 0x20u | 0x2000u);
     }

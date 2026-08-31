@@ -31,6 +31,8 @@ public:
   static constexpr std::uint32_t kNullEnd = 0x10000000u;
   static constexpr std::uint32_t kIopHwBase = 0x1F801000u;
   static constexpr std::uint32_t kIopHwSize = 64u * 1024u;
+  static constexpr std::uint32_t kCdvdBase = 0x1F402000u;
+  static constexpr std::uint32_t kCdvdSize = 256u;
   // R5900 processor-internal control space used during BIOS cache setup. It
   // lives in KSEG3 but is not a normal TLB-backed memory page.
   static constexpr std::uint32_t kEeInternalBase = 0xFFFE0000u;
