@@ -239,6 +239,13 @@ int main(int argc, char** argv) {
   std::vector<StoreEntry> ee_packet_state_store_trace;
   std::vector<Sif0Event> sif0_events;
   std::vector<SyscallEvent> syscall_events;
+  constexpr std::array<std::uint32_t, 3> kGraphicsDmaChcr = {
+      0x10008000u, 0x10009000u, 0x1000A000u};
+  constexpr std::array<const char*, 3> kGraphicsDmaName = {
+      "VIF0", "VIF1", "GIF"};
+  std::array<std::uint64_t, 3> graphics_dma_starts{};
+  std::array<std::uint64_t, 3> graphics_dma_first_step{};
+  std::array<std::uint32_t, 3> graphics_dma_first_pc{};
   bool sif0_was_active = false;
   std::uint64_t steps = 0;
   std::uint64_t hits = 0;
@@ -361,6 +368,16 @@ int main(int argc, char** argv) {
         gif_store_trace[gif_store_cursor++ % kTraceSize] = {
             state.pc, instruction, address, state.gpr[source],
             state.gpr_hi[source]};
+      }
+      for (std::size_t channel = 0; channel < kGraphicsDmaChcr.size();
+           ++channel) {
+        if (physical == kGraphicsDmaChcr[channel] &&
+            (state.gpr[source] & 0x100u) != 0u) {
+          if (graphics_dma_starts[channel]++ == 0u) {
+            graphics_dma_first_step[channel] = steps;
+            graphics_dma_first_pc[channel] = state.pc;
+          }
+        }
       }
     }
     if (stop_pc != 0u && state.pc == stop_pc && ++hits >= stop_hit) break;
@@ -486,6 +503,19 @@ int main(int argc, char** argv) {
       emulator.memory().read32(0x1000F000u),
       emulator.memory().read32(0x1000F010u),
       emulator.memory().read32(0x1000E010u));
+  for (std::size_t channel = 0; channel < kGraphicsDmaChcr.size();
+       ++channel) {
+    const auto base = kGraphicsDmaChcr[channel];
+    std::printf("ee_%s chcr=%08X madr=%08X qwc=%08X tadr=%08X "
+                "starts=%llu first_step=%llu first_pc=%08X\n",
+        kGraphicsDmaName[channel], emulator.memory().read32(base),
+        emulator.memory().read32(base + 0x10u),
+        emulator.memory().read32(base + 0x20u),
+        emulator.memory().read32(base + 0x30u),
+        static_cast<unsigned long long>(graphics_dma_starts[channel]),
+        static_cast<unsigned long long>(graphics_dma_first_step[channel]),
+        graphics_dma_first_pc[channel]);
+  }
   std::printf("ee_sif0 chcr=%08X madr=%08X qwc=%08X tadr=%08X\n",
       emulator.memory().read32(0x1000C000u),
       emulator.memory().read32(0x1000C010u),
