@@ -4,7 +4,8 @@
 import unittest
 
 from astrair.builder import build_data_instruction
-from astrair.ir import Op
+from astrair.analysis_effects import is_hard_barrier
+from astrair.ir import Effect, Op
 
 
 def r_type(rs: int, rt: int, rd: int, sub: int, function: int) -> int:
@@ -56,6 +57,26 @@ class AstraIrBuilderTests(unittest.TestCase):
     def test_control_and_unknown_operations_are_not_data_ir(self) -> None:
         self.assertIsNone(build_data_instruction(0x1000, i_type(0x04, 1, 2, 1)))
         self.assertIsNone(build_data_instruction(0x1000, i_type(0x08, 1, 2, -1)))
+
+    def test_effects_are_conservative_trace_barriers(self) -> None:
+        pure = build_data_instruction(0x1000, r_type(3, 4, 2, 0, 0x21))
+        load = build_data_instruction(0x1004, i_type(0x23, 3, 2, 4))
+        store = build_data_instruction(0x1008, i_type(0x2B, 3, 2, 4))
+        self.assertEqual(pure.effects, Effect.PURE)
+        self.assertFalse(is_hard_barrier(pure))
+        self.assertEqual(
+            load.effects,
+            Effect.MEMORY_READ | Effect.MAY_FAULT | Effect.MAY_TOUCH_MMIO,
+        )
+        self.assertTrue(is_hard_barrier(load))
+        self.assertEqual(
+            store.effects,
+            Effect.MEMORY_WRITE
+            | Effect.MAY_FAULT
+            | Effect.MAY_TOUCH_MMIO
+            | Effect.MAY_SCHEDULE_EVENT,
+        )
+        self.assertTrue(is_hard_barrier(store))
 
 
 if __name__ == "__main__":

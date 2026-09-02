@@ -42,3 +42,16 @@ For the eight deterministic Phase-0 ELF corpora, generation before and after
 the IR seam produces byte-identical `phase0_aot_package.cpp` with SHA-256
 `F70A5D3C7DC76263945A6976E90927ED187274A8BC36165A5FA6C3EC893FBB5A`.
 The normal interpreter/AOT differential suite remains the execution oracle.
+
+## Conservative effects and barriers
+
+Each instruction now carries an `Effect` mask. Scalar and packed arithmetic are
+`PURE`. Loads are marked `MEMORY_READ | MAY_FAULT | MAY_TOUCH_MMIO`; stores are
+marked `MEMORY_WRITE | MAY_FAULT | MAY_TOUCH_MMIO | MAY_SCHEDULE_EVENT`.
+
+These classifications are intentionally conservative because address
+provenance does not exist yet. A future trace builder must stop at any
+instruction that may fault, touch MMIO, or schedule a device event. Later
+provenance analysis may prove a specific access to be ordinary RAM and replace
+that barrier with guarded fast/fallback paths. The effect checkpoint itself
+does not alter emitted code or runtime behavior.

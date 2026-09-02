@@ -2,6 +2,7 @@
 
 from typing import Optional
 
+from .analysis_effects import effects_for
 from .ir import Instruction, Op
 
 
@@ -59,4 +60,5 @@ def build_data_instruction(pc: int, word: int) -> Optional[Instruction]:
         rt=rt,
         rd=rd,
         immediate=_sx16(word),
+        effects=effects_for(kind),
     )

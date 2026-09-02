@@ -1,7 +1,16 @@
 """Semantic instruction records for AstraRecomp's initial AOT subset."""
 
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import Enum, IntFlag, auto
+
+
+class Effect(IntFlag):
+    PURE = 0
+    MEMORY_READ = auto()
+    MEMORY_WRITE = auto()
+    MAY_FAULT = auto()
+    MAY_TOUCH_MMIO = auto()
+    MAY_SCHEDULE_EVENT = auto()
 
 
 class Op(Enum):
@@ -34,3 +43,4 @@ class Instruction:
     rt: int = 0
     rd: int = 0
     immediate: int = 0
+    effects: Effect = Effect.PURE

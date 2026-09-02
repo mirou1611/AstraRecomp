@@ -35,7 +35,8 @@ add_custom_command(
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_memory_elf.py" --hot-scalars "${ASTRART_HOT_SCALAR_ELF}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_benchmark_elf.py"
           "${ASTRART_BENCHMARK_ELF}" --header "${ASTRART_BENCHMARK_HEADER}"
-  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_astrart.py"
+  COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+          "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_astrart.py"
           --output "${ASTRART_PHASE0_CPP}"
           "${ASTRART_SMOKE_ELF}" "${ASTRART_CHAIN_ELF}"
           "${ASTRART_MEMORY_ELF}" "${ASTRART_UNSUPPORTED_ELF}"
@@ -46,6 +47,7 @@ add_custom_command(
     tools/astrair/__init__.py
     tools/astrair/ir.py
     tools/astrair/builder.py
+    tools/astrair/analysis_effects.py
     tools/make_smoke_elf.py
     tools/make_aot_chain_elf.py
     tools/make_aot_memory_elf.py
@@ -118,5 +120,6 @@ else()
   endif()
   add_test(NAME ps2core_tests COMMAND ps2core_tests)
   add_test(NAME astrair_builder_tests
-           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_astrair.py")
+           COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+                   "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_astrair.py")
 endif()
