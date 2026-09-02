@@ -577,6 +577,32 @@ void test_spu2_dma7_completion() {
         "SPU2 DMA7 completion raises DICR2 and the shared IOP DMA interrupt");
 }
 
+void test_spu2_dma4_completion() {
+  ps2vita::Memory memory;
+  for (std::uint32_t byte = 0; byte < 8u; ++byte)
+    memory.iop_write8(0x2000u + byte, static_cast<std::uint8_t>(0xB0u + byte));
+  memory.iop_write16(0x1F9001A8u, 0u);
+  memory.iop_write16(0x1F9001AAu, 0x0010u);
+  memory.iop_write32(0x1F8010C0u, 0x2000u);
+  memory.iop_write32(0x1F8010C4u, 0x00010002u);
+  memory.iop_write32(0x1F8010C8u, 0x01000201u);
+
+  memory.advance(768u);
+
+  bool payload_matches = true;
+  for (std::uint32_t byte = 0; byte < 8u; ++byte)
+    payload_matches = payload_matches &&
+        memory.spu2_ram_read8(0x20u + byte) == 0xB0u + byte;
+  check(payload_matches && memory.iop_read32(0x1F8010C0u) == 0x2008u &&
+        memory.iop_read32(0x1F8010C4u) == 0u &&
+        (memory.iop_read32(0x1F8010C8u) & 0x01000000u) == 0u &&
+        memory.iop_read16(0x1F9001AAu) == 0x0014u,
+        "SPU2 DMA4 copies IOP data and advances core-0 transfer state");
+  check((memory.iop_read32(0x1F8010F4u) & (1u << 28)) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 3)) != 0u,
+        "SPU2 DMA4 completion raises DICR and the shared IOP DMA interrupt");
+}
+
 void test_ee_timer3_hblank_clock() {
   ps2vita::Memory memory;
   memory.write32(0x10001820u, 2u);
@@ -1642,6 +1668,7 @@ int main() {
   test_cdvd_reset_status();
   test_sio2_disconnected_transfer();
   test_video_vblank_deadlines();
+  test_spu2_dma4_completion();
   test_spu2_dma7_completion();
   test_ee_timer3_hblank_clock();
   test_exception_entry_and_eret();

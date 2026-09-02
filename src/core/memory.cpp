@@ -144,10 +144,10 @@ void Memory::clear() {
   timer5_target_future_ = false;
   sif0_cycles_remaining_ = 0;
   sif1_cycles_remaining_ = 0;
-  spu2_dma7_cycles_remaining_ = 0;
-  spu2_dma7_source_ = 0;
-  spu2_dma7_target_ = 0;
-  spu2_dma7_bytes_ = 0;
+  spu2_dma_cycles_remaining_.fill(0);
+  spu2_dma_source_.fill(0);
+  spu2_dma_target_.fill(0);
+  spu2_dma_bytes_.fill(0);
   iop_cache_control_ = 0;
   // EE hardware reset values observed by the BIOS during board detection.
   write32(0x1000F260u, 0x1D000060u);
@@ -621,33 +621,43 @@ void Memory::advance(std::uint32_t cycles) {
     }
   }
 
-  if (spu2_dma7_cycles_remaining_ != 0u) {
-    if (cycles < spu2_dma7_cycles_remaining_) {
-      spu2_dma7_cycles_remaining_ -= cycles;
-    } else {
-      spu2_dma7_cycles_remaining_ = 0;
-      for (std::uint32_t byte = 0; byte < spu2_dma7_bytes_; ++byte) {
-        const auto source = (spu2_dma7_source_ + byte) &
-                            (kIopRamSize - 1u);
-        const auto destination =
-            (spu2_dma7_target_ * 2u + byte) % spu2_ram_.size();
-        spu2_ram_[destination] = iop_ram_[source];
-      }
-      const auto final_source = spu2_dma7_source_ + spu2_dma7_bytes_;
-      const auto final_target =
-          (spu2_dma7_target_ + spu2_dma7_bytes_ / 2u) & 0xFFFFFu;
-      store_iop(0x0500u, final_source & 0x00FFFFFFu);
-      store_iop(0x0504u, 0u);
-      store_iop(0x0508u, raw_iop(0x0508u) & ~0x01000000u);
-      spu2_hw_[0x5A8u] = static_cast<std::uint8_t>(final_target >> 16);
-      spu2_hw_[0x5A9u] = 0u;
-      spu2_hw_[0x5AAu] = static_cast<std::uint8_t>(final_target);
-      spu2_hw_[0x5ABu] = static_cast<std::uint8_t>(final_target >> 8);
-      // DMA7 is channel zero in the second IOP DMA controller. Completion
-      // raises DICR2 status bit 24 and the shared IOP DMA interrupt line.
-      store_iop(0x0574u, raw_iop(0x0574u) | (1u << 24));
-      store_iop(0x0070u, raw_iop(0x0070u) | (1u << 3));
+  for (unsigned core = 0; core < 2u; ++core) {
+    auto& remaining = spu2_dma_cycles_remaining_[core];
+    if (remaining == 0u) continue;
+    if (cycles < remaining) {
+      remaining -= cycles;
+      continue;
     }
+
+    remaining = 0u;
+    for (std::uint32_t byte = 0; byte < spu2_dma_bytes_[core]; ++byte) {
+      const auto source =
+          (spu2_dma_source_[core] + byte) & (kIopRamSize - 1u);
+      const auto destination =
+          (spu2_dma_target_[core] * 2u + byte) % spu2_ram_.size();
+      spu2_ram_[destination] = iop_ram_[source];
+    }
+    const auto final_source =
+        spu2_dma_source_[core] + spu2_dma_bytes_[core];
+    const auto final_target =
+        (spu2_dma_target_[core] + spu2_dma_bytes_[core] / 2u) & 0xFFFFFu;
+    const auto dma_offset = core == 0u ? 0x00C0u : 0x0500u;
+    const auto tsa_offset = core == 0u ? 0x01A8u : 0x05A8u;
+    store_iop(dma_offset, final_source & 0x00FFFFFFu);
+    store_iop(dma_offset + 4u, 0u);
+    store_iop(dma_offset + 8u,
+              raw_iop(dma_offset + 8u) & ~0x01000000u);
+    spu2_hw_[tsa_offset] = static_cast<std::uint8_t>(final_target >> 16);
+    spu2_hw_[tsa_offset + 1u] = 0u;
+    spu2_hw_[tsa_offset + 2u] = static_cast<std::uint8_t>(final_target);
+    spu2_hw_[tsa_offset + 3u] = static_cast<std::uint8_t>(final_target >> 8);
+
+    // DMA4 uses channel 4/status bit 28 in DICR, while DMA7 uses channel
+    // zero/status bit 24 in DICR2. Both signal the shared IOP DMA line.
+    const auto dicr_offset = core == 0u ? 0x00F4u : 0x0574u;
+    const auto status_bit = core == 0u ? 28u : 24u;
+    store_iop(dicr_offset, raw_iop(dicr_offset) | (1u << status_bit));
+    store_iop(0x0070u, raw_iop(0x0070u) | (1u << 3));
   }
 
   if (sif0_cycles_remaining_ != 0u) {
@@ -1098,6 +1108,10 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
   }
   if (p == 0x1F801070u) {
     value = iop_read32(address) & value;
+  } else if (p == 0x1F8010F4u) {
+    const auto current = iop_read32(address);
+    const auto flags = (current & 0x7F000000u) & ~(value & 0x7F000000u);
+    value = flags | (value & 0x00FFFFFFu);
   } else if (p == 0x1F801574u) {
     const auto current = iop_read32(address);
     const auto flags = (current & 0x7F000000u) & ~(value & 0x7F000000u);
@@ -1131,25 +1145,29 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
     iop_hw_[0x726Du] = 0xD1u;
     iop_hw_[0x726Eu] = 0x01u;
     iop_hw_[0x0072u] |= 0x02u;
-  } else if (p == 0x1F801508u && (value & 0x01000000u) != 0u) {
-    // SPU2 core 1 uses IOP DMA channel 7. BCR describes 32-bit words while
-    // the SPU2 transfer address is measured in 16-bit sound-RAM words.
-    const auto bcr = iop_read32(0x1F801504u);
+  } else if ((p == 0x1F8010C8u || p == 0x1F801508u) &&
+             (value & 0x01000000u) != 0u) {
+    // SPU2 cores 0 and 1 use IOP DMA channels 4 and 7 respectively. BCR
+    // describes 32-bit words while TSA is measured in 16-bit sound-RAM words.
+    const unsigned core = p == 0x1F8010C8u ? 0u : 1u;
+    const auto dma_base = core == 0u ? 0x1F8010C0u : 0x1F801500u;
+    const auto tsa_base = core == 0u ? 0x1F9001A8u : 0x1F9005A8u;
+    const auto bcr = iop_read32(dma_base + 4u);
     const auto blocks = bcr >> 16;
     const auto words = bcr & 0xFFFFu;
     const auto transfer_words = static_cast<std::uint64_t>(blocks) * words;
     const auto transfer_bytes = transfer_words * 4u;
     if ((value & 0x00000201u) == 0x00000201u && transfer_bytes != 0u &&
         transfer_bytes <= UINT32_MAX) {
-      spu2_dma7_source_ = iop_read32(0x1F801500u) & 0x00FFFFFFu;
-      const auto tsa_high = iop_read16(0x1F9005A8u) & 0xFu;
-      const auto tsa_low = iop_read16(0x1F9005AAu);
-      spu2_dma7_target_ = (tsa_high << 16) | tsa_low;
-      spu2_dma7_bytes_ = static_cast<std::uint32_t>(transfer_bytes);
+      spu2_dma_source_[core] = iop_read32(dma_base) & 0x00FFFFFFu;
+      const auto tsa_high = iop_read16(tsa_base) & 0xFu;
+      const auto tsa_low = iop_read16(tsa_base + 2u);
+      spu2_dma_target_[core] = (tsa_high << 16) | tsa_low;
+      spu2_dma_bytes_[core] = static_cast<std::uint32_t>(transfer_bytes);
       // PCSX2's documented SPU2 timing uses 24 IOP cycles per 16-bit word;
       // one IOP cycle corresponds to eight EE master cycles here.
       const auto duration = transfer_bytes * 96u;
-      spu2_dma7_cycles_remaining_ = duration > UINT32_MAX
+      spu2_dma_cycles_remaining_[core] = duration > UINT32_MAX
           ? UINT32_MAX : static_cast<std::uint32_t>(duration);
     }
   }

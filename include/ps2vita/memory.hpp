@@ -137,10 +137,10 @@ private:
   bool timer5_target_future_ = false;
   std::uint32_t sif0_cycles_remaining_ = 0;
   std::uint32_t sif1_cycles_remaining_ = 0;
-  std::uint32_t spu2_dma7_cycles_remaining_ = 0;
-  std::uint32_t spu2_dma7_source_ = 0;
-  std::uint32_t spu2_dma7_target_ = 0;
-  std::uint32_t spu2_dma7_bytes_ = 0;
+  std::array<std::uint32_t, 2> spu2_dma_cycles_remaining_{};
+  std::array<std::uint32_t, 2> spu2_dma_source_{};
+  std::array<std::uint32_t, 2> spu2_dma_target_{};
+  std::array<std::uint32_t, 2> spu2_dma_bytes_{};
   std::uint32_t iop_cache_control_ = 0;
 };
 
