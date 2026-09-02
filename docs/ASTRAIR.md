@@ -99,3 +99,18 @@ Across three independent matched runs, the median AOT time changed from
 1.1% faster. This is a narrow x86 result, not a physical-Vita performance
 claim. The switch remains available until Vita measurements establish whether
 the ARMv7 backend benefits.
+
+## Profile-guided direct trace selection
+
+The first trace-formation checkpoint accepts block frequencies, sampled edge
+counts, and statically proven direct successors as separate inputs. Starting
+from hottest unowned entries, it follows only a uniquely hottest successor
+whose observed probability meets the configured threshold. It stops at hard
+IR barriers, indirect/unproven targets, ambiguous ties, already-owned blocks,
+and the maximum length. A hot edge back to the entry records a closed loop.
+
+Keeping sampled edges separate from the static direct-successor relation is a
+safety property: a census can observe an indirect destination, but observation
+alone never turns it into a guard-free direct trace edge. Selection is fully
+deterministic. This checkpoint does not yet change emitted functions; a profile
+must first be matched to the exact ELF fingerprint and CFG.

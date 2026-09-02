@@ -9,6 +9,7 @@ from astrair.analysis_liveness import analyze_block
 from astrair.analysis_width import infer_block_results
 from astrair.ir import Effect, Op, UpperBits, ValueKind
 from generate_astrart import defer_gpr_writeback
+from astrair.trace import BlockProfile, EdgeProfile, form_direct_traces
 
 
 def r_type(rs: int, rt: int, rd: int, sub: int, function: int) -> int:
@@ -175,6 +176,45 @@ class AstraIrBuilderTests(unittest.TestCase):
         for index, line in enumerate(generated):
             if "commit(memory, state, executed, fast);" in line:
                 self.assertIn("state.gpr[2] = gpr_2;", generated[index - 1])
+
+    def test_profile_guided_direct_trace_closes_hot_loop(self) -> None:
+        traces = form_direct_traces(
+            blocks=(BlockProfile(0x1000, 1000), BlockProfile(0x1010, 950),
+                    BlockProfile(0x1020, 50)),
+            edges=(EdgeProfile(0x1000, 0x1010, 950),
+                   EdgeProfile(0x1000, 0x1020, 50),
+                   EdgeProfile(0x1010, 0x1000, 950)),
+            direct_successors={0x1000: frozenset({0x1010, 0x1020}),
+                               0x1010: frozenset({0x1000})},
+        )
+        self.assertEqual(traces[0].blocks, (0x1000, 0x1010))
+        self.assertTrue(traces[0].closes_loop)
+
+    def test_trace_stops_at_barrier_ambiguity_and_indirect_edge(self) -> None:
+        barrier = form_direct_traces(
+            (BlockProfile(1, 100), BlockProfile(2, 100, hard_barrier=True),
+             BlockProfile(3, 100)),
+            (EdgeProfile(1, 2, 100), EdgeProfile(2, 3, 100)),
+            {1: frozenset({2}), 2: frozenset({3})},
+        )
+        self.assertEqual(barrier[0].blocks, (1, 2))
+        ambiguous = form_direct_traces(
+            (BlockProfile(1, 100), BlockProfile(2, 50), BlockProfile(3, 50)),
+            (EdgeProfile(1, 2, 50), EdgeProfile(1, 3, 50)),
+            {1: frozenset({2, 3})},
+        )
+        self.assertEqual(ambiguous[0].blocks, (1,))
+        indirect = form_direct_traces(
+            (BlockProfile(1, 100), BlockProfile(2, 100)),
+            (EdgeProfile(1, 2, 100),),
+            {1: frozenset()},
+        )
+        self.assertEqual(indirect[0].blocks, (1,))
+
+    def test_trace_order_is_deterministic(self) -> None:
+        traces = form_direct_traces(
+            (BlockProfile(0x20, 7), BlockProfile(0x10, 7)), (), {})
+        self.assertEqual([trace.blocks for trace in traces], [(0x10,), (0x20,)])
 
 
 if __name__ == "__main__":
