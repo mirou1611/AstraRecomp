@@ -5,7 +5,8 @@ import unittest
 
 from astrair.builder import build_data_instruction
 from astrair.analysis_effects import is_hard_barrier
-from astrair.ir import Effect, Op
+from astrair.analysis_width import infer_block_results
+from astrair.ir import Effect, Op, UpperBits, ValueKind
 
 
 def r_type(rs: int, rt: int, rd: int, sub: int, function: int) -> int:
@@ -77,6 +78,58 @@ class AstraIrBuilderTests(unittest.TestCase):
             | Effect.MAY_SCHEDULE_EVENT,
         )
         self.assertTrue(is_hard_barrier(store))
+
+    def test_static_result_widths_and_upper_bits(self) -> None:
+        cases = (
+            (i_type(0x09, 3, 2, -4), 2, ValueKind.S32,
+             UpperBits.SIGN_EXTENDED_32),
+            (i_type(0x0C, 3, 2, 0x1234), 2, ValueKind.U16,
+             UpperBits.ZERO),
+            (r_type(3, 4, 2, 0, 0x2B), 2, ValueKind.I1,
+             UpperBits.ZERO),
+            (i_type(0x37, 3, 2, -8), 2, ValueKind.U64,
+             UpperBits.UNKNOWN),
+            (r_type(3, 4, 2, 0x12, 0x09) | (0x1C << 26), 2,
+             ValueKind.V128, UpperBits.UNKNOWN),
+            (i_type(0x2B, 3, 2, 4), 0, ValueKind.NONE,
+             UpperBits.UNKNOWN),
+        )
+        for word, register, kind, upper in cases:
+            with self.subTest(word=f"0x{word:08x}"):
+                instruction = build_data_instruction(0x1000, word)
+                self.assertEqual(instruction.result_register, register)
+                self.assertEqual(instruction.result_kind, kind)
+                self.assertEqual(instruction.upper_bits, upper)
+
+    def test_write_to_zero_has_no_result(self) -> None:
+        instruction = build_data_instruction(0x1000, i_type(0x09, 3, 0, 1))
+        self.assertEqual(instruction.result_register, 0)
+        self.assertEqual(instruction.result_kind, ValueKind.NONE)
+
+    def test_block_width_inference_propagates_safe_facts(self) -> None:
+        words = (
+            i_type(0x0F, 0, 2, 0x1234),
+            i_type(0x0D, 2, 3, 0x5678),
+            i_type(0x0D, 0, 4, 0x00FF),
+            r_type(3, 4, 5, 0, 0x24),
+        )
+        instructions = [
+            build_data_instruction(0x1000 + index * 4, word)
+            for index, word in enumerate(words)
+        ]
+        inferred = infer_block_results(instructions)
+        self.assertEqual(
+            (inferred[1].result_kind, inferred[1].upper_bits),
+            (ValueKind.S32, UpperBits.SIGN_EXTENDED_32),
+        )
+        self.assertEqual(
+            (inferred[2].result_kind, inferred[2].upper_bits),
+            (ValueKind.U16, UpperBits.ZERO),
+        )
+        self.assertEqual(
+            (inferred[3].result_kind, inferred[3].upper_bits),
+            (ValueKind.U16, UpperBits.ZERO),
+        )
 
 
 if __name__ == "__main__":

@@ -3,7 +3,8 @@
 from typing import Optional
 
 from .analysis_effects import effects_for
-from .ir import Instruction, Op
+from .analysis_width import result_for
+from .ir import Instruction, Op, UpperBits, ValueKind
 
 
 def _sx16(word: int) -> int:
@@ -52,6 +53,10 @@ def build_data_instruction(pc: int, word: int) -> Optional[Instruction]:
 
     if kind is None:
         return None
+    result_register, result_kind, upper_bits = result_for(kind, rt, rd)
+    if result_register == 0:
+        result_kind = ValueKind.NONE
+        upper_bits = UpperBits.UNKNOWN
     return Instruction(
         pc=pc,
         word=word,
@@ -61,4 +66,7 @@ def build_data_instruction(pc: int, word: int) -> Optional[Instruction]:
         rd=rd,
         immediate=_sx16(word),
         effects=effects_for(kind),
+        result_register=result_register,
+        result_kind=result_kind,
+        upper_bits=upper_bits,
     )

@@ -55,3 +55,17 @@ instruction that may fault, touch MMIO, or schedule a device event. Later
 provenance analysis may prove a specific access to be ordinary RAM and replace
 that barrier with guarded fast/fallback paths. The effect checkpoint itself
 does not alter emitted code or runtime behavior.
+
+## Scalar width inference
+
+The first width pass classifies supported results as `I1`, `U16`, `S32`,
+`U64`, or `V128` and records whether upper bits are zero, sign-extended from
+bit 31, or unknown. It then propagates facts through each straight-line data
+sequence. This preserves sign extension through `LUI -> ORI`, recognizes
+zero-based `ORI` values as `U16`, and narrows `AND` when an operand proves the
+result's upper bits are zero.
+
+Unknown inputs remain `U64`; packed operations remain `V128`; writes to `$zero`
+produce no result. The emitter consumes the refined instruction records but
+does not optimize from these facts yet. This keeps Commit 6 independently
+testable and leaves actual state-load/store elimination to the liveness pass.

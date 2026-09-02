@@ -11,10 +11,11 @@ import hashlib
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from astrair.builder import build_data_instruction
-from astrair.ir import Op
+from astrair.analysis_width import infer_block_results
+from astrair.ir import Instruction, Op
 
 
 @dataclass
@@ -150,8 +151,9 @@ def sx16(word: int) -> int:
     return value - 0x10000 if value & 0x8000 else value
 
 
-def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
-    instruction = build_data_instruction(pc, word)
+def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ",
+              instruction: Optional[Instruction] = None) -> None:
+    instruction = instruction or build_data_instruction(pc, word)
     if instruction is None:
         raise ValueError(f"internal: unsupported data instruction 0x{word:08x}")
     kind = instruction.op
@@ -302,6 +304,23 @@ def emit_function(function: Function, words: Dict[int, int]) -> List[str]:
     lines.append("  default: return {AotExitKind::Interpreter, StopReason::None, state.pc, 0u};")
     lines.append("  }")
 
+    linear_ir = []
+    scan_pc = function.start
+    while scan_pc < function.end:
+        scan_word = words[scan_pc]
+        if (opcode(scan_word) in (0x02, 0x03, 0x04, 0x05)
+                or is_jr(scan_word) or is_break(scan_word)):
+            break
+        instruction = build_data_instruction(scan_pc, scan_word)
+        if instruction is None:
+            break
+        linear_ir.append(instruction)
+        scan_pc += 4
+    refined_ir = {
+        instruction.pc: instruction
+        for instruction in infer_block_results(linear_ir)
+    }
+
     pc = function.start
     needs_fallthrough = True
     while pc < function.end:
@@ -421,7 +440,7 @@ def emit_function(function: Function, words: Dict[int, int]) -> List[str]:
             ])
             needs_fallthrough = False
             break
-        emit_data(lines, pc, word)
+        emit_data(lines, pc, word, instruction=refined_ir.get(pc))
         pc += 4
     if needs_fallthrough:
         exit_kind = "Direct" if function.direct_fallthrough else "Interpreter"

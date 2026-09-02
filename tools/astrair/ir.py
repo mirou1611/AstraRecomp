@@ -13,6 +13,21 @@ class Effect(IntFlag):
     MAY_SCHEDULE_EVENT = auto()
 
 
+class ValueKind(Enum):
+    NONE = auto()
+    I1 = auto()
+    U16 = auto()
+    S32 = auto()
+    U64 = auto()
+    V128 = auto()
+
+
+class UpperBits(Enum):
+    UNKNOWN = auto()
+    ZERO = auto()
+    SIGN_EXTENDED_32 = auto()
+
+
 class Op(Enum):
     NOP = auto()
     ADDIU = auto()
@@ -44,3 +59,6 @@ class Instruction:
     rd: int = 0
     immediate: int = 0
     effects: Effect = Effect.PURE
+    result_register: int = 0
+    result_kind: ValueKind = ValueKind.NONE
+    upper_bits: UpperBits = UpperBits.UNKNOWN
