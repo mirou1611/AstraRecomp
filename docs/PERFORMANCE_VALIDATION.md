@@ -24,6 +24,20 @@ then measured five times. Setup, allocation, checksumming, report writing, and
 screen rendering are outside the timed regions; the reported duration is the
 median sample.
 
+## PC-side configuration probe
+
+For quick keep/discard comparisons between generator configurations, use a
+Release build and the host CLI:
+
+```sh
+cmake --build build-trace-release --target aot_benchmark -j2
+./build-trace-release/aot_benchmark 20000 9
+```
+
+It reports exact match status, guest instructions, interpreter/AOT median
+microseconds, and speedup. This is useful for controlled configuration deltas;
+physical Vita timing remains authoritative.
+
 ## Vita3K gate
 
 Install and launch the VPK in Vita3K first. A valid run shows `AOT PERF: PASS`

@@ -8,6 +8,7 @@ from astrair.analysis_effects import is_hard_barrier
 from astrair.analysis_liveness import analyze_block
 from astrair.analysis_width import infer_block_results
 from astrair.ir import Effect, Op, UpperBits, ValueKind
+from generate_astrart import defer_gpr_writeback
 
 
 def r_type(rs: int, rt: int, rd: int, sub: int, function: int) -> int:
@@ -150,6 +151,30 @@ class AstraIrBuilderTests(unittest.TestCase):
         store = build_data_instruction(0x1000, i_type(0x2B, 3, 2, 4))
         self.assertEqual(store.reads, frozenset({2, 3}))
         self.assertEqual(store.writes, frozenset())
+
+    def test_deferred_writeback_flushes_every_commit_path(self) -> None:
+        source = [
+            "AotExit generated(Memory& memory, CpuState& state) {",
+            "  std::uint32_t executed = 0;",
+            "  std::uint32_t fast = 0;",
+            "  state.gpr[2] = state.gpr[4] + state.gpr[0];",
+            "  if (fault) {",
+            "    commit(memory, state, executed, fast);",
+            "    return {};",
+            "  }",
+            "  commit(memory, state, executed, fast);",
+            "  return {};",
+            "}",
+        ]
+        generated = defer_gpr_writeback(source)
+        self.assertIn("  std::uint64_t gpr_2 = state.gpr[2];", generated)
+        self.assertIn("  std::uint64_t gpr_4 = state.gpr[4];", generated)
+        self.assertIn("  gpr_2 = gpr_4 + state.gpr[0];", generated)
+        self.assertEqual(generated.count("    state.gpr[2] = gpr_2;"), 1)
+        self.assertEqual(generated.count("  state.gpr[2] = gpr_2;"), 1)
+        for index, line in enumerate(generated):
+            if "commit(memory, state, executed, fast);" in line:
+                self.assertIn("state.gpr[2] = gpr_2;", generated[index - 1])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ interpreter exits rather than silently receiving guessed semantics.
 
 import argparse
 import hashlib
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -296,7 +297,53 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ",
     lines.append(f"{indent}++fast;")
 
 
-def emit_function(function: Function, words: Dict[int, int]) -> List[str]:
+_GPR_REFERENCE = re.compile(r"state\.gpr\[(\d+)\]")
+_GPR_WRITE = re.compile(r"^\s*state\.gpr\[(\d+)\]\s*=")
+
+
+def defer_gpr_writeback(lines: List[str]) -> List[str]:
+    """Cache referenced low GPRs and flush dirty locals on every commit path."""
+    referenced = sorted({
+        int(match.group(1))
+        for line in lines for match in _GPR_REFERENCE.finditer(line)
+        if match.group(1) != "0"
+    })
+    dirty = sorted({
+        int(match.group(1))
+        for line in lines
+        for match in [_GPR_WRITE.match(line)]
+        if match is not None and match.group(1) != "0"
+    })
+    if not referenced:
+        return lines
+
+    declarations = [
+        f"  std::uint64_t gpr_{register} = state.gpr[{register}];"
+        for register in referenced
+    ]
+    result = lines[:3] + declarations + lines[3:]
+    transformed = []
+    for line in result:
+        if "commit(memory, state, executed, fast);" in line:
+            indent = line[:len(line) - len(line.lstrip())]
+            transformed.extend(
+                f"{indent}state.gpr[{register}] = gpr_{register};"
+                for register in dirty
+            )
+        if line in declarations:
+            transformed.append(line)
+            continue
+        transformed.append(_GPR_REFERENCE.sub(
+            lambda match: (f"gpr_{match.group(1)}"
+                           if int(match.group(1)) in referenced
+                           else match.group(0)),
+            line,
+        ))
+    return transformed
+
+
+def emit_function(function: Function, words: Dict[int, int],
+                  deferred_writeback: bool) -> List[str]:
     name = f"generated_{function.start:08x}"
     lines = [f"AotExit {name}(Memory& memory, CpuState& state) {{", "  std::uint32_t executed = 0;", "  std::uint32_t fast = 0;"]
     lines.append("  switch (state.pc) {")
@@ -450,10 +497,11 @@ def emit_function(function: Function, words: Dict[int, int]) -> List[str]:
             f"  return {{AotExitKind::{exit_kind}, StopReason::None, state.pc, executed}};",
         ])
     lines.append("}")
-    return lines
+    return defer_gpr_writeback(lines) if deferred_writeback else lines
 
 
-def generate(paths: List[Path], package_name: str) -> str:
+def generate(paths: List[Path], package_name: str,
+             deferred_writeback: bool = False) -> str:
     all_words: Dict[int, int] = {}
     entries: List[int] = []
     digest = hashlib.sha256()
@@ -493,7 +541,7 @@ def generate(paths: List[Path], package_name: str) -> str:
         "",
     ]
     for function in functions:
-        lines.extend(emit_function(function, all_words))
+        lines.extend(emit_function(function, all_words, deferred_writeback))
         lines.append("")
     lines.append("constexpr AotFunctionEntry kGeneratedEntries[] = {")
     for start, end, owner in ranges:
@@ -522,9 +570,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--package-name", default="phase0-generated-v1")
+    parser.add_argument("--defer-gpr-writeback", action="store_true")
     parser.add_argument("elf", nargs="+", type=Path)
     args = parser.parse_args()
-    result = generate(args.elf, args.package_name)
+    result = generate(args.elf, args.package_name, args.defer_gpr_writeback)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(result, encoding="utf-8", newline="\n")
     print(f"generated {args.output} from {len(args.elf)} ELF input(s)")

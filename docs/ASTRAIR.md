@@ -82,3 +82,20 @@ intentional: exits through memory faults, interpreter fallback, delay slots,
 and indirect control flow must all materialize the same architectural state.
 The subsequent emitter change will be feature-flagged and use these sets to
 flush dirty locals on every exit before it can become the default.
+
+## Deferred low-GPR writeback
+
+Generated functions can cache only the nonzero low GPRs they reference and
+materialize only dirty locals immediately before every existing `commit()`.
+This covers normal direct/indirect/stop exits and memory-fault/interpreter
+fallback exits without changing PC or cycle accounting. Packed high halves and
+HI/LO remain architectural state operations. `ASTRART_DEFER_GPR_WRITEBACK=OFF`
+restores the legacy emitter exactly; its generated-source SHA-256 remains the
+established `F70A...BB5A` oracle.
+
+The host Release probe uses nine internal median samples at 20,000 iterations.
+Across three independent matched runs, the median AOT time changed from
+162.130 ms with the legacy emitter to 160.304 ms with deferred writeback, about
+1.1% faster. This is a narrow x86 result, not a physical-Vita performance
+claim. The switch remains available until Vita measurements establish whether
+the ARMv7 backend benefits.

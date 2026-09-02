@@ -6,6 +6,9 @@ endif()
 
 project(ps2vita LANGUAGES C CXX)
 
+option(ASTRART_DEFER_GPR_WRITEBACK
+       "Cache low GPRs and flush dirty values at generated exits" ON)
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -23,6 +26,10 @@ set(ASTRART_HOT_SCALAR_ELF "${ASTRART_GENERATED_DIR}/aot-hot-scalars.elf")
 set(ASTRART_BENCHMARK_ELF "${ASTRART_GENERATED_DIR}/aot-benchmark.elf")
 set(ASTRART_BENCHMARK_HEADER "${ASTRART_GENERATED_DIR}/aot_benchmark_program.hpp")
 set(ASTRART_PHASE0_CPP "${ASTRART_GENERATED_DIR}/phase0_aot_package.cpp")
+set(ASTRART_OPTIMIZATION_ARGS)
+if(ASTRART_DEFER_GPR_WRITEBACK)
+  list(APPEND ASTRART_OPTIMIZATION_ARGS --defer-gpr-writeback)
+endif()
 add_custom_command(
   OUTPUT "${ASTRART_PHASE0_CPP}" "${ASTRART_BENCHMARK_HEADER}"
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${ASTRART_GENERATED_DIR}"
@@ -38,6 +45,7 @@ add_custom_command(
   COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
           "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_astrart.py"
           --output "${ASTRART_PHASE0_CPP}"
+          ${ASTRART_OPTIMIZATION_ARGS}
           "${ASTRART_SMOKE_ELF}" "${ASTRART_CHAIN_ELF}"
           "${ASTRART_MEMORY_ELF}" "${ASTRART_UNSUPPORTED_ELF}"
           "${ASTRART_BRANCH_ELF}" "${ASTRART_BNE_ELF}"
@@ -113,12 +121,16 @@ else()
   target_link_libraries(ps2core_tests PRIVATE ps2core)
   add_executable(ps2bios_trace tools/bios_trace.cpp)
   target_link_libraries(ps2bios_trace PRIVATE ps2core)
+  add_executable(aot_benchmark tools/aot_benchmark.cpp)
+  target_link_libraries(aot_benchmark PRIVATE ps2core)
   if(MSVC)
     target_compile_options(ps2core_tests PRIVATE /W4)
     target_compile_options(ps2bios_trace PRIVATE /W4)
+    target_compile_options(aot_benchmark PRIVATE /W4)
   else()
     target_compile_options(ps2core_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ps2bios_trace PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(aot_benchmark PRIVATE -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ps2core_tests COMMAND ps2core_tests)
   add_test(NAME astrair_builder_tests
