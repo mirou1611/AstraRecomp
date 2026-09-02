@@ -1,4 +1,5 @@
 #include "ps2vita/emulator.hpp"
+#include "ps2vita/execution_census.hpp"
 
 #include <algorithm>
 #include <array>
@@ -153,14 +154,57 @@ void print_opcode_profile(const char* processor,
   }
 }
 
+void write_census_processor(std::ostream& output, const char* name,
+                            const ps2vita::ExecutionCensus& census,
+                            bool trailing_comma) {
+  const auto blocks = census.blocks();
+  const auto edges = census.edges();
+  output << "  \"" << name << "\": {\n"
+         << "    \"instructions\": " << census.instruction_count() << ",\n"
+         << "    \"blocks\": [\n";
+  for (std::size_t index = 0; index < blocks.size(); ++index) {
+    char pc[11]{};
+    std::snprintf(pc, sizeof(pc), "0x%08X", blocks[index].pc);
+    output << "      {\"pc\": \"" << pc << "\", \"entries\": "
+           << blocks[index].entries << "}"
+           << (index + 1u == blocks.size() ? "\n" : ",\n");
+  }
+  output << "    ],\n    \"edges\": [\n";
+  for (std::size_t index = 0; index < edges.size(); ++index) {
+    char source[11]{};
+    char target[11]{};
+    std::snprintf(source, sizeof(source), "0x%08X", edges[index].source);
+    std::snprintf(target, sizeof(target), "0x%08X", edges[index].target);
+    output << "      {\"source\": \"" << source
+           << "\", \"target\": \"" << target
+           << "\", \"transitions\": " << edges[index].transitions << "}"
+           << (index + 1u == edges.size() ? "\n" : ",\n");
+  }
+  output << "    ]\n  }" << (trailing_comma ? ",\n" : "\n");
+}
+
+void write_execution_census(std::ostream& output, std::uint64_t ee_steps,
+                            std::uint64_t iop_divisor,
+                            const ps2vita::ExecutionCensus& ee,
+                            const ps2vita::ExecutionCensus& iop) {
+  output << "{\n"
+         << "  \"schema\": \"astrarecomp.execution-census\",\n"
+         << "  \"version\": 1,\n"
+         << "  \"ee_steps\": " << ee_steps << ",\n"
+         << "  \"iop_divisor\": " << iop_divisor << ",\n";
+  write_census_processor(output, "ee", ee, true);
+  write_census_processor(output, "iop", iop, false);
+  output << "}\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 10) {
+  if (argc < 2 || argc > 11) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
         "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP] "
-        "[TIMER5_PROBE_STEP]\n");
+        "[TIMER5_PROBE_STEP] [CENSUS_JSON]\n");
     return 2;
   }
 
@@ -189,6 +233,7 @@ int main(int argc, char** argv) {
       ? std::strtoull(argv[8], nullptr, 0) : 0u;
   const std::uint64_t timer5_probe_step = argc >= 10
       ? std::strtoull(argv[9], nullptr, 0) : 0u;
+  const char* census_path = argc >= 11 ? argv[10] : nullptr;
 
   ps2vita::Emulator emulator;
   if (!emulator.load_bios(bios.data(), bios.size()) || !emulator.boot_bios()) {
@@ -258,6 +303,8 @@ int main(int argc, char** argv) {
   bool iop_stop_triggered = false;
   ps2vita::StopReason reason = ps2vita::StopReason::None;
   ps2vita::IopStopReason iop_reason = ps2vita::IopStopReason::None;
+  ps2vita::ExecutionCensus ee_census;
+  ps2vita::ExecutionCensus iop_census;
   for (; steps < max_steps; ++steps) {
     if (sbus_probe_step != 0u && steps == sbus_probe_step) {
       std::fprintf(stderr,
@@ -300,6 +347,7 @@ int main(int argc, char** argv) {
     if (!ee_takes_interrupt) {
       ++ee_opcode_counts[opcode_family(instruction)];
       ++ee_profile_total;
+      if (census_path) ee_census.record(state.pc, instruction);
     }
     trace[cursor++ % kTraceSize] = {
         state.pc, instruction, state.gpr[2],
@@ -394,6 +442,7 @@ int main(int argc, char** argv) {
       if (!iop_takes_interrupt) {
         ++iop_opcode_counts[opcode_family(iop_instruction)];
         ++iop_profile_total;
+        if (census_path) iop_census.record(iop.pc, iop_instruction);
       }
       iop_trace[iop_cursor++ % kTraceSize] = {iop.pc, iop_instruction,
           iop.gpr[2], iop.gpr[3], iop.gpr[4], iop.gpr[31]};
@@ -1065,6 +1114,22 @@ int main(int argc, char** argv) {
     std::puts("IOP serial output:");
     std::fwrite(iop_serial_output.data(), 1, iop_serial_output.size(), stdout);
     if (iop_serial_output.back() != '\n') std::putchar('\n');
+  }
+  if (census_path) {
+    std::ofstream census_output(census_path, std::ios::trunc);
+    if (!census_output) {
+      std::fprintf(stderr, "could not write execution census: %s\n",
+                   census_path);
+      return 2;
+    }
+    write_execution_census(census_output, steps, iop_divisor,
+                           ee_census, iop_census);
+    if (!census_output) {
+      std::fprintf(stderr, "failed while writing execution census: %s\n",
+                   census_path);
+      return 2;
+    }
+    std::printf("execution census: %s\n", census_path);
   }
   return (stop_pc != 0u && state.pc == stop_pc) || iop_stop_triggered ? 0 : 1;
 }

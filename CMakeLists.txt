@@ -62,6 +62,9 @@ add_library(ps2core
   src/core/iop_cpu.cpp
   src/core/memory.cpp
 )
+if(NOT VITA)
+  target_sources(ps2core PRIVATE src/core/execution_census.cpp)
+endif()
 target_include_directories(ps2core PUBLIC include PRIVATE "${ASTRART_GENERATED_DIR}")
 if(MSVC)
   target_compile_options(ps2core PRIVATE /W4)

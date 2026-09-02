@@ -1,6 +1,7 @@
 #include "ps2vita/aot.hpp"
 #include "ps2vita/emulator.hpp"
 #include "ps2vita/ee_block.hpp"
+#include "ps2vita/execution_census.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +17,38 @@ void check(bool condition, const char* label) {
 
 constexpr std::uint32_t i_type(unsigned op, unsigned rs, unsigned rt, std::uint16_t imm) {
   return (op << 26) | (rs << 21) | (rt << 16) | imm;
+}
+
+void test_execution_census_blocks_and_edges() {
+  ps2vita::ExecutionCensus census;
+  census.record(0x1000u, i_type(0x09u, 0u, 2u, 1u));
+  census.record(0x1004u, i_type(0x04u, 2u, 0u, 1u));
+  census.record(0x1008u, 0u); // Branch delay slot.
+  census.record(0x100Cu, i_type(0x09u, 2u, 2u, 1u));
+  census.record(0x1010u, 0x08000800u); // J 0x2000.
+  census.record(0x1014u, 0u);
+  census.record(0x2000u, 0x03E00008u); // JR ra.
+  census.record(0x2004u, 0u);
+  census.record(0x100Cu, i_type(0x09u, 2u, 2u, 1u));
+
+  const auto blocks = census.blocks();
+  const auto edges = census.edges();
+  check(census.instruction_count() == 9u && blocks.size() == 3u &&
+        blocks[0].pc == 0x1000u && blocks[0].entries == 1u &&
+        blocks[1].pc == 0x100Cu && blocks[1].entries == 2u &&
+        blocks[2].pc == 0x2000u && blocks[2].entries == 1u,
+        "execution census counts deterministic dynamic block entries");
+  check(edges.size() == 3u &&
+        edges[0].source == 0x1000u && edges[0].target == 0x100Cu &&
+        edges[1].source == 0x100Cu && edges[1].target == 0x2000u &&
+        edges[2].source == 0x2000u && edges[2].target == 0x100Cu,
+        "execution census records sorted dynamic block edges");
+
+  census.clear();
+  census.record(0x3000u, i_type(0x14u, 2u, 0u, 1u)); // Annulled BEQL.
+  census.record(0x3008u, 0u);
+  check(census.blocks().size() == 2u && census.edges().size() == 1u,
+        "execution census handles an annulled branch-likely delay slot");
 }
 
 void test_memory_aliases() {
@@ -1656,6 +1689,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_execution_census_blocks_and_edges();
   test_memory_aliases();
   test_bios_mapping_and_boot();
   test_iop_memory_and_cpu();

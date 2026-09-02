@@ -216,7 +216,9 @@ Use a dump from hardware you own as permitted by your local law.
 See [docs/PS2RECOMP_INTEGRATION.md](docs/PS2RECOMP_INTEGRATION.md) for the
 Phase-0 frontend boundary, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for core
 design boundaries, [docs/BIOS_OPCODE_PROFILE.md](docs/BIOS_OPCODE_PROFILE.md) for
-the measured EE/IOP optimization priorities, and
+the measured EE/IOP optimization priorities,
+[docs/EXECUTION_CENSUS.md](docs/EXECUTION_CENSUS.md) for deterministic dynamic
+block/edge profile capture, and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the route from this milestone to games.
 The benchmark methodology and physical-hardware decision thresholds are in
 [docs/PERFORMANCE_VALIDATION.md](docs/PERFORMANCE_VALIDATION.md).
