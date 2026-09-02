@@ -23,12 +23,12 @@ part of their source block, including branch-likely handling when the delay slot
 is annulled. Interrupts, exceptions, indirect transfers, and other observed PC
 discontinuities create dynamic block edges.
 
-## Schema version 2
+## Schema version 3
 
 ```json
 {
   "schema": "astrarecomp.execution-census",
-  "version": 2,
+  "version": 3,
   "ee_steps": 200000000,
   "iop_divisor": 8,
   "ee": {
@@ -56,13 +56,32 @@ discontinuities create dynamic block edges.
         "target": "0x80000280",
         "transitions": 289497
       }
+    ],
+    "mmio_reads": [
+      {
+        "site": "0x8000DCF0",
+        "address": "0x1000F000",
+        "width": 4,
+        "reads": 1104408
+      }
     ]
   },
   "iop": {
     "instructions": 24999461,
     "blocks": [],
-    "edges": []
-  }
+    "edges": [],
+    "indirect_targets": [],
+    "mmio_reads": []
+  },
+  "events": [
+    {
+      "kind": "sif0_start",
+      "count": 217,
+      "min_gap": 5584,
+      "max_gap": 55337856,
+      "average_gap": 738504
+    }
+  ]
 }
 ```
 
@@ -75,6 +94,10 @@ The `$sp`/`$gp` bounds are sampled at dynamic block entry. Indirect-target rows
 cover `JR` and `JALR`. A target is counted only when the next retired block PC
 matches the source register captured at the indirect instruction, preventing an
 interrupt after the delay slot from being mislabeled as an indirect target.
+MMIO rows aggregate retired load instructions by site, normalized physical
+address, and access width. Event rows summarize gaps in EE master steps between
+observed event edges of the same kind. They are observational statistics, not
+yet a scheduler `next_event_cycle()` contract.
 
 ## Current retail-BIOS reference capture
 
@@ -85,13 +108,20 @@ The 02.00E 200-million-step checkpoint produces:
 | EE | 199,999,907 | 2,460 | 3,132 | 355 | 242 |
 | IOP | 24,999,461 | 5,006 | 6,896 | 765 | 528 |
 
-The version-2 JSON is 1,977,350 bytes. Of the observed block PCs, 2,044 EE and
+The version-3 JSON is 2,019,292 bytes. Of the observed block PCs, 2,044 EE and
 3,633 IOP entries have a single `$gp` value across the capture. Census-enabled
-execution preserves the established
-434 SIF0 activity transitions and the same final sampled CPU state as the
-non-census replay.
+execution preserves the established 434 SIF0 activity transitions and the same
+final sampled CPU state as the non-census replay.
+
+The capture contains 172 EE site/address MMIO pairs totaling 2,297,997 reads and
+345 IOP pairs totaling 355,171 reads. The largest late IOP site is
+`0x00097500 -> 0x1F900744` with 222,884 16-bit reads, directly identifying the
+current SPU2 polling loop. The event census observes 217 SIF0 starts and 217
+completions, 79 EE interrupt rising edges, 540 IOP interrupt rising edges, 86
+SIF1 DMA starts, one SPU2 DMA4 start, and two SPU2 DMA7 starts. No VIF0, VIF1,
+or GIF DMA start is observed after initialization.
 
 Schema version 1 contains block and edge frequencies. Version 2 adds block-entry
 `$sp`/`$gp` ranges and validated indirect targets without changing version-1
-field meanings. Later revisions should add register-width observations, event
-spacing, MMIO poll candidates, and DMA sizes.
+field meanings. Version 3 adds MMIO read aggregation and observed event spacing.
+Later revisions should add register-width observations and DMA-size histograms.

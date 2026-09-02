@@ -154,12 +154,68 @@ void print_opcode_profile(const char* processor,
   }
 }
 
+std::uint32_t load_width(std::uint32_t instruction) {
+  switch (instruction >> 26) {
+  case 0x20u: case 0x24u: return 1u; // LB/LBU
+  case 0x21u: case 0x25u: return 2u; // LH/LHU
+  case 0x22u: case 0x23u: case 0x26u: case 0x27u:
+  case 0x30u: case 0x31u: case 0x32u: return 4u;
+  case 0x1Au: case 0x1Bu: case 0x34u: case 0x35u: case 0x37u: return 8u;
+  case 0x1Eu: case 0x36u: return 16u;
+  default: return 0u;
+  }
+}
+
+std::uint32_t ee_physical_address(std::uint32_t address) {
+  return (address & 0xE0000000u) == 0x80000000u ||
+         (address & 0xE0000000u) == 0xA0000000u
+      ? address & 0x1FFFFFFFu : address;
+}
+
+bool is_ee_mmio(std::uint32_t address) {
+  const auto p = ee_physical_address(address);
+  return (p >= 0x10000000u && p < 0x10010000u) ||
+      (p >= 0x12000000u && p < 0x12010000u) ||
+      (p >= 0x1A000000u && p < 0x1A010000u) ||
+      (p >= 0x1D000000u && p < 0x1D000064u) ||
+      (p >= 0x1F400000u && p < 0x1F410000u) ||
+      (p >= 0x1F801000u && p < 0x1F910000u) ||
+      address >= 0xFFFE0000u;
+}
+
+bool is_iop_mmio(std::uint32_t address) {
+  const auto p = address & 0x1FFFFFFFu;
+  return (p >= 0x1D000000u && p < 0x1D000064u) ||
+      (p >= 0x1F400000u && p < 0x1F410000u) ||
+      (p >= 0x1F801000u && p < 0x1F910000u) || p == 0x1FFE0130u;
+}
+
+enum CensusEventKind : std::uint32_t {
+  kSif0Start,
+  kSif0Complete,
+  kEeInterruptRise,
+  kIopInterruptRise,
+  kVif0DmaStart,
+  kVif1DmaStart,
+  kGifDmaStart,
+  kSif1DmaStart,
+  kSpu0DmaStart,
+  kSpu1DmaStart,
+};
+
+constexpr std::array<const char*, 10> kCensusEventNames = {
+    "sif0_start", "sif0_complete", "ee_interrupt_rise",
+    "iop_interrupt_rise", "vif0_dma_start", "vif1_dma_start",
+    "gif_dma_start", "sif1_dma_start", "spu0_dma_start",
+    "spu1_dma_start"};
+
 void write_census_processor(std::ostream& output, const char* name,
                             const ps2vita::ExecutionCensus& census,
                             bool trailing_comma) {
   const auto blocks = census.blocks();
   const auto edges = census.edges();
   const auto indirect_targets = census.indirect_targets();
+  const auto mmio_reads = census.mmio_reads();
   output << "  \"" << name << "\": {\n"
          << "    \"instructions\": " << census.instruction_count() << ",\n"
          << "    \"blocks\": [\n";
@@ -204,20 +260,50 @@ void write_census_processor(std::ostream& output, const char* name,
            << indirect_targets[index].transitions << "}"
            << (index + 1u == indirect_targets.size() ? "\n" : ",\n");
   }
+  output << "    ],\n    \"mmio_reads\": [\n";
+  for (std::size_t index = 0; index < mmio_reads.size(); ++index) {
+    char site[11]{};
+    char address[11]{};
+    std::snprintf(site, sizeof(site), "0x%08X", mmio_reads[index].site);
+    std::snprintf(address, sizeof(address), "0x%08X",
+                  mmio_reads[index].address);
+    output << "      {\"site\": \"" << site
+           << "\", \"address\": \"" << address
+           << "\", \"width\": " << mmio_reads[index].width
+           << ", \"reads\": " << mmio_reads[index].reads << "}"
+           << (index + 1u == mmio_reads.size() ? "\n" : ",\n");
+  }
   output << "    ]\n  }" << (trailing_comma ? ",\n" : "\n");
 }
 
 void write_execution_census(std::ostream& output, std::uint64_t ee_steps,
                             std::uint64_t iop_divisor,
                             const ps2vita::ExecutionCensus& ee,
-                            const ps2vita::ExecutionCensus& iop) {
+                            const ps2vita::ExecutionCensus& iop,
+                            const ps2vita::EventCensus& event_census) {
   output << "{\n"
          << "  \"schema\": \"astrarecomp.execution-census\",\n"
-         << "  \"version\": 2,\n"
+         << "  \"version\": 3,\n"
          << "  \"ee_steps\": " << ee_steps << ",\n"
          << "  \"iop_divisor\": " << iop_divisor << ",\n";
   write_census_processor(output, "ee", ee, true);
-  write_census_processor(output, "iop", iop, false);
+  write_census_processor(output, "iop", iop, true);
+  const auto events = event_census.events();
+  output << "  \"events\": [\n";
+  for (std::size_t index = 0; index < events.size(); ++index) {
+    const auto kind = events[index].kind;
+    const auto* name = kind < kCensusEventNames.size()
+        ? kCensusEventNames[kind] : "unknown";
+    const auto gaps = events[index].count > 1u ? events[index].count - 1u : 0u;
+    const auto average_gap = gaps == 0u ? 0u : events[index].total_gap / gaps;
+    output << "    {\"kind\": \"" << name << "\", \"count\": "
+           << events[index].count << ", \"min_gap\": "
+           << events[index].min_gap << ", \"max_gap\": "
+           << events[index].max_gap << ", \"average_gap\": "
+           << average_gap << "}"
+           << (index + 1u == events.size() ? "\n" : ",\n");
+  }
+  output << "  ]\n";
   output << "}\n";
 }
 
@@ -329,6 +415,9 @@ int main(int argc, char** argv) {
   ps2vita::IopStopReason iop_reason = ps2vita::IopStopReason::None;
   ps2vita::ExecutionCensus ee_census;
   ps2vita::ExecutionCensus iop_census;
+  ps2vita::EventCensus event_census;
+  bool ee_interrupt_was_pending = false;
+  bool iop_interrupt_was_pending = false;
   for (; steps < max_steps; ++steps) {
     if (sbus_probe_step != 0u && steps == sbus_probe_step) {
       std::fprintf(stderr,
@@ -355,6 +444,9 @@ int main(int argc, char** argv) {
           emulator.memory().iop_read32(tadr + 4u) & 0x000FFFFFu,
           emulator.memory().iop_read32(tadr + 8u),
           emulator.memory().iop_read32(tadr + 12u) & 0x0FFFFFF0u});
+      if (census_path) {
+        event_census.record(sif0_active ? kSif0Start : kSif0Complete, steps);
+      }
       sif0_was_active = sif0_active;
     }
     const auto instruction = emulator.memory().read32(state.pc);
@@ -363,6 +455,16 @@ int main(int argc, char** argv) {
                                 state.gpr[31], state.gpr[29]});
     }
     const auto ee_lines = emulator.memory().ee_interrupt_lines();
+    const bool ee_interrupt_pending = ee_lines != 0u;
+    const bool iop_interrupt_pending = emulator.memory().iop_interrupt_pending();
+    if (census_path) {
+      if (ee_interrupt_pending && !ee_interrupt_was_pending)
+        event_census.record(kEeInterruptRise, steps);
+      if (iop_interrupt_pending && !iop_interrupt_was_pending)
+        event_census.record(kIopInterruptRise, steps);
+    }
+    ee_interrupt_was_pending = ee_interrupt_pending;
+    iop_interrupt_was_pending = iop_interrupt_pending;
     const auto ee_status = state.cop0[12];
     const bool ee_takes_interrupt = ee_lines != 0u &&
         (ee_status & ee_lines) != 0u &&
@@ -390,6 +492,17 @@ int main(int argc, char** argv) {
           static_cast<std::uint32_t>(state.gpr[base] + offset), state.cop0[12]};
     }
     const unsigned opcode = instruction >> 26;
+    if (census_path && !ee_takes_interrupt) {
+      const auto width = load_width(instruction);
+      if (width != 0u) {
+        const unsigned base = (instruction >> 21) & 31u;
+        const auto offset = static_cast<std::int16_t>(instruction);
+        const auto address = static_cast<std::uint32_t>(state.gpr[base] + offset);
+        if (is_ee_mmio(address))
+          ee_census.record_mmio_read(state.pc, ee_physical_address(address),
+                                     width);
+      }
+    }
     if (opcode == 0x28u) {
       const unsigned base = (instruction >> 21) & 31u;
       const unsigned source = (instruction >> 16) & 31u;
@@ -454,12 +567,19 @@ int main(int argc, char** argv) {
            ++channel) {
         if (physical == kGraphicsDmaChcr[channel] &&
             (state.gpr[source] & 0x100u) != 0u) {
+          if (census_path) {
+            event_census.record(
+                static_cast<std::uint32_t>(kVif0DmaStart + channel), steps);
+          }
           if (graphics_dma_starts[channel]++ == 0u) {
             graphics_dma_first_step[channel] = steps;
             graphics_dma_first_pc[channel] = state.pc;
           }
         }
       }
+      if (census_path && physical == 0x1000C400u &&
+          (state.gpr[source] & 0x100u) != 0u)
+        event_census.record(kSif1DmaStart, steps);
     }
     if (stop_pc != 0u && state.pc == stop_pc && ++hits >= stop_hit) break;
     reason = emulator.cpu().step();
@@ -493,6 +613,16 @@ int main(int argc, char** argv) {
           iop_serial_output.push_back(static_cast<char>(iop.gpr[source]));
       }
       const unsigned iop_opcode = iop_instruction >> 26;
+      if (census_path && !iop_takes_interrupt) {
+        const auto width = load_width(iop_instruction);
+        if (width != 0u) {
+          const unsigned base = (iop_instruction >> 21) & 31u;
+          const auto offset = static_cast<std::int16_t>(iop_instruction);
+          const auto address = (iop.gpr[base] + offset) & 0x1FFFFFFFu;
+          if (is_iop_mmio(address))
+            iop_census.record_mmio_read(iop.pc, address, width);
+        }
+      }
       if (iop_opcode >= 0x20u && iop_opcode <= 0x26u) {
         const unsigned base = (iop_instruction >> 21) & 31u;
         const auto offset = static_cast<std::int16_t>(iop_instruction);
@@ -524,6 +654,12 @@ int main(int argc, char** argv) {
         if (address < 0x2000u) {
           iop_low_store_trace[iop_low_store_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
+        }
+        if (census_path && (iop.gpr[source] & 0x01000000u) != 0u) {
+          if (address == 0x1F8010C8u)
+            event_census.record(kSpu0DmaStart, steps);
+          else if (address == 0x1F801508u)
+            event_census.record(kSpu1DmaStart, steps);
         }
         if (address >= 0x3C0u && address < 0x420u) {
           mailbox_store_trace.push_back({iop.pc, iop_instruction, address,
@@ -1157,7 +1293,7 @@ int main(int argc, char** argv) {
       return 2;
     }
     write_execution_census(census_output, steps, iop_divisor,
-                           ee_census, iop_census);
+                           ee_census, iop_census, event_census);
     if (!census_output) {
       std::fprintf(stderr, "failed while writing execution census: %s\n",
                    census_path);

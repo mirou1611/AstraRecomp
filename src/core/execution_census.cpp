@@ -86,10 +86,20 @@ void ExecutionCensus::record(std::uint32_t pc, std::uint32_t instruction,
   }
 }
 
+void ExecutionCensus::record_mmio_read(std::uint32_t site,
+                                       std::uint32_t address,
+                                       std::uint32_t width) {
+  const auto key = (static_cast<std::uint64_t>(site) << 32) | address;
+  auto& stats = mmio_reads_[key];
+  stats.width = width;
+  ++stats.reads;
+}
+
 void ExecutionCensus::clear() {
   block_stats_.clear();
   edge_transitions_.clear();
   indirect_transitions_.clear();
+  mmio_reads_.clear();
   instruction_count_ = 0;
   current_block_ = 0;
   previous_pc_ = 0;
@@ -102,6 +112,22 @@ void ExecutionCensus::clear() {
   pending_indirect_target_ = 0;
   indirect_site_on_next_instruction_ = 0;
   indirect_target_on_next_instruction_ = 0;
+}
+
+std::vector<CensusMmioRead> ExecutionCensus::mmio_reads() const {
+  std::vector<CensusMmioRead> result;
+  result.reserve(mmio_reads_.size());
+  for (const auto& item : mmio_reads_) {
+    result.push_back({static_cast<std::uint32_t>(item.first >> 32),
+                      static_cast<std::uint32_t>(item.first),
+                      item.second.width, item.second.reads});
+  }
+  std::sort(result.begin(), result.end(), [](const auto& left,
+                                              const auto& right) {
+    return left.site != right.site ? left.site < right.site
+                                   : left.address < right.address;
+  });
+  return result;
 }
 
 std::vector<CensusBlock> ExecutionCensus::blocks() const {
@@ -145,6 +171,39 @@ std::vector<CensusEdge> ExecutionCensus::edges() const {
                                               const auto& right) {
     return left.source != right.source ? left.source < right.source
                                        : left.target < right.target;
+  });
+  return result;
+}
+
+void EventCensus::record(std::uint32_t kind, std::uint64_t step) {
+  auto& stats = event_stats_[kind];
+  if (stats.count == 0u) {
+    stats.first_step = stats.last_step = step;
+    stats.count = 1u;
+    return;
+  }
+  const auto gap = step - stats.last_step;
+  if (stats.count == 1u || gap < stats.min_gap) stats.min_gap = gap;
+  stats.max_gap = std::max(stats.max_gap, gap);
+  stats.total_gap += gap;
+  stats.last_step = step;
+  ++stats.count;
+}
+
+void EventCensus::clear() {
+  event_stats_.clear();
+}
+
+std::vector<CensusEvent> EventCensus::events() const {
+  std::vector<CensusEvent> result;
+  result.reserve(event_stats_.size());
+  for (const auto& item : event_stats_) {
+    result.push_back({item.first, item.second.count, item.second.min_gap,
+                      item.second.max_gap, item.second.total_gap});
+  }
+  std::sort(result.begin(), result.end(), [](const auto& left,
+                                              const auto& right) {
+    return left.kind < right.kind;
   });
   return result;
 }

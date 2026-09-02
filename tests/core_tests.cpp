@@ -49,6 +49,28 @@ void test_execution_census_blocks_and_edges() {
   check(indirect.size() == 1u && indirect[0].site == 0x2000u &&
         indirect[0].target == 0x100Cu && indirect[0].transitions == 1u,
         "execution census records validated indirect branch targets");
+  census.record_mmio_read(0x1004u, 0x1000F000u, 4u);
+  census.record_mmio_read(0x1004u, 0x1000F000u, 4u);
+  census.record_mmio_read(0x1008u, 0x12001000u, 8u);
+  const auto mmio_reads = census.mmio_reads();
+  check(mmio_reads.size() == 2u && mmio_reads[0].site == 0x1004u &&
+        mmio_reads[0].address == 0x1000F000u &&
+        mmio_reads[0].width == 4u && mmio_reads[0].reads == 2u &&
+        mmio_reads[1].site == 0x1008u,
+        "execution census aggregates and sorts MMIO read sites");
+
+  ps2vita::EventCensus events;
+  events.record(2u, 100u);
+  events.record(2u, 140u);
+  events.record(2u, 200u);
+  events.record(1u, 90u);
+  const auto event_stats = events.events();
+  check(event_stats.size() == 2u && event_stats[0].kind == 1u &&
+        event_stats[0].count == 1u && event_stats[0].min_gap == 0u &&
+        event_stats[1].kind == 2u && event_stats[1].count == 3u &&
+        event_stats[1].min_gap == 40u && event_stats[1].max_gap == 60u &&
+        event_stats[1].total_gap == 100u,
+        "event census records deterministic spacing statistics");
 
   census.clear();
   census.record(0x3000u, i_type(0x14u, 2u, 0u, 1u)); // Annulled BEQL.
