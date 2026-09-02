@@ -159,14 +159,25 @@ void write_census_processor(std::ostream& output, const char* name,
                             bool trailing_comma) {
   const auto blocks = census.blocks();
   const auto edges = census.edges();
+  const auto indirect_targets = census.indirect_targets();
   output << "  \"" << name << "\": {\n"
          << "    \"instructions\": " << census.instruction_count() << ",\n"
          << "    \"blocks\": [\n";
   for (std::size_t index = 0; index < blocks.size(); ++index) {
     char pc[11]{};
+    char sp_min[11]{};
+    char sp_max[11]{};
+    char gp_min[11]{};
+    char gp_max[11]{};
     std::snprintf(pc, sizeof(pc), "0x%08X", blocks[index].pc);
+    std::snprintf(sp_min, sizeof(sp_min), "0x%08X", blocks[index].sp_min);
+    std::snprintf(sp_max, sizeof(sp_max), "0x%08X", blocks[index].sp_max);
+    std::snprintf(gp_min, sizeof(gp_min), "0x%08X", blocks[index].gp_min);
+    std::snprintf(gp_max, sizeof(gp_max), "0x%08X", blocks[index].gp_max);
     output << "      {\"pc\": \"" << pc << "\", \"entries\": "
-           << blocks[index].entries << "}"
+           << blocks[index].entries << ", \"sp_min\": \"" << sp_min
+           << "\", \"sp_max\": \"" << sp_max << "\", \"gp_min\": \""
+           << gp_min << "\", \"gp_max\": \"" << gp_max << "\"}"
            << (index + 1u == blocks.size() ? "\n" : ",\n");
   }
   output << "    ],\n    \"edges\": [\n";
@@ -180,6 +191,19 @@ void write_census_processor(std::ostream& output, const char* name,
            << "\", \"transitions\": " << edges[index].transitions << "}"
            << (index + 1u == edges.size() ? "\n" : ",\n");
   }
+  output << "    ],\n    \"indirect_targets\": [\n";
+  for (std::size_t index = 0; index < indirect_targets.size(); ++index) {
+    char site[11]{};
+    char target[11]{};
+    std::snprintf(site, sizeof(site), "0x%08X", indirect_targets[index].site);
+    std::snprintf(target, sizeof(target), "0x%08X",
+                  indirect_targets[index].target);
+    output << "      {\"site\": \"" << site
+           << "\", \"target\": \"" << target
+           << "\", \"transitions\": "
+           << indirect_targets[index].transitions << "}"
+           << (index + 1u == indirect_targets.size() ? "\n" : ",\n");
+  }
   output << "    ]\n  }" << (trailing_comma ? ",\n" : "\n");
 }
 
@@ -189,7 +213,7 @@ void write_execution_census(std::ostream& output, std::uint64_t ee_steps,
                             const ps2vita::ExecutionCensus& iop) {
   output << "{\n"
          << "  \"schema\": \"astrarecomp.execution-census\",\n"
-         << "  \"version\": 1,\n"
+         << "  \"version\": 2,\n"
          << "  \"ee_steps\": " << ee_steps << ",\n"
          << "  \"iop_divisor\": " << iop_divisor << ",\n";
   write_census_processor(output, "ee", ee, true);
@@ -347,7 +371,13 @@ int main(int argc, char** argv) {
     if (!ee_takes_interrupt) {
       ++ee_opcode_counts[opcode_family(instruction)];
       ++ee_profile_total;
-      if (census_path) ee_census.record(state.pc, instruction);
+      if (census_path) {
+        const auto branch_register = (instruction >> 21) & 31u;
+        ee_census.record(state.pc, instruction,
+            static_cast<std::uint32_t>(state.gpr[29]),
+            static_cast<std::uint32_t>(state.gpr[28]),
+            static_cast<std::uint32_t>(state.gpr[branch_register]));
+      }
     }
     trace[cursor++ % kTraceSize] = {
         state.pc, instruction, state.gpr[2],
@@ -442,7 +472,11 @@ int main(int argc, char** argv) {
       if (!iop_takes_interrupt) {
         ++iop_opcode_counts[opcode_family(iop_instruction)];
         ++iop_profile_total;
-        if (census_path) iop_census.record(iop.pc, iop_instruction);
+        if (census_path) {
+          const auto branch_register = (iop_instruction >> 21) & 31u;
+          iop_census.record(iop.pc, iop_instruction, iop.gpr[29], iop.gpr[28],
+                            iop.gpr[branch_register]);
+        }
       }
       iop_trace[iop_cursor++ % kTraceSize] = {iop.pc, iop_instruction,
           iop.gpr[2], iop.gpr[3], iop.gpr[4], iop.gpr[31]};

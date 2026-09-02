@@ -21,28 +21,34 @@ constexpr std::uint32_t i_type(unsigned op, unsigned rs, unsigned rt, std::uint1
 
 void test_execution_census_blocks_and_edges() {
   ps2vita::ExecutionCensus census;
-  census.record(0x1000u, i_type(0x09u, 0u, 2u, 1u));
+  census.record(0x1000u, i_type(0x09u, 0u, 2u, 1u), 0x8000u, 0x4000u);
   census.record(0x1004u, i_type(0x04u, 2u, 0u, 1u));
   census.record(0x1008u, 0u); // Branch delay slot.
-  census.record(0x100Cu, i_type(0x09u, 2u, 2u, 1u));
+  census.record(0x100Cu, i_type(0x09u, 2u, 2u, 1u), 0x7FF0u, 0x4100u);
   census.record(0x1010u, 0x08000800u); // J 0x2000.
   census.record(0x1014u, 0u);
-  census.record(0x2000u, 0x03E00008u); // JR ra.
+  census.record(0x2000u, 0x03E00008u, 0x7FE0u, 0x4200u, 0x100Cu); // JR ra.
   census.record(0x2004u, 0u);
-  census.record(0x100Cu, i_type(0x09u, 2u, 2u, 1u));
+  census.record(0x100Cu, i_type(0x09u, 2u, 2u, 1u), 0x7FD0u, 0x4300u);
 
   const auto blocks = census.blocks();
   const auto edges = census.edges();
   check(census.instruction_count() == 9u && blocks.size() == 3u &&
         blocks[0].pc == 0x1000u && blocks[0].entries == 1u &&
         blocks[1].pc == 0x100Cu && blocks[1].entries == 2u &&
+        blocks[1].sp_min == 0x7FD0u && blocks[1].sp_max == 0x7FF0u &&
+        blocks[1].gp_min == 0x4100u && blocks[1].gp_max == 0x4300u &&
         blocks[2].pc == 0x2000u && blocks[2].entries == 1u,
-        "execution census counts deterministic dynamic block entries");
+        "execution census counts block entries and register ranges");
   check(edges.size() == 3u &&
         edges[0].source == 0x1000u && edges[0].target == 0x100Cu &&
         edges[1].source == 0x100Cu && edges[1].target == 0x2000u &&
         edges[2].source == 0x2000u && edges[2].target == 0x100Cu,
         "execution census records sorted dynamic block edges");
+  const auto indirect = census.indirect_targets();
+  check(indirect.size() == 1u && indirect[0].site == 0x2000u &&
+        indirect[0].target == 0x100Cu && indirect[0].transitions == 1u,
+        "execution census records validated indirect branch targets");
 
   census.clear();
   census.record(0x3000u, i_type(0x14u, 2u, 0u, 1u)); // Annulled BEQL.
