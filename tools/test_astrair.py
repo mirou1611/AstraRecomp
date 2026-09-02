@@ -5,6 +5,7 @@ import unittest
 
 from astrair.builder import build_data_instruction
 from astrair.analysis_effects import is_hard_barrier
+from astrair.analysis_liveness import analyze_block
 from astrair.analysis_width import infer_block_results
 from astrair.ir import Effect, Op, UpperBits, ValueKind
 
@@ -130,6 +131,25 @@ class AstraIrBuilderTests(unittest.TestCase):
             (inferred[3].result_kind, inferred[3].upper_bits),
             (ValueKind.U16, UpperBits.ZERO),
         )
+
+    def test_register_use_def_and_backward_liveness(self) -> None:
+        instructions = [
+            build_data_instruction(0x1000, i_type(0x09, 4, 2, 1)),
+            build_data_instruction(0x1004, i_type(0x09, 5, 2, 2)),
+            build_data_instruction(0x1008, r_type(2, 6, 3, 0, 0x21)),
+        ]
+        live = analyze_block(instructions, live_out={3})
+        self.assertEqual(instructions[0].reads, frozenset({4}))
+        self.assertEqual(instructions[0].writes, frozenset({2}))
+        self.assertEqual(live[0].dead_writes, frozenset({2}))
+        self.assertEqual(live[1].dead_writes, frozenset())
+        self.assertEqual(live[2].live_out, frozenset({3}))
+        self.assertEqual(live[0].live_in, frozenset({4, 5, 6}))
+
+    def test_store_reads_address_and_value_without_writing_gpr(self) -> None:
+        store = build_data_instruction(0x1000, i_type(0x2B, 3, 2, 4))
+        self.assertEqual(store.reads, frozenset({2, 3}))
+        self.assertEqual(store.writes, frozenset())
 
 
 if __name__ == "__main__":

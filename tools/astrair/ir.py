@@ -1,6 +1,6 @@
 """Semantic instruction records for AstraRecomp's initial AOT subset."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, IntFlag, auto
 
 
@@ -62,3 +62,5 @@ class Instruction:
     result_register: int = 0
     result_kind: ValueKind = ValueKind.NONE
     upper_bits: UpperBits = UpperBits.UNKNOWN
+    reads: frozenset = field(default_factory=frozenset)
+    writes: frozenset = field(default_factory=frozenset)

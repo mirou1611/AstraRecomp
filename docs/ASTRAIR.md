@@ -69,3 +69,16 @@ Unknown inputs remain `U64`; packed operations remain `V128`; writes to `$zero`
 produce no result. The emitter consumes the refined instruction records but
 does not optimize from these facts yet. This keeps Commit 6 independently
 testable and leaves actual state-load/store elimination to the liveness pass.
+
+## GPR liveness foundation
+
+The liveness pass assigns exact low-GPR read/write sets to every supported IR
+operation and computes `live_in`, `live_out`, and overwritten-dead writes by
+walking a straight-line block backward. Register zero is excluded from use/def
+sets, and callers provide the live-out contract explicitly.
+
+This checkpoint does not eliminate or defer writes. That separation is
+intentional: exits through memory faults, interpreter fallback, delay slots,
+and indirect control flow must all materialize the same architectural state.
+The subsequent emitter change will be feature-flagged and use these sets to
+flush dirty locals on every exit before it can become the default.

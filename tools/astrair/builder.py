@@ -3,6 +3,7 @@
 from typing import Optional
 
 from .analysis_effects import effects_for
+from .analysis_liveness import registers_for
 from .analysis_width import result_for
 from .ir import Instruction, Op, UpperBits, ValueKind
 
@@ -54,6 +55,7 @@ def build_data_instruction(pc: int, word: int) -> Optional[Instruction]:
     if kind is None:
         return None
     result_register, result_kind, upper_bits = result_for(kind, rt, rd)
+    reads, writes = registers_for(kind, rs, rt, rd)
     if result_register == 0:
         result_kind = ValueKind.NONE
         upper_bits = UpperBits.UNKNOWN
@@ -69,4 +71,6 @@ def build_data_instruction(pc: int, word: int) -> Optional[Instruction]:
         result_register=result_register,
         result_kind=result_kind,
         upper_bits=upper_bits,
+        reads=reads,
+        writes=writes,
     )
