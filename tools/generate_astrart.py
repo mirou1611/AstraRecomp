@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
 
+from astrair.builder import build_data_instruction
+from astrair.ir import Op
+
 
 @dataclass
 class Function:
@@ -72,19 +75,7 @@ def is_break(word: int) -> bool:
 
 
 def is_supported_data(word: int) -> bool:
-    op = opcode(word)
-    function = word & 0x3F
-    sub = (word >> 6) & 0x1F
-    return (
-        word == 0
-        or op in (0x09, 0x0C, 0x0D, 0x0F, 0x23, 0x2B, 0x37, 0x3F)
-        or (op == 0 and function in (0x18, 0x21, 0x24, 0x2B, 0x2D, 0x2F))
-        or (op == 0x1C and (function, sub) in (
-            (0x09, 0x12),  # PAND
-            (0x09, 0x13),  # PXOR
-            (0x29, 0x12),  # POR
-        ))
-    )
+    return build_data_instruction(0, word) is not None
 
 
 def is_supported_delay(word: int) -> bool:
@@ -160,41 +151,44 @@ def sx16(word: int) -> int:
 
 
 def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
-    op = opcode(word)
-    rs = (word >> 21) & 31
-    rt = (word >> 16) & 31
-    rd = (word >> 11) & 31
+    instruction = build_data_instruction(pc, word)
+    if instruction is None:
+        raise ValueError(f"internal: unsupported data instruction 0x{word:08x}")
+    kind = instruction.op
+    rs = instruction.rs
+    rt = instruction.rt
+    rd = instruction.rd
     lines.append(f"{indent}state.pc = 0x{pc:08x}u;")
-    if word == 0:
+    if kind is Op.NOP:
         lines.append(f"{indent}++executed;")
         return
-    if op == 0x09:  # ADDIU
+    if kind is Op.ADDIU:
         if rt:
             lines.append(
-                f"{indent}state.gpr[{rt}] = sign_extend_32(static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({sx16(word)}));"
+                f"{indent}state.gpr[{rt}] = sign_extend_32(static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({instruction.immediate}));"
             )
-    elif op == 0 and (word & 0x3F) == 0x21:  # ADDU
+    elif kind is Op.ADDU:
         if rd:
             lines.append(
                 f"{indent}state.gpr[{rd}] = sign_extend_32(static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>(state.gpr[{rt}]));"
             )
-    elif op == 0 and (word & 0x3F) == 0x24:  # AND
+    elif kind is Op.AND:
         if rd:
             lines.append(
                 f"{indent}state.gpr[{rd}] = state.gpr[{rs}] & state.gpr[{rt}];"
             )
-    elif op == 0 and (word & 0x3F) == 0x2B:  # SLTU
+    elif kind is Op.SLTU:
         if rd:
             lines.append(
                 f"{indent}state.gpr[{rd}] = state.gpr[{rs}] < state.gpr[{rt}] ? 1u : 0u;"
             )
-    elif op == 0 and (word & 0x3F) in (0x2D, 0x2F):  # DADDU/DSUBU
+    elif kind in (Op.DADDU, Op.DSUBU):
         if rd:
-            operator = "+" if (word & 0x3F) == 0x2D else "-"
+            operator = "+" if kind is Op.DADDU else "-"
             lines.append(
                 f"{indent}state.gpr[{rd}] = state.gpr[{rs}] {operator} state.gpr[{rt}];"
             )
-    elif op == 0 and (word & 0x3F) == 0x18:  # MULT
+    elif kind is Op.MULT:
         lines.append(
             f"{indent}const std::int64_t product_{pc:08x} = static_cast<std::int64_t>(static_cast<std::int32_t>(state.gpr[{rs}])) * static_cast<std::int32_t>(state.gpr[{rt}]);"
         )
@@ -206,12 +200,12 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
         )
         if rd:
             lines.append(f"{indent}state.gpr[{rd}] = state.lo;")
-    elif op == 0x1C:  # MMI packed bitwise subset
+    elif kind in (Op.PAND, Op.PXOR, Op.POR):
         operation = {
-            (0x09, 0x12): "&",
-            (0x09, 0x13): "^",
-            (0x29, 0x12): "|",
-        }[(word & 0x3F, (word >> 6) & 0x1F)]
+            Op.PAND: "&",
+            Op.PXOR: "^",
+            Op.POR: "|",
+        }[kind]
         if rd:
             lines.append(
                 f"{indent}state.gpr[{rd}] = state.gpr[{rs}] {operation} state.gpr[{rt}];"
@@ -219,25 +213,25 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
             lines.append(
                 f"{indent}state.gpr_hi[{rd}] = state.gpr_hi[{rs}] {operation} state.gpr_hi[{rt}];"
             )
-    elif op == 0x0C:  # ANDI
+    elif kind is Op.ANDI:
         if rt:
             lines.append(
                 f"{indent}state.gpr[{rt}] = state.gpr[{rs}] & 0x{word & 0xFFFF:04x}u;"
             )
-    elif op == 0x0D:  # ORI
+    elif kind is Op.ORI:
         if rt:
             lines.append(
                 f"{indent}state.gpr[{rt}] = state.gpr[{rs}] | 0x{word & 0xFFFF:04x}u;"
             )
-    elif op == 0x0F:  # LUI
+    elif kind is Op.LUI:
         if rt:
             lines.append(
                 f"{indent}state.gpr[{rt}] = sign_extend_32(0x{(word & 0xFFFF) << 16:08x}u);"
             )
-    elif op == 0x23:  # LW
+    elif kind is Op.LW:
         address = f"address_{pc:08x}"
         lines.append(
-            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({sx16(word)});"
+            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({instruction.immediate});"
         )
         lines.append(
             f"{indent}if (({address} & 3u) != 0u || !memory.valid({address}, 4u)) {{"
@@ -251,10 +245,10 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
             lines.append(
                 f"{indent}state.gpr[{rt}] = sign_extend_32(memory.read32({address}));"
             )
-    elif op == 0x2B:  # SW
+    elif kind is Op.SW:
         address = f"address_{pc:08x}"
         lines.append(
-            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({sx16(word)});"
+            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({instruction.immediate});"
         )
         lines.append(
             f"{indent}if (({address} & 3u) != 0u || !memory.valid({address}, 4u)) {{"
@@ -267,10 +261,10 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
         lines.append(
             f"{indent}memory.write32({address}, static_cast<std::uint32_t>(state.gpr[{rt}]));"
         )
-    elif op == 0x37:  # LD
+    elif kind is Op.LD:
         address = f"address_{pc:08x}"
         lines.append(
-            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({sx16(word)});"
+            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({instruction.immediate});"
         )
         lines.append(
             f"{indent}if (({address} & 7u) != 0u || !memory.valid({address}, 8u)) {{"
@@ -282,10 +276,10 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
         lines.append(f"{indent}}}")
         if rt:
             lines.append(f"{indent}state.gpr[{rt}] = memory.read64({address});")
-    elif op == 0x3F:  # SD
+    elif kind is Op.SD:
         address = f"address_{pc:08x}"
         lines.append(
-            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({sx16(word)});"
+            f"{indent}const std::uint32_t {address} = static_cast<std::uint32_t>(state.gpr[{rs}]) + static_cast<std::uint32_t>({instruction.immediate});"
         )
         lines.append(
             f"{indent}if (({address} & 7u) != 0u || !memory.valid({address}, 8u)) {{"
@@ -296,8 +290,6 @@ def emit_data(lines: List[str], pc: int, word: int, indent: str = "  ") -> None:
         )
         lines.append(f"{indent}}}")
         lines.append(f"{indent}memory.write64({address}, state.gpr[{rt}]);")
-    else:
-        raise ValueError(f"internal: unsupported data instruction 0x{word:08x}")
     lines.append(f"{indent}++executed;")
     lines.append(f"{indent}++fast;")
 

@@ -43,6 +43,9 @@ add_custom_command(
           "${ASTRART_HOT_SCALAR_ELF}" "${ASTRART_BENCHMARK_ELF}"
   DEPENDS
     tools/generate_astrart.py
+    tools/astrair/__init__.py
+    tools/astrair/ir.py
+    tools/astrair/builder.py
     tools/make_smoke_elf.py
     tools/make_aot_chain_elf.py
     tools/make_aot_memory_elf.py
@@ -114,4 +117,6 @@ else()
     target_compile_options(ps2bios_trace PRIVATE -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ps2core_tests COMMAND ps2core_tests)
+  add_test(NAME astrair_builder_tests
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_astrair.py")
 endif()
