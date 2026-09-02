@@ -102,6 +102,10 @@ void Memory::clear() {
   std::fill(vu_mem_.begin(), vu_mem_.end(), 0);
   std::fill(iop_ram_.begin(), iop_ram_.end(), 0);
   spu2_hw_.fill(0);
+  // Both SPU2 cores reset ready. STATX bit 7 is cleared while a DMA transfer
+  // is active and restored when the transfer completes.
+  spu2_hw_[0x0344u] = 0x80u;
+  spu2_hw_[0x0744u] = 0x80u;
   std::fill(spu2_ram_.begin(), spu2_ram_.end(), 0);
   iop_scratch_.fill(0);
   std::fill(iop_hw_.begin(), iop_hw_.end(), 0);
@@ -643,6 +647,8 @@ void Memory::advance(std::uint32_t cycles) {
         (spu2_dma_target_[core] + spu2_dma_bytes_[core] / 2u) & 0xFFFFFu;
     const auto dma_offset = core == 0u ? 0x00C0u : 0x0500u;
     const auto tsa_offset = core == 0u ? 0x01A8u : 0x05A8u;
+    const auto attr_offset = core == 0u ? 0x019Au : 0x059Au;
+    const auto statx_offset = core == 0u ? 0x0344u : 0x0744u;
     store_iop(dma_offset, final_source & 0x00FFFFFFu);
     store_iop(dma_offset + 4u, 0u);
     store_iop(dma_offset + 8u,
@@ -651,6 +657,12 @@ void Memory::advance(std::uint32_t cycles) {
     spu2_hw_[tsa_offset + 1u] = 0u;
     spu2_hw_[tsa_offset + 2u] = static_cast<std::uint8_t>(final_target);
     spu2_hw_[tsa_offset + 3u] = static_cast<std::uint8_t>(final_target >> 8);
+    auto statx = iop_read16(0x1F900000u + statx_offset);
+    statx = static_cast<std::uint16_t>(statx & ~0x0400u);
+    if ((iop_read16(0x1F900000u + attr_offset) & 0x0030u) != 0u)
+      statx = static_cast<std::uint16_t>(statx | 0x0080u);
+    spu2_hw_[statx_offset] = static_cast<std::uint8_t>(statx);
+    spu2_hw_[statx_offset + 1u] = static_cast<std::uint8_t>(statx >> 8);
 
     // DMA4 uses channel 4/status bit 28 in DICR, while DMA7 uses channel
     // zero/status bit 24 in DICR2. Both signal the shared IOP DMA line.
@@ -1169,6 +1181,10 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
       const auto duration = transfer_bytes * 96u;
       spu2_dma_cycles_remaining_[core] = duration > UINT32_MAX
           ? UINT32_MAX : static_cast<std::uint32_t>(duration);
+      const auto statx_address = core == 0u ? 0x1F900344u : 0x1F900744u;
+      const auto statx = static_cast<std::uint16_t>(
+          (iop_read16(statx_address) & ~0x0080u) | 0x0400u);
+      iop_write16(statx_address, statx);
     }
   }
   iop_write8(address, static_cast<std::uint8_t>(value));

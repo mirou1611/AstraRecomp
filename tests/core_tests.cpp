@@ -607,6 +607,9 @@ void test_video_vblank_deadlines() {
 
 void test_spu2_dma7_completion() {
   ps2vita::Memory memory;
+  check(memory.iop_read16(0x1F900744u) == 0x0080u,
+        "SPU2 core 1 resets ready");
+  memory.iop_write16(0x1F90059Au, 0x0020u);
   for (std::uint32_t byte = 0; byte < 8u; ++byte)
     memory.iop_write8(0x1000u + byte, static_cast<std::uint8_t>(0xA0u + byte));
   memory.iop_write16(0x1F9005A8u, 0u);
@@ -614,6 +617,8 @@ void test_spu2_dma7_completion() {
   memory.iop_write32(0x1F801500u, 0x1000u);
   memory.iop_write32(0x1F801504u, 0x00010002u);
   memory.iop_write32(0x1F801508u, 0x01000201u);
+  check(memory.iop_read16(0x1F900744u) == 0x0400u,
+        "SPU2 DMA7 clears ready and sets busy while active");
   memory.iop_write32(0x1F801074u, 1u << 3);
   memory.iop_write32(0x1F801078u, 1u);
 
@@ -632,6 +637,8 @@ void test_spu2_dma7_completion() {
         (memory.iop_read32(0x1F801508u) & 0x01000000u) == 0u &&
         memory.iop_read16(0x1F9005AAu) == 0x280Cu,
         "SPU2 DMA7 copies IOP data and advances its source and sound addresses");
+  check(memory.iop_read16(0x1F900744u) == 0x0080u,
+        "SPU2 DMA7 clears busy and restores ready at completion");
   check((memory.iop_read32(0x1F801574u) & (1u << 24)) != 0u &&
         (memory.iop_read32(0x1F801070u) & (1u << 3)) != 0u &&
         memory.iop_interrupt_pending(),
@@ -640,6 +647,9 @@ void test_spu2_dma7_completion() {
 
 void test_spu2_dma4_completion() {
   ps2vita::Memory memory;
+  check(memory.iop_read16(0x1F900344u) == 0x0080u,
+        "SPU2 core 0 resets ready");
+  memory.iop_write16(0x1F90019Au, 0x0020u);
   for (std::uint32_t byte = 0; byte < 8u; ++byte)
     memory.iop_write8(0x2000u + byte, static_cast<std::uint8_t>(0xB0u + byte));
   memory.iop_write16(0x1F9001A8u, 0u);
@@ -647,6 +657,8 @@ void test_spu2_dma4_completion() {
   memory.iop_write32(0x1F8010C0u, 0x2000u);
   memory.iop_write32(0x1F8010C4u, 0x00010002u);
   memory.iop_write32(0x1F8010C8u, 0x01000201u);
+  check(memory.iop_read16(0x1F900344u) == 0x0400u,
+        "SPU2 DMA4 clears ready and sets busy while active");
 
   memory.advance(768u);
 
@@ -659,6 +671,8 @@ void test_spu2_dma4_completion() {
         (memory.iop_read32(0x1F8010C8u) & 0x01000000u) == 0u &&
         memory.iop_read16(0x1F9001AAu) == 0x0014u,
         "SPU2 DMA4 copies IOP data and advances core-0 transfer state");
+  check(memory.iop_read16(0x1F900344u) == 0x0080u,
+        "SPU2 DMA4 clears busy and restores ready at completion");
   check((memory.iop_read32(0x1F8010F4u) & (1u << 28)) != 0u &&
         (memory.iop_read32(0x1F801070u) & (1u << 3)) != 0u,
         "SPU2 DMA4 completion raises DICR and the shared IOP DMA interrupt");

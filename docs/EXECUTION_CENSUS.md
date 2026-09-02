@@ -116,10 +116,36 @@ final sampled CPU state as the non-census replay.
 The capture contains 172 EE site/address MMIO pairs totaling 2,297,997 reads and
 345 IOP pairs totaling 355,171 reads. The largest late IOP site is
 `0x00097500 -> 0x1F900744` with 222,884 16-bit reads, directly identifying the
-current SPU2 polling loop. The event census observes 217 SIF0 starts and 217
+then-current SPU2 polling loop. The event census observes 217 SIF0 starts and 217
 completions, 79 EE interrupt rising edges, 540 IOP interrupt rising edges, 86
 SIF1 DMA starts, one SPU2 DMA4 start, and two SPU2 DMA7 starts. No VIF0, VIF1,
 or GIF DMA start is observed after initialization.
+
+## Post-STATX correctness capture
+
+Decoding the census hotspot showed that `0x1F900744` is SPU2 core 1 `STATX`.
+The BIOS routine at `0x000974D0` waits for ready bit `0x0080`, but the old
+register-file-only model left the status at zero and forced the guest through a
+`1 << 24` software timeout. SPU2 now resets ready, changes to busy `0x0400` at
+DMA start, and restores ready when a DMA-mode transfer completes.
+
+At the same 200-million-step boundary, the corrected capture changes the
+observations as follows:
+
+| Observation | Before | After |
+|---|---:|---:|
+| SIF0 activity transitions | 434 | 452 |
+| IOP MMIO reads | 355,171 | 140,236 |
+| IOP block PCs | 5,006 | 5,016 |
+| IOP edges | 6,896 | 6,922 |
+| SIF0 starts/completions | 217 / 217 | 226 / 226 |
+| SIF1 DMA starts | 86 | 95 |
+| SPU2 DMA7 starts | 2 | 5 |
+
+The 222,884-read `0x00097500 -> 0x1F900744` timeout disappears, and the sampled
+IOP endpoint moves from `0x000974F8` to `0x00093F10`. The EE remains running at
+`0x00081FC0`. No VIF0, VIF1, or GIF DMA start is observed yet, so this is boot
+and device-initialization progress rather than graphics progress.
 
 Schema version 1 contains block and edge frequencies. Version 2 adds block-entry
 `$sp`/`$gp` ranges and validated indirect targets without changing version-1
