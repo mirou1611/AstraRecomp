@@ -573,8 +573,11 @@ def _emit_fused_trace(trace: Trace, functions: List[Function],
         f"AotExit {name}(Memory& memory, CpuState& state) {{",
         "  std::uint32_t executed = 0;",
         "  std::uint32_t fast = 0;",
-        f"  if (memory.cycles_until_next_event() <= {planned_cycles}u)",
+        "  ++state.aot_trace_entries;",
+        f"  if (memory.cycles_until_next_event() <= {planned_cycles}u) {{",
+        "    ++state.aot_trace_horizon_fallbacks;",
         f"    return generated_{trace.blocks[0]:08x}(memory, state);",
+        "  }",
     ]
     for source, target in zip(trace.blocks, trace.blocks[1:]):
         _emit_inline_direct_block(lines, by_start[source], target, words)

@@ -25,3 +25,5 @@ The first pure direct-trace emitter now checks this contract before batching. A
 five-cycle synthetic trace fuses only when the reported distance is greater than
 five; a distance of exactly five falls back before executing its original first
 block. MMIO/memory effects and effectful delay slots remain fusion barriers.
+Trace-entry and horizon-fallback counters make this decision observable in Vita
+telemetry without changing guest state.

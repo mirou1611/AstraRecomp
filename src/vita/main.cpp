@@ -83,10 +83,13 @@ void write_progress(const ps2vita::Emulator& emulator) {
   const auto opcode = emulator.memory().read32(state.pc);
   std::snprintf(report, sizeof(report),
       "pc=%08X\nopcode=%08X\ncycles=%llu\nfast_path_instructions=%llu\n"
+      "aot_trace_entries=%llu\naot_trace_horizon_fallbacks=%llu\n"
       "v0=%016llX\na0=%016llX\nsp=%016llX\nra=%016llX\n"
       "status=%08X\ncause=%08X\nepc=%08X\nbadvaddr=%08X\n",
       state.pc, opcode, static_cast<unsigned long long>(state.cycles),
       static_cast<unsigned long long>(state.fast_path_instructions),
+      static_cast<unsigned long long>(state.aot_trace_entries),
+      static_cast<unsigned long long>(state.aot_trace_horizon_fallbacks),
       static_cast<unsigned long long>(state.gpr[2]),
       static_cast<unsigned long long>(state.gpr[4]),
       static_cast<unsigned long long>(state.gpr[29]),

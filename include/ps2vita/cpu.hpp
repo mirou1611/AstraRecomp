@@ -42,6 +42,9 @@ struct CpuState {
   // Guest instructions completed by verified native semantic fast paths.
   // They are included in cycles; this counter is diagnostic only.
   std::uint64_t fast_path_instructions = 0;
+  // Profile-guided AOT telemetry. These do not affect architectural state.
+  std::uint64_t aot_trace_entries = 0;
+  std::uint64_t aot_trace_horizon_fallbacks = 0;
 };
 
 class Cpu {

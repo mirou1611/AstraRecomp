@@ -1511,7 +1511,9 @@ void test_phase0_aot_contract() {
       ps2vita::dispatch_phase0_aot(bounded_memory, bounded_state, 1u);
 #if defined(PS2VITA_ASTRART_DIRECT_TRACES)
   check(bounded.kind == ps2vita::AotExitKind::Interpreter &&
-            bounded.target == 0x3008u && bounded.instructions == 5u,
+            bounded.target == 0x3008u && bounded.instructions == 5u &&
+            bounded_state.aot_trace_entries == 1u &&
+            bounded_state.aot_trace_horizon_fallbacks == 0u,
         "direct trace batches proven blocks within one dispatch budget");
   ps2vita::Memory boundary_memory;
   boundary_memory.advance(3u);
@@ -1520,7 +1522,9 @@ void test_phase0_aot_contract() {
   const auto boundary =
       ps2vita::dispatch_phase0_aot(boundary_memory, boundary_state, 1u);
   check(boundary.kind == ps2vita::AotExitKind::Interpreter &&
-            boundary.target == 0x3020u && boundary.instructions == 2u,
+            boundary.target == 0x3020u && boundary.instructions == 2u &&
+            boundary_state.aot_trace_entries == 1u &&
+            boundary_state.aot_trace_horizon_fallbacks == 1u,
         "direct trace falls back before crossing the event horizon");
 #else
   check(bounded.kind == ps2vita::AotExitKind::Interpreter &&

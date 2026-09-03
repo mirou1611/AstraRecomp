@@ -181,6 +181,11 @@ it calls the original first block, preserving the ordinary scheduler boundary.
 Hard-effect operations—including those in delay slots—are forbidden anywhere
 in a fused trace. Guarded conditional traces remain rejected.
 
+`CpuState::aot_trace_entries` and `aot_trace_horizon_fallbacks` count trace
+attempts and timing-boundary rejections without affecting architectural state.
+The Vita progress report exports both counters so physical-device captures can
+measure trace coverage and whether the conservative horizon is too restrictive.
+
 The runtime event-distance contract is described in `docs/EVENT_HORIZON.md`.
 The first fused trace consumes it conservatively; broader fusion remains gated
 on the same rule and adversarial boundary tests.
