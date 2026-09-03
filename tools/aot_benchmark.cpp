@@ -24,11 +24,19 @@ int main(int argc, char** argv) {
       clock_microseconds, iterations, samples);
   std::printf(
       "matched=%u iterations=%u samples=%u guest_instructions=%llu "
-      "interpreter_us=%llu aot_us=%llu speedup_x100=%u\n",
+      "interpreter_us=%llu aot_us=%llu speedup_x100=%u "
+      "trace_probe_us=%llu trace_probe_guest_instructions=%llu "
+      "trace_entries=%llu trace_horizon_fallbacks=%llu "
+      "trace_probe_checksum=%016llx\n",
       result.matched ? 1u : 0u, result.iterations, result.samples,
       static_cast<unsigned long long>(result.guest_instructions),
       static_cast<unsigned long long>(result.interpreter_microseconds),
       static_cast<unsigned long long>(result.aot_microseconds),
-      result.speedup_x100);
+      result.speedup_x100,
+      static_cast<unsigned long long>(result.trace_probe_microseconds),
+      static_cast<unsigned long long>(result.trace_probe_guest_instructions),
+      static_cast<unsigned long long>(result.trace_entries),
+      static_cast<unsigned long long>(result.trace_horizon_fallbacks),
+      static_cast<unsigned long long>(result.trace_probe_checksum));
   return result.matched ? 0 : 1;
 }

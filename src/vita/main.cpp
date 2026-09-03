@@ -107,7 +107,9 @@ void write_benchmark(const ps2vita::AotBenchmarkResult& result) {
       "schema=astrart-performance-v1\nmatched=%u\niterations=%u\nsamples=%u\n"
       "guest_instructions=%llu\ninterpreter_us=%llu\nnative_us=%llu\n"
       "speedup_x100=%u\ninterpreter_checksum=%016llX\n"
-      "native_checksum=%016llX\n"
+      "native_checksum=%016llX\ntrace_probe_us=%llu\n"
+      "trace_probe_guest_instructions=%llu\ntrace_entries=%llu\n"
+      "trace_horizon_fallbacks=%llu\ntrace_probe_checksum=%016llX\n"
       "timing_note=Vita3K validates correctness only; physical Vita decides performance\n",
       result.matched ? 1u : 0u, result.iterations, result.samples,
       static_cast<unsigned long long>(result.guest_instructions),
@@ -115,7 +117,12 @@ void write_benchmark(const ps2vita::AotBenchmarkResult& result) {
       static_cast<unsigned long long>(result.aot_microseconds),
       result.speedup_x100,
       static_cast<unsigned long long>(result.interpreter_checksum),
-      static_cast<unsigned long long>(result.aot_checksum));
+      static_cast<unsigned long long>(result.aot_checksum),
+      static_cast<unsigned long long>(result.trace_probe_microseconds),
+      static_cast<unsigned long long>(result.trace_probe_guest_instructions),
+      static_cast<unsigned long long>(result.trace_entries),
+      static_cast<unsigned long long>(result.trace_horizon_fallbacks),
+      static_cast<unsigned long long>(result.trace_probe_checksum));
   sceIoRemove(kBenchmarkPath);
   const int fd = sceIoOpen(kBenchmarkPath,
                            SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);

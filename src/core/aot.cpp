@@ -269,10 +269,12 @@ AotBenchmarkResult run_phase0_aot_benchmark(
   const auto function_budget = result.iterations * 16u + 256u;
   std::array<std::uint64_t, 9> interpreter_times{};
   std::array<std::uint64_t, 9> aot_times{};
+  std::array<std::uint64_t, 9> trace_times{};
   Memory memory;
   CpuState interpreter_state{};
   CpuState aot_state{};
   AotExit aot_exit{};
+  bool trace_probe_matched = true;
 
   // Untimed warm-up pays first-touch and cold instruction-cache costs for both
   // paths before the median samples used by the go/no-go result.
@@ -305,11 +307,45 @@ AotBenchmarkResult run_phase0_aot_benchmark(
     aot_times[sample] = aot_end - aot_begin;
     result.aot_stop = aot_exit.reason;
     result.aot_checksum = benchmark_checksum(memory, aot_state);
+
+    Memory trace_memory;
+    install_chain_program(trace_memory);
+    CpuState trace_state{};
+    std::uint64_t trace_checksum = 1469598103934665603ull;
+    const auto trace_begin = clock_microseconds ? clock_microseconds() : 0u;
+    for (std::uint32_t iteration = 0; iteration < result.iterations; ++iteration) {
+      trace_state.pc = kChainEntry;
+      trace_state.gpr[2] = 0u;
+      trace_state.gpr[4] = 0u;
+      trace_state.gpr[31] = 0u;
+      trace_state.cycles = 0u;
+      trace_state.cop0[9] = 0u;
+      trace_state.fast_path_instructions = 0u;
+      const auto trace_exit =
+          dispatch_phase0_aot(trace_memory, trace_state, 4u);
+      trace_probe_matched = trace_probe_matched &&
+          trace_exit.kind == AotExitKind::Stop &&
+          trace_exit.reason == StopReason::Break &&
+          trace_exit.instructions == 8u && trace_state.cycles == 8u &&
+          trace_state.gpr[2] == 42u &&
+          trace_memory.read32(kChainResultAddress) == 42u;
+      trace_checksum ^= trace_state.gpr[2] + trace_exit.instructions;
+      trace_checksum *= 1099511628211ull;
+    }
+    const auto trace_end = clock_microseconds ? clock_microseconds() : 0u;
+    trace_times[sample] = trace_end - trace_begin;
+    result.trace_probe_checksum = trace_checksum;
+    result.trace_entries = trace_state.aot_trace_entries;
+    result.trace_horizon_fallbacks =
+        trace_state.aot_trace_horizon_fallbacks;
   }
 
   result.guest_instructions = interpreter_state.cycles;
   result.interpreter_microseconds = median_sample(interpreter_times, result.samples);
   result.aot_microseconds = median_sample(aot_times, result.samples);
+  result.trace_probe_microseconds = median_sample(trace_times, result.samples);
+  result.trace_probe_guest_instructions =
+      static_cast<std::uint64_t>(result.iterations) * 8u;
   if (result.aot_microseconds != 0u) {
     result.speedup_x100 = static_cast<std::uint32_t>(std::min<std::uint64_t>(
         999999u, result.interpreter_microseconds * 100u /
@@ -324,7 +360,7 @@ AotBenchmarkResult run_phase0_aot_benchmark(
       interpreter_state.gpr == aot_state.gpr &&
       interpreter_state.gpr_hi == aot_state.gpr_hi &&
       interpreter_state.hi == aot_state.hi &&
-      interpreter_state.lo == aot_state.lo;
+      interpreter_state.lo == aot_state.lo && trace_probe_matched;
   return result;
 }
 

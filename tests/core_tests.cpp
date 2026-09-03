@@ -1553,8 +1553,17 @@ void test_phase0_aot_contract() {
   check(benchmark.interpreter_stop == ps2vita::StopReason::Break &&
             benchmark.aot_stop == ps2vita::StopReason::Break &&
             benchmark.guest_instructions > 1000u &&
-            benchmark.interpreter_checksum == benchmark.aot_checksum,
+            benchmark.interpreter_checksum == benchmark.aot_checksum &&
+            benchmark.trace_probe_guest_instructions == 128u &&
+            benchmark.trace_probe_checksum != 0u,
         "performance workload covers a substantial deterministic guest trace");
+#if defined(PS2VITA_ASTRART_DIRECT_TRACES)
+  check(benchmark.trace_entries == 16u,
+        "trace benchmark records one fused entry per chain iteration");
+#else
+  check(benchmark.trace_entries == 0u,
+        "legacy benchmark reports no fused trace entries");
+#endif
 
   // Generated load/store and signed-arithmetic semantics are compared over a
   // deterministic spread of inputs rather than a single friendly value.

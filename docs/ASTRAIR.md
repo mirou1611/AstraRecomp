@@ -186,6 +186,12 @@ attempts and timing-boundary rejections without affecting architectural state.
 The Vita progress report exports both counters so physical-device captures can
 measure trace coverage and whether the conservative horizon is too restrictive.
 
+The performance harness also executes the known two-block chain as a dedicated
+trace probe. Its time, instruction count, deterministic checksum, entries, and
+horizon fallbacks are emitted by the host CLI and Vita `benchmark.txt`; this
+keeps trace measurements separate from the broader workload, which does not
+contain that chain.
+
 The runtime event-distance contract is described in `docs/EVENT_HORIZON.md`.
 The first fused trace consumes it conservatively; broader fusion remains gated
 on the same rule and adversarial boundary tests.
