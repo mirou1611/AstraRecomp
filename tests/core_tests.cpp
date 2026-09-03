@@ -645,6 +645,20 @@ void test_spu2_dma7_completion() {
         "SPU2 DMA7 completion raises DICR2 and the shared IOP DMA interrupt");
 }
 
+void test_event_horizon_contract() {
+  ps2vita::Memory memory;
+  check(memory.cycles_until_next_event() == 8u,
+        "event horizon starts at the next conservative IOP clock edge");
+  memory.advance(3u);
+  check(memory.cycles_until_next_event() == 5u,
+        "event horizon preserves the fractional IOP clock phase");
+
+  memory.write32(0x1000C400u, 0x100u);
+  memory.iop_write32(0x1F801538u, 0x01000000u);
+  check(memory.cycles_until_next_event() == 1u,
+        "event horizon exposes an armed unscheduled SIF1 start");
+}
+
 void test_spu2_dma4_completion() {
   ps2vita::Memory memory;
   check(memory.iop_read16(0x1F900344u) == 0x0080u,
@@ -1747,6 +1761,7 @@ int main() {
   test_sif0_dma_reply();
   test_sif0_iop_side_completes_first();
   test_iop_timer5_deadlines();
+  test_event_horizon_contract();
   test_cdvd_reset_status();
   test_sio2_disconnected_transfer();
   test_video_vblank_deadlines();

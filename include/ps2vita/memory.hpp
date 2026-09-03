@@ -56,6 +56,9 @@ public:
   void write64(std::uint32_t address, std::uint64_t value);
   // Advances asynchronous hardware models by EE guest cycles.
   void advance(std::uint32_t cycles);
+  // Conservative EE-cycle distance to the next possible device-model state
+  // transition. Callers may batch fewer cycles without crossing a boundary.
+  std::uint32_t cycles_until_next_event() const;
   // Pending external interrupt lines as R5900 Cause.IP bits.
   std::uint32_t ee_interrupt_lines() const;
   bool iop_interrupt_pending() const;

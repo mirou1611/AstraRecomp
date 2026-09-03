@@ -180,3 +180,8 @@ This first executable form removes the dispatcher lookup between proven blocks,
 but deliberately retains each block's normal commit path. It is a correctness
 checkpoint, not yet cross-block register/state fusion and not yet a Vita speedup
 claim. Guarded conditional traces remain rejected.
+
+The runtime now exposes the conservative event-distance contract described in
+`docs/EVENT_HORIZON.md`. Trace wrappers do not consume it yet; this ordering is
+intentional so state fusion cannot silently cross a DMA, timer, video, or IOP
+clock boundary.

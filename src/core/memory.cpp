@@ -470,6 +470,44 @@ void Memory::write64(std::uint32_t address, std::uint64_t value) {
   write32(address + 4, static_cast<std::uint32_t>(value >> 32));
 }
 
+std::uint32_t Memory::cycles_until_next_event() const {
+  const auto raw_ee = [&](std::size_t offset) {
+    return static_cast<std::uint32_t>(hw_[offset]) |
+        (static_cast<std::uint32_t>(hw_[offset + 1]) << 8) |
+        (static_cast<std::uint32_t>(hw_[offset + 2]) << 16) |
+        (static_cast<std::uint32_t>(hw_[offset + 3]) << 24);
+  };
+  const auto raw_iop = [&](std::size_t offset) {
+    return static_cast<std::uint32_t>(iop_hw_[offset]) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 1]) << 8) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 2]) << 16) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 3]) << 24);
+  };
+
+  // Treat each IOP clock edge as a boundary for now. This is intentionally
+  // conservative until Timer 5 and IOP execution expose their exact deadlines.
+  std::uint32_t distance = 8u - iop_cycle_remainder_;
+  distance = std::min(distance, hblank_cycles_remaining_);
+  distance = std::min(distance, video_cycles_remaining_);
+  for (const auto remaining : spu2_dma_cycles_remaining_) {
+    if (remaining != 0u) distance = std::min(distance, remaining);
+  }
+  if (sif0_cycles_remaining_ != 0u)
+    distance = std::min(distance, sif0_cycles_remaining_);
+  if (sif1_cycles_remaining_ != 0u)
+    distance = std::min(distance, sif1_cycles_remaining_);
+
+  // SIF starts are discovered by advance(), so an armed pair with no scheduled
+  // countdown can transition on the very next call.
+  const bool sif1_armed = sif1_cycles_remaining_ == 0u &&
+      (raw_ee(0xC400u) & 0x100u) != 0u &&
+      (raw_iop(0x0538u) & 0x01000000u) != 0u;
+  const bool sif0_armed = sif0_cycles_remaining_ == 0u &&
+      (raw_ee(0xC000u) & 0x100u) != 0u &&
+      (raw_iop(0x0528u) & 0x01000000u) != 0u;
+  return sif0_armed || sif1_armed ? 1u : distance;
+}
+
 void Memory::advance(std::uint32_t cycles) {
   const auto raw_ee = [&](std::size_t offset) {
     return static_cast<std::uint32_t>(hw_[offset]) |
