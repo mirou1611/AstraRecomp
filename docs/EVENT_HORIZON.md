@@ -21,7 +21,7 @@ longer event-free spans. Returning a horizon that is too short costs performance
 returning one that is too long can change guest-visible ordering, so uncertainty
 must always shorten the horizon.
 
-This checkpoint exposes and tests the query only. Direct-trace wrappers continue
-to call each block's existing `commit()` and `Memory::advance()` path. Cycle
-batching and cross-block state fusion remain disabled until the emitter checks
-this contract and has adversarial boundary tests.
+The first pure direct-trace emitter now checks this contract before batching. A
+five-cycle synthetic trace fuses only when the reported distance is greater than
+five; a distance of exactly five falls back before executing its original first
+block. MMIO/memory effects and effectful delay slots remain fusion barriers.

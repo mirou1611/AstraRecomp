@@ -519,9 +519,9 @@ def _validate_direct_traces(traces: Iterable[Trace], functions: List[Function],
             if block in owned:
                 raise ValueError(f"trace block 0x{block:08x} has multiple owners")
             owned.add(block)
+            if block in hard_barriers:
+                raise ValueError(f"executable trace contains hard barrier at 0x{block:08x}")
         for source, target in zip(trace.blocks, trace.blocks[1:]):
-            if source in hard_barriers:
-                raise ValueError(f"trace crosses hard barrier at 0x{source:08x}")
             if direct_successors.get(source) != frozenset({target}):
                 raise ValueError(
                     f"trace edge 0x{source:08x} -> 0x{target:08x} is not uniquely direct"
@@ -529,29 +529,67 @@ def _validate_direct_traces(traces: Iterable[Trace], functions: List[Function],
     return traces
 
 
-def _emit_trace_wrapper(trace: Trace) -> List[str]:
+def _emit_inline_direct_block(lines: List[str], function: Function,
+                              target: int, words: Dict[int, int]) -> None:
+    pc = function.start
+    while pc < function.end:
+        word = words[pc]
+        op = opcode(word)
+        if op in (0x02, 0x03):
+            if jump_target(pc, word) != target:
+                raise ValueError("inline direct block target changed")
+            delay = words[pc + 4]
+            if not is_supported_delay(delay):
+                raise ValueError("inline direct block has unsupported delay slot")
+            if op == 0x03:
+                lines.append(f"  state.pc = 0x{pc:08x}u;")
+                lines.append(f"  state.gpr[31] = sign_extend_32(0x{pc + 8:08x}u);")
+            else:
+                lines.append(f"  state.pc = 0x{pc:08x}u;")
+            lines.append("  ++executed;")
+            lines.append("  ++fast;")
+            emit_data(lines, pc + 4, delay)
+            return
+        if is_jr(word) or is_break(word) or op in (0x04, 0x05):
+            raise ValueError("inline trace block is not uniquely direct")
+        instruction = build_data_instruction(pc, word)
+        if instruction is None:
+            raise ValueError("inline trace block contains unsupported instruction")
+        emit_data(lines, pc, word, instruction=instruction)
+        pc += 4
+    if not function.direct_fallthrough or function.end != target:
+        raise ValueError("inline trace block has no direct fallthrough")
+
+
+def _emit_fused_trace(trace: Trace, functions: List[Function],
+                      words: Dict[int, int], deferred_writeback: bool) -> List[str]:
     name = f"generated_trace_{trace.blocks[0]:08x}"
+    by_start = {function.start: function for function in functions}
+    planned_cycles = sum(
+        (by_start[block].end - by_start[block].start) // 4
+        for block in trace.blocks
+    )
     lines = [
         f"AotExit {name}(Memory& memory, CpuState& state) {{",
-        "  std::uint32_t total = 0;",
+        "  std::uint32_t executed = 0;",
+        "  std::uint32_t fast = 0;",
+        f"  if (memory.cycles_until_next_event() <= {planned_cycles}u)",
+        f"    return generated_{trace.blocks[0]:08x}(memory, state);",
     ]
-    for index, block in enumerate(trace.blocks):
-        lines.append(f"  AotExit exit_{index} = generated_{block:08x}(memory, state);")
-        lines.append(f"  total += exit_{index}.instructions;")
-        if index + 1 < len(trace.blocks):
-            target = trace.blocks[index + 1]
-            lines.append(
-                f"  if (exit_{index}.kind != AotExitKind::Direct || "
-                f"exit_{index}.target != 0x{target:08x}u) {{"
-            )
-            lines.append(f"    exit_{index}.instructions = total;")
-            lines.append(f"    return exit_{index};")
-            lines.append("  }")
-        else:
-            lines.append(f"  exit_{index}.instructions = total;")
-            lines.append(f"  return exit_{index};")
+    for source, target in zip(trace.blocks, trace.blocks[1:]):
+        _emit_inline_direct_block(lines, by_start[source], target, words)
+    tail = emit_function(by_start[trace.blocks[-1]], words, False)
+    if tail[3:7] != [
+            "  switch (state.pc) {",
+            f"  case 0x{trace.blocks[-1]:08x}u: goto entry_{trace.blocks[-1]:08x};",
+            "  default: return {AotExitKind::Interpreter, StopReason::None, state.pc, 0u};",
+            "  }"]:
+        raise ValueError("internal: generated function prologue changed")
+    if tail[7] != f"entry_{trace.blocks[-1]:08x}:":
+        raise ValueError("internal: generated entry label changed")
+    lines.extend(tail[8:-1])
     lines.append("}")
-    return lines
+    return defer_gpr_writeback(lines) if deferred_writeback else lines
 
 
 def generate(paths: List[Path], package_name: str,
@@ -600,7 +638,9 @@ def generate(paths: List[Path], package_name: str,
         lines.extend(emit_function(function, all_words, deferred_writeback))
         lines.append("")
     for trace in direct_traces:
-        lines.extend(_emit_trace_wrapper(trace))
+        lines.extend(_emit_fused_trace(
+            trace, functions, all_words, deferred_writeback
+        ))
         lines.append("")
     lines.append("constexpr AotFunctionEntry kGeneratedEntries[] = {")
     for start, end, owner in ranges:
@@ -641,6 +681,10 @@ def _static_trace_inputs(functions: List[Function], words: Dict[int, int]):
             if instruction is not None and is_hard_barrier(instruction):
                 hard_barriers.add(function.start)
             op = opcode(word)
+            if op in (0x02, 0x03, 0x04, 0x05) or is_jr(word):
+                delay = build_data_instruction(pc + 4, words[pc + 4])
+                if delay is None or is_hard_barrier(delay):
+                    hard_barriers.add(function.start)
             if op in (0x02, 0x03):
                 successors.add(jump_target(pc, word))
                 break

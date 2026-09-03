@@ -162,12 +162,11 @@ this establishes the reconstruction contract first.
 
 ## Executable guard-free wrappers
 
-`ASTRART_DIRECT_TRACES=ON` now lets an exactly matched trace plan replace a
-trace-entry table function with a generated wrapper. The wrapper calls each
-already-generated block directly, verifies every intermediate exit is the
-unique expected `Direct` target, accumulates guest-instruction counts, and
-returns any unexpected exit immediately. Intermediate blocks retain their own
-table entries so interpreter fallback or future deoptimization can resume there.
+`ASTRART_DIRECT_TRACES=ON` lets an exactly matched trace plan replace a
+trace-entry table function with a generated fused entry. Pure uniquely-direct
+intermediate blocks are emitted inline, low GPR values remain in locals, and the
+tail performs one architectural commit. Intermediate blocks retain their own
+table entries so fallback or future deoptimization can resume there.
 
 The default is `OFF`. The build creates a deterministic fingerprint-bound oracle
 census and trace plan for the synthetic two-block call chain, allowing both modes
@@ -176,12 +175,12 @@ dispatch-budget unit advances from `0x3000` through `0x3020` to return site
 `0x3008` while preserving the same five retired instructions and architectural
 state.
 
-This first executable form removes the dispatcher lookup between proven blocks,
-but deliberately retains each block's normal commit path. It is a correctness
-checkpoint, not yet cross-block register/state fusion and not yet a Vita speedup
-claim. Guarded conditional traces remain rejected.
+Before any fused instruction executes, the entry requires its complete static
+cycle cost to be strictly inside `Memory::cycles_until_next_event()`. Otherwise
+it calls the original first block, preserving the ordinary scheduler boundary.
+Hard-effect operations—including those in delay slots—are forbidden anywhere
+in a fused trace. Guarded conditional traces remain rejected.
 
-The runtime now exposes the conservative event-distance contract described in
-`docs/EVENT_HORIZON.md`. Trace wrappers do not consume it yet; this ordering is
-intentional so state fusion cannot silently cross a DMA, timer, video, or IOP
-clock boundary.
+The runtime event-distance contract is described in `docs/EVENT_HORIZON.md`.
+The first fused trace consumes it conservatively; broader fusion remains gated
+on the same rule and adversarial boundary tests.

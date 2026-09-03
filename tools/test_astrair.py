@@ -19,6 +19,7 @@ from generate_astrart import (
     defer_gpr_writeback, generate, generate_trace_plan, select_direct_traces,
 )
 from make_aot_chain_elf import build as build_chain_elf
+from make_aot_memory_elf import elf as build_memory_elf
 from astrair.profile import (
     CensusError, FINGERPRINT_SCHEME, load_execution_profile, source_fingerprint,
 )
@@ -376,7 +377,9 @@ class AstraIrBuilderTests(unittest.TestCase):
             traces = tuple(trace for trace in traces if len(trace.blocks) >= 2)
             generated = generate([elf_path], "trace-test", True, traces)
         self.assertIn("AotExit generated_trace_00003000", generated)
-        self.assertIn("exit_0.target != 0x00003020u", generated)
+        self.assertIn("memory.cycles_until_next_event() <= 5u", generated)
+        self.assertIn("return generated_00003000(memory, state);", generated)
+        self.assertNotIn("AotExit exit_0 = generated_00003000", generated)
         self.assertIn(
             "{0x00003000u, 0x00003008u, generated_trace_00003000}", generated
         )
@@ -393,6 +396,43 @@ class AstraIrBuilderTests(unittest.TestCase):
             path.write_bytes(elf)
             with self.assertRaisesRegex(ValueError, "guarded traces"):
                 generate([path], "trace-test", True, (guarded,))
+
+    def test_memory_delay_slot_is_a_trace_barrier(self) -> None:
+        elf = build_memory_elf(0xA000, (
+            0x08002804,  # j 0xA010
+            0x8C020000,  # lw v0, 0(zero) in the delay slot
+            0x00000000,
+            0x00000000,
+            0x0000000D,
+        ))
+        fingerprint = source_fingerprint((elf,))
+        census = {
+            "schema": "astrarecomp.execution-census",
+            "version": 3,
+            "source": {
+                "kind": "elf-set",
+                "fingerprint_scheme": FINGERPRINT_SCHEME,
+                "fingerprint_sha256": fingerprint,
+            },
+            "ee": {
+                "blocks": [
+                    {"pc": "0x0000A000", "entries": 100},
+                    {"pc": "0x0000A010", "entries": 100},
+                ],
+                "edges": [{
+                    "source": "0x0000A000", "target": "0x0000A010",
+                    "transitions": 100,
+                }],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            elf_path = root / "delay-memory.elf"
+            census_path = root / "census.json"
+            elf_path.write_bytes(elf)
+            census_path.write_text(json.dumps(census), encoding="utf-8")
+            traces, _ = select_direct_traces([elf_path], census_path)
+        self.assertEqual(traces[0].blocks, (0xA000,))
 
 
 if __name__ == "__main__":
