@@ -30,7 +30,12 @@ void Gif::reset() {
   first_xyz2_ = 0;
   have_first_xyz2_ = false;
   packets_submitted_ = 0;
+  packets_rejected_ = 0;
   sprites_emitted_ = 0;
+  packed_tags_ = 0;
+  reglist_tags_ = 0;
+  image_tags_ = 0;
+  first_unsupported_tag_ = 0;
 }
 
 bool Gif::submit(const std::uint8_t* data, std::size_t size) {
@@ -45,23 +50,51 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
     auto register_count = static_cast<unsigned>((tag >> 60) & 0xFu);
     if (register_count == 0u) register_count = 16u;
 
-    // Packed mode consumes one qword for every register in every loop. A+D
-    // carries the destination address in the high half's low byte.
-    if (format != 0u) return false;
-    for (unsigned loop = 0; loop < loops; ++loop) {
-      for (unsigned reg = 0; reg < register_count; ++reg) {
-        if (cursor + 16u > size) return false;
-        const auto descriptor = static_cast<unsigned>(
-            (registers >> ((reg & 15u) * 4u)) & 0xFu);
-        const auto value = load64(data + cursor);
-        const auto upper = load64(data + cursor + 8u);
-        if (descriptor == 0xEu)
-          write_register(static_cast<std::uint8_t>(upper), value);
-        cursor += 16u;
+    if (format == 0u) {
+      ++packed_tags_;
+      // Packed mode consumes one qword per register. A+D carries the GS
+      // address in the high half; ordinary descriptors directly select one
+      // of the common packed registers.
+      for (unsigned loop = 0; loop < loops; ++loop) {
+        for (unsigned reg = 0; reg < register_count; ++reg) {
+          if (cursor + 16u > size) { ++packets_rejected_; return false; }
+          const auto descriptor = static_cast<unsigned>(
+              (registers >> ((reg & 15u) * 4u)) & 0xFu);
+          const auto value = load64(data + cursor);
+          const auto upper = load64(data + cursor + 8u);
+          if (descriptor == 0xEu)
+            write_register(static_cast<std::uint8_t>(upper), value);
+          else if (descriptor != 0xFu)
+            write_register(static_cast<std::uint8_t>(descriptor), value);
+          cursor += 16u;
+        }
       }
+    } else if (format == 1u) {
+      ++reglist_tags_;
+      // REGLIST packs two 64-bit GS values into each qword and pads an odd
+      // value count to the next qword. Register descriptors are direct.
+      for (unsigned loop = 0; loop < loops; ++loop) {
+        for (unsigned reg = 0; reg < register_count; ++reg) {
+          if (cursor + 8u > size) { ++packets_rejected_; return false; }
+          const auto descriptor = static_cast<unsigned>(
+              (registers >> ((reg & 15u) * 4u)) & 0xFu);
+          if (descriptor != 0xEu && descriptor != 0xFu)
+            write_register(static_cast<std::uint8_t>(descriptor),
+                           load64(data + cursor));
+          cursor += 8u;
+        }
+      }
+      cursor = (cursor + 15u) & ~std::size_t{15u};
+      if (cursor > size) { ++packets_rejected_; return false; }
+    } else {
+      ++image_tags_;
+      if (first_unsupported_tag_ == 0u) first_unsupported_tag_ = tag;
+      ++packets_rejected_;
+      return false;
     }
   }
-  return cursor <= size;
+  if (cursor > size) { ++packets_rejected_; return false; }
+  return true;
 }
 
 void Gif::write_register(std::uint8_t address, std::uint64_t value) {

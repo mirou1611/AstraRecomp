@@ -796,9 +796,15 @@ int main(int argc, char** argv) {
         static_cast<unsigned long long>(graphics_dma_first_step[channel]),
         graphics_dma_first_pc[channel]);
   }
-  std::printf("gif_packets=%llu gif_sprites=%llu\n",
+  std::printf("gif_packets=%llu rejected=%llu sprites=%llu tags=%llu/%llu/%llu "
+              "first_unsupported=%016llX\n",
       static_cast<unsigned long long>(emulator.gif().packets_submitted()),
-      static_cast<unsigned long long>(emulator.gif().sprites_emitted()));
+      static_cast<unsigned long long>(emulator.gif().packets_rejected()),
+      static_cast<unsigned long long>(emulator.gif().sprites_emitted()),
+      static_cast<unsigned long long>(emulator.gif().packed_tags()),
+      static_cast<unsigned long long>(emulator.gif().reglist_tags()),
+      static_cast<unsigned long long>(emulator.gif().image_tags()),
+      static_cast<unsigned long long>(emulator.gif().first_unsupported_tag()));
   std::printf("ee_sif0 chcr=%08X madr=%08X qwc=%08X tadr=%08X\n",
       emulator.memory().read32(0x1000C000u),
       emulator.memory().read32(0x1000C010u),

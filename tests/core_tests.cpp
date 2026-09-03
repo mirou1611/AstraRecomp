@@ -1214,18 +1214,30 @@ void test_mmi_pcpyld() {
         cpu.state().gpr_hi[2] == 0x08090A0B0C0D0E0Full,
         "PSUBB wraps eight independent byte lanes per register half");
 
+  cpu.state().gpr[2] = 0x0000000010000000ull;
+  cpu.state().gpr_hi[2] = 0x8000000000000000ull;
+  cpu.state().gpr[3] = 0x0000000120000000ull;
+  cpu.state().gpr_hi[3] = 0x00000001FFFFFFFFull;
+  memory.write32(0x1028u, 0x70433848u); // psubw a3,v0,v1
+  memory.write32(0x102Cu, 0x0000000Du);
+  cpu.state().pc = 0x1028u;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "captured BIOS PSUBW executes");
+  check(cpu.state().gpr[7] == 0xFFFFFFFFF0000000ull &&
+        cpu.state().gpr_hi[7] == 0x7FFFFFFF00000001ull,
+        "PSUBW wraps four independent 32-bit lanes");
+
   cpu.state().gpr[2] = 0xFF00FF00FF00FF00ull;
   cpu.state().gpr_hi[2] = 0xAAAAAAAAAAAAAAAAull;
   cpu.state().gpr[3] = 0x0F0F0F0F0F0F0F0Full;
   cpu.state().gpr_hi[3] = 0xCCCCCCCCCCCCCCCCull;
   cpu.state().gpr[5] = cpu.state().gpr[2];
   cpu.state().gpr_hi[5] = cpu.state().gpr_hi[2];
-  memory.write32(0x1028u, (0x1Cu << 26) | (2u << 21) | (3u << 16) |
+  memory.write32(0x1030u, (0x1Cu << 26) | (2u << 21) | (3u << 16) |
                                 (2u << 11) | (0x12u << 6) | 0x09u);
-  memory.write32(0x102Cu, (0x1Cu << 26) | (5u << 21) | (3u << 16) |
+  memory.write32(0x1034u, (0x1Cu << 26) | (5u << 21) | (3u << 16) |
                                 (4u << 11) | (0x13u << 6) | 0x29u);
-  memory.write32(0x1030u, 0x0000000Du);
-  cpu.state().pc = 0x1028u;
+  memory.write32(0x1038u, 0x0000000Du);
+  cpu.state().pc = 0x1030u;
   check(cpu.run(8) == ps2vita::StopReason::Break, "PAND and PNOR execute");
   check(cpu.state().gpr[2] == 0x0F000F000F000F00ull &&
         cpu.state().gpr_hi[2] == 0x8888888888888888ull &&
@@ -1515,6 +1527,27 @@ void test_captured_bios_gif_sprite() {
   check(gs.pixel(0, 0) == 0u && gs.pixel(159, 63) == 0u &&
         gs.pixel(80, 64) == 0xFFFF00FFu,
         "captured BIOS sprite clears exactly the quarter-scale 640x256 region");
+}
+
+void test_gif_reglist_sprite() {
+  // One REGLIST tag: PRIM, RGBAQ, XYZ2, XYZ2. Four 64-bit values consume two
+  // qwords and exercise the format's different NLOOP accounting.
+  constexpr std::array<std::uint64_t, 6> words{{
+      0x4400000000008001ull, 0x0000000000005510ull,
+      0x0000000000000006ull, 0xFF332211ull,
+      0x0000000000100010ull, 0x0000000001100110ull,
+  }};
+  std::vector<std::uint8_t> packet(sizeof(words));
+  std::memcpy(packet.data(), words.data(), packet.size());
+  ps2vita::Gs gs;
+  gs.clear(0u);
+  ps2vita::Gif gif(gs);
+  check(gif.submit(packet.data(), packet.size()) &&
+        gif.reglist_tags() == 1u && gif.packets_rejected() == 0u,
+        "GIF frontend consumes a complete REGLIST tag");
+  check(gs.pixel(0, 0) == 0xFF332211u && gs.pixel(3, 3) == 0xFF332211u &&
+        gs.pixel(4, 4) == 0u,
+        "GIF REGLIST registers emit a masked quarter-scale sprite");
 }
 
 void put16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
@@ -1928,6 +1961,7 @@ int main() {
   test_quarter_scale_gs();
   test_gif_normal_dma_completion();
   test_captured_bios_gif_sprite();
+  test_gif_reglist_sprite();
   test_elf_and_emulator();
   test_phase0_aot_contract();
   if (failures) return EXIT_FAILURE;

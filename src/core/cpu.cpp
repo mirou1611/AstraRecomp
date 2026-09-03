@@ -72,6 +72,15 @@ std::uint64_t packed_subtract_bytes(std::uint64_t lhs, std::uint64_t rhs) {
   return result;
 }
 
+std::uint64_t packed_subtract_words(std::uint64_t lhs, std::uint64_t rhs) {
+  const auto low = static_cast<std::uint32_t>(lhs) -
+                   static_cast<std::uint32_t>(rhs);
+  const auto high = static_cast<std::uint32_t>(lhs >> 32) -
+                    static_cast<std::uint32_t>(rhs >> 32);
+  return static_cast<std::uint64_t>(low) |
+         (static_cast<std::uint64_t>(high) << 32);
+}
+
 } // namespace
 
 Cpu::Cpu(Memory& memory) : memory_(memory) {}
@@ -810,6 +819,12 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
       if (rd != 0) {
         state_.gpr[rd] = packed_subtract_bytes(rsv, rtv);
         state_.gpr_hi[rd] = packed_subtract_bytes(
+            state_.gpr_hi[rs], state_.gpr_hi[rt]);
+      }
+    } else if (fn == 0x08 && sub == 0x01) { // PSUBW
+      if (rd != 0) {
+        state_.gpr[rd] = packed_subtract_words(rsv, rtv);
+        state_.gpr_hi[rd] = packed_subtract_words(
             state_.gpr_hi[rs], state_.gpr_hi[rt]);
       }
     } else if (fn == 0x09 && sub == 0x08) { // PMFHI

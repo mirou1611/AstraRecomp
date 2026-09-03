@@ -15,7 +15,12 @@ public:
   void reset();
   bool submit(const std::uint8_t* data, std::size_t size);
   std::uint64_t packets_submitted() const { return packets_submitted_; }
+  std::uint64_t packets_rejected() const { return packets_rejected_; }
   std::uint64_t sprites_emitted() const { return sprites_emitted_; }
+  std::uint64_t packed_tags() const { return packed_tags_; }
+  std::uint64_t reglist_tags() const { return reglist_tags_; }
+  std::uint64_t image_tags() const { return image_tags_; }
+  std::uint64_t first_unsupported_tag() const { return first_unsupported_tag_; }
 
 private:
   void write_register(std::uint8_t address, std::uint64_t value);
@@ -30,7 +35,12 @@ private:
   std::uint64_t first_xyz2_ = 0;
   bool have_first_xyz2_ = false;
   std::uint64_t packets_submitted_ = 0;
+  std::uint64_t packets_rejected_ = 0;
   std::uint64_t sprites_emitted_ = 0;
+  std::uint64_t packed_tags_ = 0;
+  std::uint64_t reglist_tags_ = 0;
+  std::uint64_t image_tags_ = 0;
+  std::uint64_t first_unsupported_tag_ = 0;
 };
 
 } // namespace ps2vita
