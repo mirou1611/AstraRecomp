@@ -7,7 +7,6 @@ interpreter exits rather than silently receiving guessed semantics.
 """
 
 import argparse
-import hashlib
 import re
 import struct
 from dataclasses import dataclass
@@ -15,8 +14,11 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from astrair.builder import build_data_instruction
+from astrair.analysis_effects import is_hard_barrier
 from astrair.analysis_width import infer_block_results
 from astrair.ir import Instruction, Op
+from astrair.profile import load_execution_profile, source_fingerprint
+from astrair.trace import BlockProfile, form_direct_traces, serialize_trace_plan
 
 
 @dataclass
@@ -504,12 +506,11 @@ def generate(paths: List[Path], package_name: str,
              deferred_writeback: bool = False) -> str:
     all_words: Dict[int, int] = {}
     entries: List[int] = []
-    digest = hashlib.sha256()
+    source_blobs = []
     for path in paths:
         entry, words, blob = read_elf(path)
         entries.append(entry)
-        digest.update(struct.pack("<Q", len(blob)))
-        digest.update(blob)
+        source_blobs.append(blob)
         overlap = set(all_words).intersection(words)
         if overlap:
             raise ValueError(f"{path}: overlaps another ELF at 0x{min(overlap):08x}")
@@ -555,7 +556,7 @@ def generate(paths: List[Path], package_name: str,
         "  kAotAbiVersion,",
         f"  0x{guest_min:08x}u,",
         f"  0x{guest_max:08x}u,",
-        f'  "{digest.hexdigest()}",',
+        f'  "{source_fingerprint(source_blobs)}",',
         "};",
         "} // namespace",
         "",
@@ -566,16 +567,90 @@ def generate(paths: List[Path], package_name: str,
     return "\n".join(lines)
 
 
+def _static_trace_inputs(functions: List[Function], words: Dict[int, int]):
+    direct_successors = {}
+    hard_barriers = set()
+    for function in functions:
+        successors = set()
+        if function.direct_fallthrough:
+            successors.add(function.end)
+        pc = function.start
+        while pc < function.end:
+            word = words[pc]
+            instruction = build_data_instruction(pc, word)
+            if instruction is not None and is_hard_barrier(instruction):
+                hard_barriers.add(function.start)
+            op = opcode(word)
+            if op in (0x02, 0x03):
+                successors.add(jump_target(pc, word))
+                break
+            if op in (0x04, 0x05):
+                successors.update((branch_target(pc, word), pc + 8))
+                break
+            if is_jr(word) or is_break(word) or instruction is None:
+                break
+            pc += 4
+        direct_successors[function.start] = frozenset(successors)
+    return direct_successors, hard_barriers
+
+
+def generate_trace_plan(paths: List[Path], census_path: Path,
+                        minimum_probability: float = 0.90,
+                        maximum_blocks: int = 128) -> str:
+    """Build metadata only; profile input never changes generated C++ here."""
+    all_words: Dict[int, int] = {}
+    entries = []
+    blobs = []
+    for path in paths:
+        entry, words, blob = read_elf(path)
+        overlap = set(all_words).intersection(words)
+        if overlap:
+            raise ValueError(f"{path}: overlaps another ELF at 0x{min(overlap):08x}")
+        entries.append(entry)
+        blobs.append(blob)
+        all_words.update(words)
+    fingerprint = source_fingerprint(blobs)
+    profile = load_execution_profile(census_path, fingerprint)
+    functions = discover(entries, all_words)
+    direct_successors, hard_barriers = _static_trace_inputs(functions, all_words)
+    known_blocks = {function.start for function in functions}
+    blocks = (
+        BlockProfile(block.pc, block.entries, block.pc in hard_barriers)
+        for block in profile.blocks if block.pc in known_blocks
+    )
+    edges = (
+        edge for edge in profile.edges
+        if edge.source in known_blocks and edge.target in known_blocks
+    )
+    traces = form_direct_traces(
+        blocks, edges, direct_successors, minimum_probability, maximum_blocks
+    )
+    return serialize_trace_plan(traces, fingerprint)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--package-name", default="phase0-generated-v1")
     parser.add_argument("--defer-gpr-writeback", action="store_true")
+    parser.add_argument("--execution-census", type=Path)
+    parser.add_argument("--trace-plan-output", type=Path)
+    parser.add_argument("--trace-minimum-probability", type=float, default=0.90)
+    parser.add_argument("--trace-maximum-blocks", type=int, default=128)
     parser.add_argument("elf", nargs="+", type=Path)
     args = parser.parse_args()
+    if bool(args.execution_census) != bool(args.trace_plan_output):
+        parser.error("--execution-census and --trace-plan-output must be used together")
     result = generate(args.elf, args.package_name, args.defer_gpr_writeback)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(result, encoding="utf-8", newline="\n")
+    if args.execution_census:
+        trace_plan = generate_trace_plan(
+            args.elf, args.execution_census,
+            args.trace_minimum_probability, args.trace_maximum_blocks,
+        )
+        args.trace_plan_output.parent.mkdir(parents=True, exist_ok=True)
+        args.trace_plan_output.write_text(trace_plan, encoding="utf-8", newline="\n")
     print(f"generated {args.output} from {len(args.elf)} ELF input(s)")
 
 

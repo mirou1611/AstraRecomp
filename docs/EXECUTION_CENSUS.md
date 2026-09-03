@@ -151,3 +151,23 @@ Schema version 1 contains block and edge frequencies. Version 2 adds block-entry
 `$sp`/`$gp` ranges and validated indirect targets without changing version-1
 field meanings. Version 3 adds MMIO read aggregation and observed event spacing.
 Later revisions should add register-width observations and DMA-size histograms.
+
+## Compiler identity boundary
+
+Raw BIOS census output remains diagnostic and is not accepted as title-ELF
+optimization input. Before a version-3 census may guide AstraIR trace planning,
+the capture pipeline must bind it to the exact ordered ELF set with this root
+metadata:
+
+```json
+"source": {
+  "kind": "elf-set",
+  "fingerprint_scheme": "sha256-length-prefixed-elf-set-v1",
+  "fingerprint_sha256": "<AOT source fingerprint>"
+}
+```
+
+`tools/generate_astrart.py` recomputes the fingerprint from its ELF inputs and
+fails closed on missing or mismatched metadata. It also intersects the accepted
+profile with its independently recovered static CFG before writing a trace plan.
+The plan is inspectable metadata; profile data does not yet change emitted code.

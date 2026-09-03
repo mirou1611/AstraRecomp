@@ -114,3 +114,30 @@ safety property: a census can observe an indirect destination, but observation
 alone never turns it into a guard-free direct trace edge. Selection is fully
 deterministic. This checkpoint does not yet change emitted functions; a profile
 must first be matched to the exact ELF fingerprint and CFG.
+
+## Fingerprint-bound trace plans
+
+The generator can now consume an execution census only when its `source`
+metadata names the ordered ELF-set fingerprint used by the existing AOT package
+contract:
+
+```json
+"source": {
+  "kind": "elf-set",
+  "fingerprint_scheme": "sha256-length-prefixed-elf-set-v1",
+  "fingerprint_sha256": "<64 lowercase hexadecimal digits>"
+}
+```
+
+The fingerprint hashes each input ELF's little-endian 64-bit byte length and
+bytes, in command-line order. Missing source metadata, a different schema or
+version, malformed addresses/counts, duplicate blocks/edges, and any fingerprint
+mismatch are hard generator errors. In particular, a BIOS-only census cannot be
+silently applied to an unrelated title ELF.
+
+`--execution-census PROFILE.json --trace-plan-output PLAN.json` produces a
+versioned, deterministically sorted JSON plan. Profile blocks and edges absent
+from the generator's recovered CFG are discarded, and an observed edge is
+followed only if static decoding independently proves it direct. Memory and
+other hard-effect blocks terminate a trace. This stage writes review metadata
+only and does not alter generated C++ or runtime dispatch.

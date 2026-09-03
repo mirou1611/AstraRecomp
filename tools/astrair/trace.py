@@ -1,6 +1,7 @@
 """Deterministic profile-guided selection of safe direct AstraIR traces."""
 
 from dataclasses import dataclass
+import json
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Tuple
 
 
@@ -77,3 +78,24 @@ def form_direct_traces(
             current = hottest.target
         traces.append(Trace(tuple(chain), closes_loop))
     return traces
+
+
+def serialize_trace_plan(traces: Iterable[Trace], source_fingerprint: str) -> str:
+    """Return a stable, reviewable plan without changing emitted code."""
+    document = {
+        "schema": "astrarecomp.trace-plan",
+        "version": 1,
+        "source": {
+            "fingerprint_scheme": "sha256-length-prefixed-elf-set-v1",
+            "fingerprint_sha256": source_fingerprint,
+        },
+        "traces": [
+            {
+                "trace_id": index,
+                "blocks": [f"0x{pc:08X}" for pc in trace.blocks],
+                "closes_loop": trace.closes_loop,
+            }
+            for index, trace in enumerate(traces)
+        ],
+    }
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"

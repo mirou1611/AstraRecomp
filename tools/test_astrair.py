@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Contract tests for the minimal AstraIR instruction builder."""
 
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from astrair.builder import build_data_instruction
@@ -8,8 +11,14 @@ from astrair.analysis_effects import is_hard_barrier
 from astrair.analysis_liveness import analyze_block
 from astrair.analysis_width import infer_block_results
 from astrair.ir import Effect, Op, UpperBits, ValueKind
-from generate_astrart import defer_gpr_writeback
-from astrair.trace import BlockProfile, EdgeProfile, form_direct_traces
+from generate_astrart import defer_gpr_writeback, generate_trace_plan
+from make_aot_chain_elf import build as build_chain_elf
+from astrair.profile import (
+    CensusError, FINGERPRINT_SCHEME, load_execution_profile, source_fingerprint,
+)
+from astrair.trace import (
+    BlockProfile, EdgeProfile, Trace, form_direct_traces, serialize_trace_plan,
+)
 
 
 def r_type(rs: int, rt: int, rd: int, sub: int, function: int) -> int:
@@ -215,6 +224,91 @@ class AstraIrBuilderTests(unittest.TestCase):
         traces = form_direct_traces(
             (BlockProfile(0x20, 7), BlockProfile(0x10, 7)), (), {})
         self.assertEqual([trace.blocks for trace in traces], [(0x10,), (0x20,)])
+
+    def test_profile_requires_exact_elf_set_fingerprint(self) -> None:
+        fingerprint = source_fingerprint((b"first", b"second"))
+        document = {
+            "schema": "astrarecomp.execution-census",
+            "version": 3,
+            "source": {
+                "kind": "elf-set",
+                "fingerprint_scheme": FINGERPRINT_SCHEME,
+                "fingerprint_sha256": fingerprint,
+            },
+            "ee": {
+                "blocks": [{"pc": "0x00001000", "entries": 7}],
+                "edges": [],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "census.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            profile = load_execution_profile(path, fingerprint)
+            self.assertEqual(profile.blocks, (BlockProfile(0x1000, 7),))
+            with self.assertRaisesRegex(CensusError, "fingerprint mismatch"):
+                load_execution_profile(path, "0" * 64)
+            del document["source"]
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(CensusError, "source must be an object"):
+                load_execution_profile(path, fingerprint)
+
+    def test_source_fingerprint_is_ordered_and_length_delimited(self) -> None:
+        self.assertNotEqual(
+            source_fingerprint((b"a", b"bc")),
+            source_fingerprint((b"ab", b"c")),
+        )
+        self.assertNotEqual(
+            source_fingerprint((b"first", b"second")),
+            source_fingerprint((b"second", b"first")),
+        )
+
+    def test_trace_plan_serialization_is_deterministic(self) -> None:
+        traces = (Trace((0x1000, 0x1010), True), Trace((0x2000,), False))
+        first = serialize_trace_plan(traces, "a" * 64)
+        second = serialize_trace_plan(traces, "a" * 64)
+        self.assertEqual(first, second)
+        document = json.loads(first)
+        self.assertEqual(document["traces"][0]["blocks"],
+                         ["0x00001000", "0x00001010"])
+        self.assertTrue(document["traces"][0]["closes_loop"])
+
+    def test_generator_builds_plan_only_from_matching_profile_and_static_cfg(self) -> None:
+        elf = build_chain_elf()
+        fingerprint = source_fingerprint((elf,))
+        census = {
+            "schema": "astrarecomp.execution-census",
+            "version": 3,
+            "source": {
+                "kind": "elf-set",
+                "fingerprint_scheme": FINGERPRINT_SCHEME,
+                "fingerprint_sha256": fingerprint,
+            },
+            "ee": {
+                "blocks": [
+                    {"pc": "0x00003000", "entries": 100},
+                    {"pc": "0x00003020", "entries": 100},
+                    {"pc": "0x00003008", "entries": 1},
+                ],
+                "edges": [
+                    {"source": "0x00003000", "target": "0x00003020",
+                     "transitions": 100},
+                    # Observed but indirect JR target: static CFG must reject it.
+                    {"source": "0x00003020", "target": "0x00003008",
+                     "transitions": 100},
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            elf_path = root / "chain.elf"
+            census_path = root / "census.json"
+            elf_path.write_bytes(elf)
+            census_path.write_text(json.dumps(census), encoding="utf-8")
+            plan = json.loads(generate_trace_plan([elf_path], census_path))
+        self.assertEqual(plan["source"]["fingerprint_sha256"], fingerprint)
+        self.assertEqual(plan["traces"][0]["blocks"],
+                         ["0x00003000", "0x00003020"])
+        self.assertEqual(plan["traces"][1]["blocks"], ["0x00003008"])
 
 
 if __name__ == "__main__":
