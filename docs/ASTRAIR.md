@@ -107,13 +107,18 @@ counts, and statically proven direct successors as separate inputs. Starting
 from hottest unowned entries, it follows only a uniquely hottest successor
 whose observed probability meets the configured threshold. It stops at hard
 IR barriers, indirect/unproven targets, ambiguous ties, already-owned blocks,
-and the maximum length. A hot edge back to the entry records a closed loop.
+the maximum length, and any block with more than one statically possible
+successor. A hot edge back to the entry records a closed loop.
 
 Keeping sampled edges separate from the static direct-successor relation is a
 safety property: a census can observe an indirect destination, but observation
 alone never turns it into a guard-free direct trace edge. Selection is fully
 deterministic. This checkpoint does not yet change emitted functions; a profile
 must first be matched to the exact ELF fingerprint and CFG.
+
+Even a 99%-taken conditional branch is not guard-free. It is deliberately left
+at the trace boundary until branch guards and matching deopt maps are consumed
+by an executable trace emitter.
 
 ## Fingerprint-bound trace plans
 

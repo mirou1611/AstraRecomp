@@ -71,7 +71,10 @@ def form_direct_traces(
             total = sum(edge.transitions for edge in candidates)
             if hottest.transitions / total < minimum_probability:
                 break
-            if hottest.target not in direct_successors.get(current, frozenset()):
+            static_targets = direct_successors.get(current, frozenset())
+            # A conditional branch can be highly biased, but following it still
+            # needs a guard and deopt route. This selector is guard-free only.
+            if len(static_targets) != 1 or hottest.target not in static_targets:
                 break
             if hottest.target == chain[0]:
                 closes_loop = True

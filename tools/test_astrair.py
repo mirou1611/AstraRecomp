@@ -194,10 +194,9 @@ class AstraIrBuilderTests(unittest.TestCase):
         traces = form_direct_traces(
             blocks=(BlockProfile(0x1000, 1000), BlockProfile(0x1010, 950),
                     BlockProfile(0x1020, 50)),
-            edges=(EdgeProfile(0x1000, 0x1010, 950),
-                   EdgeProfile(0x1000, 0x1020, 50),
+            edges=(EdgeProfile(0x1000, 0x1010, 1000),
                    EdgeProfile(0x1010, 0x1000, 950)),
-            direct_successors={0x1000: frozenset({0x1010, 0x1020}),
+            direct_successors={0x1000: frozenset({0x1010}),
                                0x1010: frozenset({0x1000})},
         )
         self.assertEqual(traces[0].blocks, (0x1000, 0x1010))
@@ -217,6 +216,12 @@ class AstraIrBuilderTests(unittest.TestCase):
             {1: frozenset({2, 3})},
         )
         self.assertEqual(ambiguous[0].blocks, (1,))
+        biased_conditional = form_direct_traces(
+            (BlockProfile(1, 100), BlockProfile(2, 99), BlockProfile(3, 1)),
+            (EdgeProfile(1, 2, 99), EdgeProfile(1, 3, 1)),
+            {1: frozenset({2, 3})},
+        )
+        self.assertEqual(biased_conditional[0].blocks, (1,))
         indirect = form_direct_traces(
             (BlockProfile(1, 100), BlockProfile(2, 100)),
             (EdgeProfile(1, 2, 100),),
