@@ -4,6 +4,7 @@
 #include "ps2vita/execution_census.hpp"
 #include "ps2vita/gif.hpp"
 #include "ps2vita/vif.hpp"
+#include "ps2vita/vu.hpp"
 
 #include <array>
 #include <cstdint>
@@ -1585,6 +1586,114 @@ void test_vif1_v4_32_unpack() {
         "VIF1 V4-32 UNPACK writes complete vectors at the encoded address");
 }
 
+void test_vu1_captured_prologue() {
+  ps2vita::Memory memory;
+  constexpr std::array<std::uint32_t, 5> lower{{
+      0x10010000u, 0x10020004u, 0x10030016u, 0x420F00C5u,
+      0x8000033Cu,
+  }};
+  for (std::size_t index = 0; index < lower.size(); ++index) {
+    memory.write32(ps2vita::Memory::kVu1MicroBase +
+                   static_cast<std::uint32_t>(index * 8u), lower[index]);
+    memory.write32(ps2vita::Memory::kVu1MicroBase +
+                   static_cast<std::uint32_t>(index * 8u + 4u), 0x000002FFu);
+  }
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 0x648u, 0x81E8137Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 0x64Cu, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1DataBase + 4u * 16u, 0xDEADBEEFu);
+
+  ps2vita::Vu1 vu(memory);
+  vu.start(0u);
+  vu.run(6u);
+  check(vu.state().vi[1] == 0u && vu.state().vi[2] == 5u &&
+        vu.state().vi[3] == 0x16u && vu.state().vi[15] == 5u,
+        "VU1 executes captured IADDIU/BAL prologue and its delay slot");
+  check(vu.state().vf[8][0] == 0xDEADBEEFu && vu.state().pc == 0x650u,
+        "VU1 BAL reaches the captured routine and LQI loads masked data");
+}
+
+void test_vu1_captured_matrix_pair() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01E821BCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x01E828BDu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 16u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 20u, 0x01E830BEu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 24u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 28u, 0x01E83B0Bu);
+
+  ps2vita::Vu1 vu(memory);
+  auto& state = vu.state();
+  state.vf[4] = {{0x3F800000u, 0x40000000u, 0x40400000u, 0x40800000u}};
+  state.vf[5] = state.vf[4];
+  state.vf[6] = state.vf[4];
+  state.vf[7] = state.vf[4];
+  state.vf[8] = {{0x40000000u, 0x40400000u, 0x40800000u, 0x3F800000u}};
+  vu.start(0u);
+  vu.run(4u);
+  check(vu.pairs_executed() == 4u &&
+        state.vf[12][0] == 0x41200000u && // 1*2 + 1*3 + 1*4 + 1*1
+        state.vf[12][3] == 0x42200000u,   // 4*2 + 4*3 + 4*4 + 4*1
+        "VU1 executes the captured MULAx/MADDAy/MADDAz/MADDw dot product");
+}
+
+void test_vu1_sqi() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x81E3637Du);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[3] = 7u;
+  vu.state().vf[12] = {{1u, 2u, 3u, 4u}};
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vi[3] == 8u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 7u * 16u) == 1u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 7u * 16u + 12u) == 4u,
+        "VU1 SQI stores selected lanes and increments its address register");
+}
+
+void test_vu1_xgkick_packet() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800016FCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  const auto packet_address = ps2vita::Memory::kVu1DataBase + 4u * 16u;
+  memory.write64(packet_address, (1ull << 60) | (1ull << 15) | 1ull);
+  memory.write64(packet_address + 8u, 0xEull);
+  memory.write64(packet_address + 16u, 0x0123456789ABCDEFull);
+  memory.write64(packet_address + 24u, 0xFEDCBA9876543210ull);
+
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[2] = 4u;
+  vu.start(0u);
+  vu.run(1u);
+  std::vector<std::uint8_t> packet;
+  std::uint64_t payload = 0;
+  check(vu.pop_path1_packet(packet) && packet.size() == 32u,
+        "VU1 XGKICK snapshots one complete EOP GIF packet");
+  if (packet.size() == 32u) std::memcpy(&payload, packet.data() + 16u, 8u);
+  check(payload == 0x0123456789ABCDEFull,
+        "VU1 XGKICK preserves path-1 GIF payload bytes");
+}
+
+void test_vu1_end_and_resume() {
+  ps2vita::Memory memory;
+  for (unsigned pair = 0; pair < 3u; ++pair) {
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pair * 8u, 0x8000033Cu);
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pair * 8u + 4u,
+                   pair == 0u ? 0x400002FFu : 0x000002FFu);
+  }
+  ps2vita::Vu1 vu(memory);
+  vu.start(0u);
+  vu.run(10u);
+  check(!vu.running() && vu.pairs_executed() == 2u && vu.state().pc == 0x10u,
+        "VU1 E bit stops after exactly one delay pair");
+  vu.resume();
+  vu.run(1u);
+  check(vu.running() && vu.pairs_executed() == 3u && vu.state().pc == 0x18u,
+        "VU1 MSCNT-style resume continues at the retained TPC");
+}
+
 void test_captured_bios_gif_sprite() {
   // First packet emitted by the retail BIOS after CDVD/SIF initialization.
   constexpr std::array<std::array<std::uint64_t, 2>, 15> qwords{{
@@ -2051,6 +2160,11 @@ int main() {
   test_vif1_source_chain_completion();
   test_vif1_mpg_upload();
   test_vif1_v4_32_unpack();
+  test_vu1_captured_prologue();
+  test_vu1_captured_matrix_pair();
+  test_vu1_sqi();
+  test_vu1_xgkick_packet();
+  test_vu1_end_and_resume();
   test_captured_bios_gif_sprite();
   test_gif_reglist_sprite();
   test_elf_and_emulator();

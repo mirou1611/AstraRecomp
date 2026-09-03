@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ps2vita/memory.hpp"
+#include "ps2vita/vu.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +12,7 @@ namespace ps2vita {
 // class consumes the resulting word stream and updates VU1-visible state.
 class Vif1 {
 public:
-  explicit Vif1(Memory& memory) : memory_(memory) {}
+  explicit Vif1(Memory& memory) : memory_(memory), vu1_(memory) {}
   void reset();
   bool submit(const std::uint8_t* data, std::size_t size);
 
@@ -25,9 +26,12 @@ public:
     return first_unsupported_code_;
   }
   std::uint16_t cycle() const { return cycle_; }
+  Vu1& vu1() { return vu1_; }
+  const Vu1& vu1() const { return vu1_; }
 
 private:
   Memory& memory_;
+  Vu1 vu1_;
   std::uint64_t packets_submitted_ = 0;
   std::uint64_t packets_rejected_ = 0;
   std::uint64_t micro_instructions_loaded_ = 0;

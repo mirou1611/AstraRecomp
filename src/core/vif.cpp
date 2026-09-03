@@ -14,6 +14,7 @@ std::uint32_t load32(const std::uint8_t* data) {
 } // namespace
 
 void Vif1::reset() {
+  vu1_.reset();
   packets_submitted_ = 0;
   packets_rejected_ = 0;
   micro_instructions_loaded_ = 0;
@@ -42,6 +43,16 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
     if (opcode == 0x20u) { // STMASK
       if (cursor + 4u > size) { ++packets_rejected_; return false; }
       cursor += 4u;
+      continue;
+    }
+    if (opcode == 0x14u || opcode == 0x15u) { // MSCAL / MSCALF
+      vu1_.start(static_cast<std::uint16_t>((code & 0x3FFu) * 8u));
+      vu1_.run(100000u);
+      continue;
+    }
+    if (opcode == 0x17u) { // MSCNT: continue at the current VU1 TPC.
+      vu1_.resume();
+      vu1_.run(100000u);
       continue;
     }
     if (opcode == 0x30u || opcode == 0x31u) { // STROW / STCOL

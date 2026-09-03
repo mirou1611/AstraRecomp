@@ -99,6 +99,7 @@ add_library(ps2core
   src/core/iop_cpu.cpp
   src/core/memory.cpp
   src/core/vif.cpp
+  src/core/vu.cpp
 )
 if(ASTRART_DIRECT_TRACES)
   target_compile_definitions(ps2core PUBLIC PS2VITA_ASTRART_DIRECT_TRACES=1)

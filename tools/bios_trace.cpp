@@ -835,6 +835,40 @@ int main(int argc, char** argv) {
           emulator.vif1().micro_instructions_loaded()),
       static_cast<unsigned long long>(emulator.vif1().vectors_unpacked()),
       emulator.vif1().first_unsupported_code());
+  std::printf("vu1_pairs=%llu running=%u pc=%04X unsupported_lower=%08X "
+              "unsupported_upper=%08X kick_address=%04X kick_tag=%016llX "
+              "path1_tags=%llu/%llu\n",
+      static_cast<unsigned long long>(emulator.vif1().vu1().pairs_executed()),
+      emulator.vif1().vu1().running() ? 1u : 0u,
+      emulator.vif1().vu1().state().pc,
+      emulator.vif1().vu1().first_unsupported_lower(),
+      emulator.vif1().vu1().first_unsupported_upper(),
+      emulator.vif1().vu1().last_kick_address(),
+      static_cast<unsigned long long>(emulator.vif1().vu1().last_kick_tag()),
+      static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_queued()),
+      static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_rejected()));
+  std::puts("VU1 data around XGKICK:");
+  const auto kick_address = emulator.vif1().vu1().last_kick_address();
+  for (unsigned qword = 0; qword < 16u; ++qword) {
+    const auto offset = static_cast<std::uint16_t>(kick_address + qword * 16u);
+    const auto address = ps2vita::Memory::kVu1DataBase + (offset & 0x3FFFu);
+    std::printf("%04X  %016llX %016llX\n", offset & 0x3FFFu,
+        static_cast<unsigned long long>(emulator.memory().read64(address)),
+        static_cast<unsigned long long>(emulator.memory().read64(address + 8u)));
+  }
+  if (emulator.vif1().micro_instructions_loaded() != 0u) {
+    std::puts("VU1 microprogram upload:");
+    const auto count = std::min<std::uint64_t>(
+        emulator.vif1().micro_instructions_loaded(), 256u);
+    for (std::uint64_t index = 0; index < count; ++index) {
+      const auto address = ps2vita::Memory::kVu1MicroBase +
+          static_cast<std::uint32_t>(index * 8u);
+      std::printf("%04llX  %08X %08X\n",
+          static_cast<unsigned long long>(index * 8u),
+          emulator.memory().read32(address),
+          emulator.memory().read32(address + 4u));
+    }
+  }
   std::printf("ee_sif0 chcr=%08X madr=%08X qwc=%08X tadr=%08X\n",
       emulator.memory().read32(0x1000C000u),
       emulator.memory().read32(0x1000C010u),

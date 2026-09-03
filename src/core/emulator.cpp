@@ -81,6 +81,8 @@ void Emulator::service_graphics() {
     gif_.submit(packet.data(), packet.size());
   while (memory_.pop_vif1_packet(packet))
     vif1_.submit(packet.data(), packet.size());
+  while (vif1_.vu1().pop_path1_packet(packet))
+    gif_.submit(packet.data(), packet.size());
 }
 
 void Emulator::reset() {
