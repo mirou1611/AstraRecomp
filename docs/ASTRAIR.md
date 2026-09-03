@@ -159,3 +159,24 @@ state, a trace-local value, or a constant. Validation rejects missing/duplicate
 map IDs, duplicate register-half recoveries, invalid registers or widths, and
 inconsistent side exits before serialization. No speculative trace is emitted;
 this establishes the reconstruction contract first.
+
+## Executable guard-free wrappers
+
+`ASTRART_DIRECT_TRACES=ON` now lets an exactly matched trace plan replace a
+trace-entry table function with a generated wrapper. The wrapper calls each
+already-generated block directly, verifies every intermediate exit is the
+unique expected `Direct` target, accumulates guest-instruction counts, and
+returns any unexpected exit immediately. Intermediate blocks retain their own
+table entries so interpreter fallback or future deoptimization can resume there.
+
+The default is `OFF`. The build creates a deterministic fingerprint-bound oracle
+census and trace plan for the synthetic two-block call chain, allowing both modes
+to compile and run through the full C++ differential suite. In trace mode, one
+dispatch-budget unit advances from `0x3000` through `0x3020` to return site
+`0x3008` while preserving the same five retired instructions and architectural
+state.
+
+This first executable form removes the dispatcher lookup between proven blocks,
+but deliberately retains each block's normal commit path. It is a correctness
+checkpoint, not yet cross-block register/state fusion and not yet a Vita speedup
+claim. Guarded conditional traces remain rejected.

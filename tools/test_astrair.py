@@ -15,7 +15,9 @@ from astrair.deopt import (
     validate_deopt_metadata,
 )
 from astrair.ir import Effect, Op, UpperBits, ValueKind
-from generate_astrart import defer_gpr_writeback, generate_trace_plan
+from generate_astrart import (
+    defer_gpr_writeback, generate, generate_trace_plan, select_direct_traces,
+)
 from make_aot_chain_elf import build as build_chain_elf
 from astrair.profile import (
     CensusError, FINGERPRINT_SCHEME, load_execution_profile, source_fingerprint,
@@ -341,6 +343,56 @@ class AstraIrBuilderTests(unittest.TestCase):
         self.assertEqual(plan["traces"][0]["blocks"],
                          ["0x00003000", "0x00003020"])
         self.assertEqual(plan["traces"][1]["blocks"], ["0x00003008"])
+
+    def test_generator_emits_only_validated_guard_free_trace_wrappers(self) -> None:
+        elf = build_chain_elf()
+        fingerprint = source_fingerprint((elf,))
+        census = {
+            "schema": "astrarecomp.execution-census",
+            "version": 3,
+            "source": {
+                "kind": "elf-set",
+                "fingerprint_scheme": FINGERPRINT_SCHEME,
+                "fingerprint_sha256": fingerprint,
+            },
+            "ee": {
+                "blocks": [
+                    {"pc": "0x00003000", "entries": 100},
+                    {"pc": "0x00003020", "entries": 100},
+                ],
+                "edges": [
+                    {"source": "0x00003000", "target": "0x00003020",
+                     "transitions": 100},
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            elf_path = root / "chain.elf"
+            census_path = root / "census.json"
+            elf_path.write_bytes(elf)
+            census_path.write_text(json.dumps(census), encoding="utf-8")
+            traces, _ = select_direct_traces([elf_path], census_path)
+            traces = tuple(trace for trace in traces if len(trace.blocks) >= 2)
+            generated = generate([elf_path], "trace-test", True, traces)
+        self.assertIn("AotExit generated_trace_00003000", generated)
+        self.assertIn("exit_0.target != 0x00003020u", generated)
+        self.assertIn(
+            "{0x00003000u, 0x00003008u, generated_trace_00003000}", generated
+        )
+        self.assertIn(
+            "{0x00003020u, 0x0000302cu, generated_00003020}", generated
+        )
+
+        guarded = Trace(
+            (0x3000, 0x3020), False,
+            (Guard(GuardKind.BRANCH_DIRECTION, 0x3000, 1, 0x3020, 0),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "chain.elf"
+            path.write_bytes(elf)
+            with self.assertRaisesRegex(ValueError, "guarded traces"):
+                generate([path], "trace-test", True, (guarded,))
 
 
 if __name__ == "__main__":

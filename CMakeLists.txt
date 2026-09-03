@@ -8,6 +8,8 @@ project(ps2vita LANGUAGES C CXX)
 
 option(ASTRART_DEFER_GPR_WRITEBACK
        "Cache low GPRs and flush dirty values at generated exits" ON)
+option(ASTRART_DIRECT_TRACES
+       "Enable fingerprint-bound guard-free direct trace wrappers" OFF)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -26,12 +28,18 @@ set(ASTRART_HOT_SCALAR_ELF "${ASTRART_GENERATED_DIR}/aot-hot-scalars.elf")
 set(ASTRART_BENCHMARK_ELF "${ASTRART_GENERATED_DIR}/aot-benchmark.elf")
 set(ASTRART_BENCHMARK_HEADER "${ASTRART_GENERATED_DIR}/aot_benchmark_program.hpp")
 set(ASTRART_PHASE0_CPP "${ASTRART_GENERATED_DIR}/phase0_aot_package.cpp")
+set(ASTRART_ORACLE_CENSUS "${ASTRART_GENERATED_DIR}/aot-oracle-census.json")
+set(ASTRART_TRACE_PLAN "${ASTRART_GENERATED_DIR}/aot-trace-plan.json")
 set(ASTRART_OPTIMIZATION_ARGS)
 if(ASTRART_DEFER_GPR_WRITEBACK)
   list(APPEND ASTRART_OPTIMIZATION_ARGS --defer-gpr-writeback)
 endif()
+if(ASTRART_DIRECT_TRACES)
+  list(APPEND ASTRART_OPTIMIZATION_ARGS --enable-direct-traces)
+endif()
 add_custom_command(
   OUTPUT "${ASTRART_PHASE0_CPP}" "${ASTRART_BENCHMARK_HEADER}"
+         "${ASTRART_ORACLE_CENSUS}" "${ASTRART_TRACE_PLAN}"
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${ASTRART_GENERATED_DIR}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_smoke_elf.py" "${ASTRART_SMOKE_ELF}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_chain_elf.py" "${ASTRART_CHAIN_ELF}"
@@ -43,8 +51,17 @@ add_custom_command(
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_benchmark_elf.py"
           "${ASTRART_BENCHMARK_ELF}" --header "${ASTRART_BENCHMARK_HEADER}"
   COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+          "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_aot_census.py"
+          --output "${ASTRART_ORACLE_CENSUS}"
+          "${ASTRART_SMOKE_ELF}" "${ASTRART_CHAIN_ELF}"
+          "${ASTRART_MEMORY_ELF}" "${ASTRART_UNSUPPORTED_ELF}"
+          "${ASTRART_BRANCH_ELF}" "${ASTRART_BNE_ELF}"
+          "${ASTRART_HOT_SCALAR_ELF}" "${ASTRART_BENCHMARK_ELF}"
+  COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
           "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_astrart.py"
           --output "${ASTRART_PHASE0_CPP}"
+          --execution-census "${ASTRART_ORACLE_CENSUS}"
+          --trace-plan-output "${ASTRART_TRACE_PLAN}"
           ${ASTRART_OPTIMIZATION_ARGS}
           "${ASTRART_SMOKE_ELF}" "${ASTRART_CHAIN_ELF}"
           "${ASTRART_MEMORY_ELF}" "${ASTRART_UNSUPPORTED_ELF}"
@@ -61,6 +78,7 @@ add_custom_command(
     tools/astrair/deopt.py
     tools/astrair/profile.py
     tools/astrair/trace.py
+    tools/make_aot_census.py
     tools/make_smoke_elf.py
     tools/make_aot_chain_elf.py
     tools/make_aot_memory_elf.py
@@ -80,6 +98,9 @@ add_library(ps2core
   src/core/iop_cpu.cpp
   src/core/memory.cpp
 )
+if(ASTRART_DIRECT_TRACES)
+  target_compile_definitions(ps2core PUBLIC PS2VITA_ASTRART_DIRECT_TRACES=1)
+endif()
 if(NOT VITA)
   target_sources(ps2core PRIVATE src/core/execution_census.cpp)
 endif()

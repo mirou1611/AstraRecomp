@@ -1495,9 +1495,15 @@ void test_phase0_aot_contract() {
   bounded_state.pc = 0x3000u;
   const auto bounded =
       ps2vita::dispatch_phase0_aot(bounded_memory, bounded_state, 1u);
+#if defined(PS2VITA_ASTRART_DIRECT_TRACES)
+  check(bounded.kind == ps2vita::AotExitKind::Interpreter &&
+            bounded.target == 0x3008u && bounded.instructions == 5u,
+        "direct trace batches proven blocks within one dispatch budget");
+#else
   check(bounded.kind == ps2vita::AotExitKind::Interpreter &&
             bounded.target == 0x3020u && bounded.instructions == 2u,
         "AOT dispatch budget yields safely to interpreter");
+#endif
 
   const auto result = ps2vita::run_phase0_aot_probe();
   check(result.matched, "Phase-0 interpreter/AOT contract matches");

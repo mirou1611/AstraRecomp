@@ -18,7 +18,7 @@ from astrair.analysis_effects import is_hard_barrier
 from astrair.analysis_width import infer_block_results
 from astrair.ir import Instruction, Op
 from astrair.profile import load_execution_profile, source_fingerprint
-from astrair.trace import BlockProfile, form_direct_traces, serialize_trace_plan
+from astrair.trace import BlockProfile, Trace, form_direct_traces, serialize_trace_plan
 
 
 @dataclass
@@ -502,8 +502,61 @@ def emit_function(function: Function, words: Dict[int, int],
     return defer_gpr_writeback(lines) if deferred_writeback else lines
 
 
+def _validate_direct_traces(traces: Iterable[Trace], functions: List[Function],
+                            words: Dict[int, int]) -> List[Trace]:
+    traces = sorted(traces, key=lambda trace: trace.blocks[0] if trace.blocks else -1)
+    known = {function.start for function in functions}
+    direct_successors, hard_barriers = _static_trace_inputs(functions, words)
+    owned = set()
+    for trace in traces:
+        if len(trace.blocks) < 2:
+            raise ValueError("executable direct traces must contain at least two blocks")
+        if trace.guards:
+            raise ValueError("guarded traces are not executable yet")
+        for block in trace.blocks:
+            if block not in known:
+                raise ValueError(f"trace block 0x{block:08x} is not a generated entry")
+            if block in owned:
+                raise ValueError(f"trace block 0x{block:08x} has multiple owners")
+            owned.add(block)
+        for source, target in zip(trace.blocks, trace.blocks[1:]):
+            if source in hard_barriers:
+                raise ValueError(f"trace crosses hard barrier at 0x{source:08x}")
+            if direct_successors.get(source) != frozenset({target}):
+                raise ValueError(
+                    f"trace edge 0x{source:08x} -> 0x{target:08x} is not uniquely direct"
+                )
+    return traces
+
+
+def _emit_trace_wrapper(trace: Trace) -> List[str]:
+    name = f"generated_trace_{trace.blocks[0]:08x}"
+    lines = [
+        f"AotExit {name}(Memory& memory, CpuState& state) {{",
+        "  std::uint32_t total = 0;",
+    ]
+    for index, block in enumerate(trace.blocks):
+        lines.append(f"  AotExit exit_{index} = generated_{block:08x}(memory, state);")
+        lines.append(f"  total += exit_{index}.instructions;")
+        if index + 1 < len(trace.blocks):
+            target = trace.blocks[index + 1]
+            lines.append(
+                f"  if (exit_{index}.kind != AotExitKind::Direct || "
+                f"exit_{index}.target != 0x{target:08x}u) {{"
+            )
+            lines.append(f"    exit_{index}.instructions = total;")
+            lines.append(f"    return exit_{index};")
+            lines.append("  }")
+        else:
+            lines.append(f"  exit_{index}.instructions = total;")
+            lines.append(f"  return exit_{index};")
+    lines.append("}")
+    return lines
+
+
 def generate(paths: List[Path], package_name: str,
-             deferred_writeback: bool = False) -> str:
+             deferred_writeback: bool = False,
+             direct_traces: Iterable[Trace] = ()) -> str:
     all_words: Dict[int, int] = {}
     entries: List[int] = []
     source_blobs = []
@@ -516,6 +569,8 @@ def generate(paths: List[Path], package_name: str,
             raise ValueError(f"{path}: overlaps another ELF at 0x{min(overlap):08x}")
         all_words.update(words)
     functions = discover(entries, all_words)
+    direct_traces = _validate_direct_traces(direct_traces, functions, all_words)
+    trace_entries = {trace.blocks[0] for trace in direct_traces}
     ranges = [(function.start, function.end, function.start)
               for function in functions]
     guest_min = min(item[0] for item in ranges)
@@ -544,9 +599,14 @@ def generate(paths: List[Path], package_name: str,
     for function in functions:
         lines.extend(emit_function(function, all_words, deferred_writeback))
         lines.append("")
+    for trace in direct_traces:
+        lines.extend(_emit_trace_wrapper(trace))
+        lines.append("")
     lines.append("constexpr AotFunctionEntry kGeneratedEntries[] = {")
     for start, end, owner in ranges:
-        lines.append(f"  {{0x{start:08x}u, 0x{end:08x}u, generated_{owner:08x}}},")
+        function_name = (f"generated_trace_{owner:08x}"
+                         if start in trace_entries else f"generated_{owner:08x}")
+        lines.append(f"  {{0x{start:08x}u, 0x{end:08x}u, {function_name}}},")
     lines.extend([
         "};",
         "constexpr AotPackage kGeneratedPackage = {",
@@ -594,10 +654,9 @@ def _static_trace_inputs(functions: List[Function], words: Dict[int, int]):
     return direct_successors, hard_barriers
 
 
-def generate_trace_plan(paths: List[Path], census_path: Path,
-                        minimum_probability: float = 0.90,
-                        maximum_blocks: int = 128) -> str:
-    """Build metadata only; profile input never changes generated C++ here."""
+def select_direct_traces(paths: List[Path], census_path: Path,
+                         minimum_probability: float = 0.90,
+                         maximum_blocks: int = 128) -> Tuple[List[Trace], str]:
     all_words: Dict[int, int] = {}
     entries = []
     blobs = []
@@ -625,6 +684,16 @@ def generate_trace_plan(paths: List[Path], census_path: Path,
     traces = form_direct_traces(
         blocks, edges, direct_successors, minimum_probability, maximum_blocks
     )
+    return traces, fingerprint
+
+
+def generate_trace_plan(paths: List[Path], census_path: Path,
+                        minimum_probability: float = 0.90,
+                        maximum_blocks: int = 128) -> str:
+    """Build deterministic review metadata from a bound execution census."""
+    traces, fingerprint = select_direct_traces(
+        paths, census_path, minimum_probability, maximum_blocks
+    )
     return serialize_trace_plan(traces, fingerprint)
 
 
@@ -637,11 +706,23 @@ def main() -> None:
     parser.add_argument("--trace-plan-output", type=Path)
     parser.add_argument("--trace-minimum-probability", type=float, default=0.90)
     parser.add_argument("--trace-maximum-blocks", type=int, default=128)
+    parser.add_argument("--enable-direct-traces", action="store_true")
     parser.add_argument("elf", nargs="+", type=Path)
     args = parser.parse_args()
     if bool(args.execution_census) != bool(args.trace_plan_output):
         parser.error("--execution-census and --trace-plan-output must be used together")
-    result = generate(args.elf, args.package_name, args.defer_gpr_writeback)
+    traces = ()
+    if args.enable_direct_traces:
+        if not args.execution_census:
+            parser.error("--enable-direct-traces requires --execution-census")
+        traces, _ = select_direct_traces(
+            args.elf, args.execution_census,
+            args.trace_minimum_probability, args.trace_maximum_blocks,
+        )
+        traces = tuple(trace for trace in traces if len(trace.blocks) >= 2)
+    result = generate(
+        args.elf, args.package_name, args.defer_gpr_writeback, traces
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(result, encoding="utf-8", newline="\n")
     if args.execution_census:
