@@ -796,6 +796,28 @@ int main(int argc, char** argv) {
         static_cast<unsigned long long>(graphics_dma_first_step[channel]),
         graphics_dma_first_pc[channel]);
   }
+  const auto vif1_tadr = emulator.memory().read32(0x10009030u) & 0x0FFFFFF0u;
+  std::printf("EE VIF1 chain at %08X (first 8 qwords):\n", vif1_tadr);
+  for (std::uint32_t qword = 0; qword < 8u; ++qword) {
+    const auto address = vif1_tadr + qword * 16u;
+    std::printf("%08X  %016llX %016llX\n", address,
+        static_cast<unsigned long long>(emulator.memory().read64(address + 8u)),
+        static_cast<unsigned long long>(emulator.memory().read64(address)));
+  }
+  std::uint64_t framebuffer_hash = 1469598103934665603ull;
+  std::size_t nonzero_pixels = 0;
+  for (int y = 0; y < ps2vita::Gs::kHeight; ++y) {
+    for (int x = 0; x < ps2vita::Gs::kWidth; ++x) {
+      const auto pixel = emulator.gs().pixel(x, y);
+      if (pixel != 0u) ++nonzero_pixels;
+      framebuffer_hash ^= pixel;
+      framebuffer_hash *= 1099511628211ull;
+    }
+  }
+  std::printf("framebuffer_hash=%016llX nonzero_pixels=%llu/%u\n",
+      static_cast<unsigned long long>(framebuffer_hash),
+      static_cast<unsigned long long>(nonzero_pixels),
+      ps2vita::Gs::kWidth * ps2vita::Gs::kHeight);
   std::printf("gif_packets=%llu rejected=%llu sprites=%llu tags=%llu/%llu/%llu "
               "first_unsupported=%016llX\n",
       static_cast<unsigned long long>(emulator.gif().packets_submitted()),
@@ -805,6 +827,14 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(emulator.gif().reglist_tags()),
       static_cast<unsigned long long>(emulator.gif().image_tags()),
       static_cast<unsigned long long>(emulator.gif().first_unsupported_tag()));
+  std::printf("vif1_packets=%llu rejected=%llu mpg_instructions=%llu "
+              "unpacked_vectors=%llu first_unsupported=%08X\n",
+      static_cast<unsigned long long>(emulator.vif1().packets_submitted()),
+      static_cast<unsigned long long>(emulator.vif1().packets_rejected()),
+      static_cast<unsigned long long>(
+          emulator.vif1().micro_instructions_loaded()),
+      static_cast<unsigned long long>(emulator.vif1().vectors_unpacked()),
+      emulator.vif1().first_unsupported_code());
   std::printf("ee_sif0 chcr=%08X madr=%08X qwc=%08X tadr=%08X\n",
       emulator.memory().read32(0x1000C000u),
       emulator.memory().read32(0x1000C010u),

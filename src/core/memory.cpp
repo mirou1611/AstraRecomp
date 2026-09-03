@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace ps2vita {
 
@@ -152,6 +153,10 @@ void Memory::clear() {
   gif_dma_source_ = 0;
   gif_dma_qwc_ = 0;
   gif_packets_.clear();
+  vif1_cycles_remaining_ = 0;
+  vif1_final_tadr_ = 0;
+  vif1_final_madr_ = 0;
+  vif1_packets_.clear();
   spu2_dma_cycles_remaining_.fill(0);
   spu2_dma_source_.fill(0);
   spu2_dma_target_.fill(0);
@@ -502,6 +507,8 @@ std::uint32_t Memory::cycles_until_next_event() const {
     distance = std::min(distance, sif1_cycles_remaining_);
   if (gif_cycles_remaining_ != 0u)
     distance = std::min(distance, gif_cycles_remaining_);
+  if (vif1_cycles_remaining_ != 0u)
+    distance = std::min(distance, vif1_cycles_remaining_);
 
   // SIF starts are discovered by advance(), so an armed pair with no scheduled
   // countdown can transition on the very next call.
@@ -515,7 +522,70 @@ std::uint32_t Memory::cycles_until_next_event() const {
   const bool gif_armed = gif_cycles_remaining_ == 0u &&
       (gif_chcr & 0x100u) != 0u && (gif_chcr & 0xCu) == 0u &&
       (raw_ee(0xA020u) & 0xFFFFu) != 0u;
-  return sif0_armed || sif1_armed || gif_armed ? 1u : distance;
+  const auto vif1_chcr = raw_ee(0x9000u);
+  const bool vif1_armed = vif1_cycles_remaining_ == 0u &&
+      (vif1_chcr & 0x100u) != 0u && (vif1_chcr & 0xCu) == 0x4u;
+  return sif0_armed || sif1_armed || gif_armed || vif1_armed
+      ? 1u : distance;
+}
+
+bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
+                              std::uint32_t& final_tadr,
+                              std::uint32_t& final_madr,
+                              std::uint32_t& total_qwc) const {
+  auto tadr = read32(0x10009030u) & 0x0FFFFFF0u;
+  const auto chcr = read32(0x10009000u);
+  std::array<std::uint32_t, 2> return_stack{};
+  unsigned return_depth = 0;
+  total_qwc = 0;
+  final_tadr = tadr;
+  final_madr = 0;
+  const auto append = [&](std::uint32_t source, std::size_t bytes) {
+    if (packet == nullptr) return;
+    const auto old_size = packet->size();
+    packet->resize(old_size + bytes);
+    for (std::size_t byte = 0; byte < bytes; ++byte)
+      (*packet)[old_size + byte] = read8(source + static_cast<std::uint32_t>(byte));
+  };
+
+  for (unsigned tag_index = 0; tag_index < 256u; ++tag_index) {
+    if (!valid(tadr, 16u)) return false;
+    const auto tag = read64(tadr);
+    const auto qwc = static_cast<std::uint32_t>(tag & 0xFFFFu);
+    const auto id = static_cast<unsigned>((tag >> 28) & 7u);
+    const auto address = static_cast<std::uint32_t>(tag >> 32) & 0x7FFFFFF0u;
+    const bool inline_data = id == 1u || id == 2u || id >= 5u;
+    const auto source = inline_data ? tadr + 16u : address;
+    const auto bytes = static_cast<std::size_t>(qwc) * 16u;
+    if (!valid(source, bytes) || total_qwc > UINT32_MAX - qwc) return false;
+    if ((chcr & 0x40u) != 0u) append(tadr + 8u, 8u); // TTE tag payload.
+    append(source, bytes);
+    total_qwc += qwc;
+    final_madr = source + static_cast<std::uint32_t>(bytes);
+
+    const bool irq_end = (tag & (1ull << 31)) != 0u &&
+                         (chcr & 0x80u) != 0u;
+    if (id == 0u || id == 7u || irq_end) {
+      final_tadr = inline_data ? source + static_cast<std::uint32_t>(bytes)
+                               : tadr + 16u;
+      return true;
+    }
+    if (id == 1u) tadr = source + static_cast<std::uint32_t>(bytes); // CNT
+    else if (id == 2u) tadr = address; // NEXT
+    else if (id == 3u || id == 4u) tadr += 16u; // REF / REFS
+    else if (id == 5u) { // CALL
+      if (return_depth >= return_stack.size()) return false;
+      return_stack[return_depth++] = source + static_cast<std::uint32_t>(bytes);
+      tadr = address;
+    } else if (id == 6u) { // RET
+      if (return_depth == 0u) return false;
+      tadr = return_stack[--return_depth];
+    } else {
+      return false;
+    }
+    final_tadr = tadr;
+  }
+  return false;
 }
 
 void Memory::advance(std::uint32_t cycles) {
@@ -739,6 +809,26 @@ void Memory::advance(std::uint32_t cycles) {
     }
   }
 
+  if (vif1_cycles_remaining_ != 0u) {
+    if (cycles < vif1_cycles_remaining_) {
+      vif1_cycles_remaining_ -= cycles;
+    } else {
+      vif1_cycles_remaining_ = 0u;
+      std::vector<std::uint8_t> packet;
+      std::uint32_t final_tadr = 0;
+      std::uint32_t final_madr = 0;
+      std::uint32_t total_qwc = 0;
+      if (build_vif1_chain(&packet, final_tadr, final_madr, total_qwc)) {
+        vif1_packets_.push_back(std::move(packet));
+        store_ee(0x9010u, vif1_final_madr_);
+        store_ee(0x9020u, 0u);
+        store_ee(0x9030u, vif1_final_tadr_);
+        store_ee(0x9000u, raw_ee(0x9000u) & ~0x100u);
+        store_ee(0xE010u, raw_ee(0xE010u) | (1u << 1));
+      }
+    }
+  }
+
   if (sif0_cycles_remaining_ != 0u) {
     if (cycles < sif0_cycles_remaining_) {
       sif0_cycles_remaining_ -= cycles;
@@ -936,12 +1026,29 @@ void Memory::advance(std::uint32_t cycles) {
       gif_cycles_remaining_ = qwc * 8u;
     }
   }
+
+  if (vif1_cycles_remaining_ == 0u) {
+    const auto chcr = raw_ee(0x9000u);
+    if ((chcr & 0x100u) != 0u && (chcr & 0xCu) == 0x4u) {
+      std::uint32_t total_qwc = 0;
+      if (build_vif1_chain(nullptr, vif1_final_tadr_, vif1_final_madr_,
+                           total_qwc))
+        vif1_cycles_remaining_ = (total_qwc == 0u ? 1u : total_qwc) * 8u;
+    }
+  }
 }
 
 bool Memory::pop_gif_packet(std::vector<std::uint8_t>& packet) {
   if (gif_packets_.empty()) return false;
   packet = std::move(gif_packets_.front());
   gif_packets_.pop_front();
+  return true;
+}
+
+bool Memory::pop_vif1_packet(std::vector<std::uint8_t>& packet) {
+  if (vif1_packets_.empty()) return false;
+  packet = std::move(vif1_packets_.front());
+  vif1_packets_.pop_front();
   return true;
 }
 

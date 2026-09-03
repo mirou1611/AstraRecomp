@@ -5,6 +5,7 @@
 #include "ps2vita/gif.hpp"
 #include "ps2vita/gs.hpp"
 #include "ps2vita/iop_cpu.hpp"
+#include "ps2vita/vif.hpp"
 
 #include <cstddef>
 
@@ -29,6 +30,7 @@ public:
   Gs& gs() { return gs_; }
   const Gs& gs() const { return gs_; }
   const Gif& gif() const { return gif_; }
+  const Vif1& vif1() const { return vif1_; }
   const ElfLoadResult& image() const { return image_; }
   bool ready() const { return ready_; }
 
@@ -38,6 +40,7 @@ private:
   IopCpu iop_;
   Gs gs_;
   Gif gif_;
+  Vif1 vif1_;
   ElfLoadResult image_{};
   std::uint32_t ee_cycles_until_iop_ = 8u;
   bool ready_ = false;

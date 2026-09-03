@@ -571,6 +571,8 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
       case 0x29: state_.fpr[fd] = as_bits(std::fmin(s, t)); break;
       case 0x30: set_condition(false); break;
       case 0x32: set_condition(!std::isnan(s) && !std::isnan(t) && s == t); break;
+      case 0x34: set_condition(!std::isnan(s) && !std::isnan(t) && s < t); break;
+      case 0x36: set_condition(!std::isnan(s) && !std::isnan(t) && s <= t); break;
       case 0x3C: set_condition(!std::isnan(s) && !std::isnan(t) && s < t); break;
       case 0x3E: set_condition(!std::isnan(s) && !std::isnan(t) && s <= t); break;
       default: return StopReason::InvalidInstruction;

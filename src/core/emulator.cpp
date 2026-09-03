@@ -13,11 +13,13 @@ void set_bios_reset_state(CpuState& state) {
 
 } // namespace
 
-Emulator::Emulator() : memory_(), cpu_(memory_), iop_(memory_), gif_(gs_) {}
+Emulator::Emulator()
+    : memory_(), cpu_(memory_), iop_(memory_), gif_(gs_), vif1_(memory_) {}
 
 ElfLoadResult Emulator::load_elf(const void* data, std::size_t size) {
   memory_.clear();
   gif_.reset();
+  vif1_.reset();
   image_ = load_elf32(data, size, memory_);
   ee_cycles_until_iop_ = 8u;
   ready_ = image_.ok;
@@ -38,6 +40,7 @@ bool Emulator::boot_bios() {
   iop_.reset();
   ee_cycles_until_iop_ = 8u;
   gif_.reset();
+  vif1_.reset();
   set_bios_reset_state(cpu_.state());
   cpu_.set_exception_mode(true);
   return true;
@@ -76,11 +79,14 @@ void Emulator::service_graphics() {
   std::vector<std::uint8_t> packet;
   while (memory_.pop_gif_packet(packet))
     gif_.submit(packet.data(), packet.size());
+  while (memory_.pop_vif1_packet(packet))
+    vif1_.submit(packet.data(), packet.size());
 }
 
 void Emulator::reset() {
   ee_cycles_until_iop_ = 8u;
   gif_.reset();
+  vif1_.reset();
   if (image_.ok) { cpu_.reset(image_.entry); cpu_.set_exception_mode(false); }
   else if (memory_.has_bios()) {
     cpu_.reset(0xBFC00000u);

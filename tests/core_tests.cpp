@@ -3,6 +3,7 @@
 #include "ps2vita/ee_block.hpp"
 #include "ps2vita/execution_census.hpp"
 #include "ps2vita/gif.hpp"
+#include "ps2vita/vif.hpp"
 
 #include <array>
 #include <cstdint>
@@ -1315,6 +1316,24 @@ void test_scalar_fpu() {
   check(cpu.state().fpu_acc == 0x40700000u &&
         cpu.state().fpr[3] == 0x40E40000u,
         "FPU accumulator feeds MADD.S");
+
+  cpu.reset(0x1020u);
+  cpu.state().fpr[0] = 0x3F800000u;
+  cpu.state().fpr[5] = 0x40000000u;
+  memory.write32(0x1020u, 0x46050034u); // c.olt.s f0,f5
+  memory.write32(0x1024u, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break &&
+        (cpu.state().fcr[31] & (1u << 23)) != 0u,
+        "captured BIOS C.OLT.S sets the ordered less-than condition");
+
+  cpu.reset(0x1030u);
+  cpu.state().fpr[4] = 0x40000000u;
+  cpu.state().fpr[3] = 0x40000000u;
+  memory.write32(0x1030u, 0x46032036u); // c.ole.s f4,f3
+  memory.write32(0x1034u, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break &&
+        (cpu.state().fcr[31] & (1u << 23)) != 0u,
+        "captured BIOS C.OLE.S sets the ordered less-or-equal condition");
 }
 
 void test_fpu_memory_transfer() {
@@ -1495,6 +1514,75 @@ void test_gif_normal_dma_completion() {
         "GIF DMA retires registers and raises channel 2 completion");
   check(!memory.pop_gif_packet(packet),
         "GIF DMA completion payload is consumed exactly once");
+}
+
+void test_vif1_source_chain_completion() {
+  ps2vita::Memory memory;
+  // CNT with one inline qword, followed by END with one inline qword. TTE
+  // contributes each tag's upper 64 bits to the VIF command stream.
+  memory.write64(0x2000u, 0x10000001ull);
+  memory.write64(0x2008u, 0x1111222233334444ull);
+  memory.write64(0x2010u, 0xAAAABBBBCCCCDDDDull);
+  memory.write64(0x2018u, 0x0123456789ABCDEFull);
+  memory.write64(0x2020u, 0x70000001ull);
+  memory.write64(0x2028u, 0x5555666677778888ull);
+  memory.write64(0x2030u, 0x1020304050607080ull);
+  memory.write64(0x2038u, 0xFFEEDDCCBBAA0099ull);
+  memory.write32(0x10009030u, 0x2000u);
+  memory.write32(0x10009000u, 0x145u);
+
+  memory.advance(1u);
+  memory.advance(15u);
+  check((memory.read32(0x10009000u) & 0x100u) != 0u,
+        "VIF1 source chain remains active before its QWC deadline");
+  memory.advance(1u);
+  std::vector<std::uint8_t> packet;
+  check(memory.pop_vif1_packet(packet) && packet.size() == 48u,
+        "VIF1 source chain queues TTE tag data and inline payloads");
+  check(memory.read32(0x10009030u) == 0x2040u &&
+        memory.read32(0x10009020u) == 0u &&
+        (memory.read32(0x10009000u) & 0x100u) == 0u &&
+        (memory.read32(0x1000E010u) & (1u << 1)) != 0u,
+        "VIF1 source chain retires and raises DMAC channel 1 completion");
+  std::uint64_t first = 0;
+  std::uint64_t second_tag = 0;
+  std::memcpy(&first, packet.data(), sizeof(first));
+  std::memcpy(&second_tag, packet.data() + 24u, sizeof(second_tag));
+  check(first == 0x1111222233334444ull &&
+        second_tag == 0x5555666677778888ull,
+        "VIF1 TTE data is interleaved at each source-chain boundary");
+}
+
+void test_vif1_mpg_upload() {
+  constexpr std::array<std::uint32_t, 5> words{{
+      0x00000000u, 0x01000404u, 0x4A010002u,
+      0x89ABCDEFu, 0x01234567u,
+  }};
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(words.data()),
+                   sizeof(words)) &&
+        vif.micro_instructions_loaded() == 1u && vif.cycle() == 0x0404u,
+        "VIF1 frontend accepts STCYCL followed by a one-instruction MPG upload");
+  check(memory.read32(ps2vita::Memory::kVu1MicroBase + 16u) == 0x89ABCDEFu &&
+        memory.read32(ps2vita::Memory::kVu1MicroBase + 20u) == 0x01234567u,
+        "VIF1 MPG writes both halves of a VU1 microinstruction");
+}
+
+void test_vif1_v4_32_unpack() {
+  constexpr std::array<std::uint32_t, 10> words{{
+      0x01000404u, 0x6C020001u,
+      0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u,
+      0xAAAAAAA1u, 0xAAAAAAA2u, 0xAAAAAAA3u, 0xAAAAAAA4u,
+  }};
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(words.data()),
+                   sizeof(words)) && vif.vectors_unpacked() == 2u,
+        "VIF1 frontend accepts contiguous V4-32 UNPACK data");
+  check(memory.read32(ps2vita::Memory::kVu1DataBase + 16u) == 0x11111111u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 44u) == 0xAAAAAAA4u,
+        "VIF1 V4-32 UNPACK writes complete vectors at the encoded address");
 }
 
 void test_captured_bios_gif_sprite() {
@@ -1960,6 +2048,9 @@ int main() {
   test_vu0_cop2_transfers();
   test_quarter_scale_gs();
   test_gif_normal_dma_completion();
+  test_vif1_source_chain_completion();
+  test_vif1_mpg_upload();
+  test_vif1_v4_32_unpack();
   test_captured_bios_gif_sprite();
   test_gif_reglist_sprite();
   test_elf_and_emulator();

@@ -79,6 +79,7 @@ public:
   bool load_bios(const void* source, std::size_t size);
   // Retrieves one completed EE GIF DMA payload in submission order.
   bool pop_gif_packet(std::vector<std::uint8_t>& packet);
+  bool pop_vif1_packet(std::vector<std::uint8_t>& packet);
   bool has_bios() const { return bios_loaded_; }
   std::uint32_t page_generation(std::uint32_t address) const;
   void clear_tlb();
@@ -98,6 +99,10 @@ private:
   };
 
   std::uint32_t physical(std::uint32_t address) const;
+  bool build_vif1_chain(std::vector<std::uint8_t>* packet,
+                        std::uint32_t& final_tadr,
+                        std::uint32_t& final_madr,
+                        std::uint32_t& total_qwc) const;
   std::vector<std::uint8_t> ram_;
   std::vector<std::uint8_t> bios_;
   std::vector<std::uint8_t> scratch_;
@@ -147,6 +152,10 @@ private:
   std::uint32_t gif_dma_source_ = 0;
   std::uint32_t gif_dma_qwc_ = 0;
   std::deque<std::vector<std::uint8_t>> gif_packets_;
+  std::uint32_t vif1_cycles_remaining_ = 0;
+  std::uint32_t vif1_final_tadr_ = 0;
+  std::uint32_t vif1_final_madr_ = 0;
+  std::deque<std::vector<std::uint8_t>> vif1_packets_;
   std::array<std::uint32_t, 2> spu2_dma_cycles_remaining_{};
   std::array<std::uint32_t, 2> spu2_dma_source_{};
   std::array<std::uint32_t, 2> spu2_dma_target_{};
