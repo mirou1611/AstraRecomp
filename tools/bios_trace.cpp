@@ -56,6 +56,18 @@ struct Sif0Event {
   std::uint32_t destination = 0;
 };
 
+struct Sif1Event {
+  std::uint64_t step = 0;
+  bool active = false;
+  std::uint32_t tadr = 0;
+  std::uint32_t tag_tadr = 0;
+  std::uint32_t dma_tag = 0;
+  std::uint32_t source = 0;
+  std::uint32_t destination = 0;
+  std::uint32_t words = 0;
+  std::array<std::uint32_t, 4> packet{};
+};
+
 struct SyscallEvent {
   std::uint64_t step = 0;
   std::uint32_t pc = 0;
@@ -396,6 +408,7 @@ int main(int argc, char** argv) {
   std::vector<StoreEntry> ee_packet_state_store_trace;
   std::vector<StoreEntry> iop_rpc_wait_store_trace;
   std::vector<Sif0Event> sif0_events;
+  std::vector<Sif1Event> sif1_events;
   std::vector<SyscallEvent> syscall_events;
   constexpr std::array<std::uint32_t, 3> kGraphicsDmaChcr = {
       0x10008000u, 0x10009000u, 0x1000A000u};
@@ -405,6 +418,7 @@ int main(int argc, char** argv) {
   std::array<std::uint64_t, 3> graphics_dma_first_step{};
   std::array<std::uint32_t, 3> graphics_dma_first_pc{};
   bool sif0_was_active = false;
+  bool sif1_was_active = false;
   std::uint64_t steps = 0;
   std::uint64_t hits = 0;
   std::uint32_t low_stub_word = 0;
@@ -448,6 +462,32 @@ int main(int argc, char** argv) {
         event_census.record(sif0_active ? kSif0Start : kSif0Complete, steps);
       }
       sif0_was_active = sif0_active;
+    }
+    const bool sif1_active =
+        (emulator.memory().read32(0x1000C400u) & 0x100u) != 0u &&
+        (emulator.memory().iop_read32(0x1F801538u) & 0x01000000u) != 0u;
+    if (sif1_active != sif1_was_active) {
+      const auto tadr =
+          emulator.memory().read32(0x1000C430u) & 0x0FFFFFF0u;
+      auto tag_tadr = tadr;
+      auto dma_tag = emulator.memory().read32(tag_tadr);
+      for (unsigned redirects = 0; redirects < 8u; ++redirects) {
+        const auto id = (dma_tag >> 28) & 7u;
+        const auto qwc = dma_tag & 0xFFFFu;
+        if (id != 2u || qwc != 0u) break;
+        tag_tadr = emulator.memory().read32(tag_tadr + 4u) & 0x0FFFFFF0u;
+        dma_tag = emulator.memory().read32(tag_tadr);
+      }
+      const auto source =
+          emulator.memory().read32(tag_tadr + 4u) & 0x0FFFFFF0u;
+      sif1_events.push_back({steps, sif1_active, tadr, tag_tadr, dma_tag,
+          source, emulator.memory().read32(source) & 0x00FFFFFFu,
+          emulator.memory().read32(source + 4u) & 0x000FFFFFu,
+          {emulator.memory().read32(source + 16u),
+           emulator.memory().read32(source + 20u),
+           emulator.memory().read32(source + 24u),
+           emulator.memory().read32(source + 28u)}});
+      sif1_was_active = sif1_active;
     }
     const auto instruction = emulator.memory().read32(state.pc);
     if ((instruction & 0xFC00003Fu) == 0x0000000Cu) {
@@ -900,6 +940,19 @@ int main(int argc, char** argv) {
         i, static_cast<unsigned long long>(event.step),
         event.active ? "start" : "done ", event.tadr, event.source,
         event.words, event.ee_tag, event.destination);
+  }
+  std::printf("EE SIF1 activity transitions: %zu\n", sif1_events.size());
+  const auto sif1_begin =
+      sif1_events.size() > 64u ? sif1_events.size() - 64u : 0u;
+  for (std::size_t i = sif1_begin; i < sif1_events.size(); ++i) {
+    const auto& event = sif1_events[i];
+    std::printf("%03zu step=%llu %s tadr=%08X tag_tadr=%08X "
+                "dma_tag=%08X source=%08X destination=%08X words=%05X "
+                "packet=%08X %08X %08X %08X\n",
+        i, static_cast<unsigned long long>(event.step),
+        event.active ? "start" : "done ", event.tadr, event.tag_tadr,
+        event.dma_tag, event.source, event.destination, event.words,
+        event.packet[0], event.packet[1], event.packet[2], event.packet[3]);
   }
   std::puts("EE RAM 00100000 staging window:");
   for (std::uint32_t offset = 0u; offset < 0x100u; offset += 16u) {

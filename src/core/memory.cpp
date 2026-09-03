@@ -1044,6 +1044,23 @@ void Memory::iop_write8(std::uint32_t address, std::uint8_t value) {
           set_result(1u);
         }
         break;
+      case 0x15u: // ForbidDVDP
+        // Retail OSDSYS uses this command to disable DVD-Video playback while
+        // entering the browser. A normal PS2 returns 5; reporting the generic
+        // unsupported-command value makes CDVDFSV retry the RPC indefinitely.
+        cdvd_scmd_result_[0] = 0x05u;
+        set_result(1u);
+        break;
+      case 0x22u: // ReadWakeUpTime
+        // With no wake-up alarm programmed the drive returns a successful
+        // ten-byte all-zero record. OSDSYS polls this during browser startup.
+        set_result(10u);
+        break;
+      case 0x24u: // RCBypassCtrl
+        // The retail BIOS initializes the remote-control bypass even when no
+        // receiver is attached. A zero result acknowledges the requested mode.
+        set_result(1u);
+        break;
       case 0x36u: { // ReadRegionParams
         // The 02.00E retail BIOS asks for the optical-drive region block while
         // bringing up cdvdman. Return the complete 15-byte response; a generic

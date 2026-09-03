@@ -550,6 +550,27 @@ void test_cdvd_reset_status() {
   check(mechacon_matches && memory.iop_read8(0x1F402017u) == 0x40u,
         "CDVD GetMechaVersion returns the four-byte retail response");
 
+  memory.iop_write8(0x1F402016u, 0x15u);
+  check(memory.iop_read8(0x1F402017u) == 0u &&
+        memory.iop_read8(0x1F402018u) == 0x05u &&
+        memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD ForbidDVDP returns the retail completion code");
+
+  memory.iop_write8(0x1F402016u, 0x22u);
+  bool wake_time_is_clear = memory.iop_read8(0x1F402017u) == 0u;
+  for (unsigned index = 0; index < 10u; ++index)
+    wake_time_is_clear = wake_time_is_clear &&
+        memory.iop_read8(0x1F402018u) == 0u;
+  check(wake_time_is_clear && memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD ReadWakeUpTime returns a clear ten-byte record");
+
+  memory.iop_write8(0x1F402017u, 1u);
+  memory.iop_write8(0x1F402016u, 0x24u);
+  check(memory.iop_read8(0x1F402017u) == 0u &&
+        memory.iop_read8(0x1F402018u) == 0u &&
+        memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD RCBypassCtrl acknowledges the requested mode");
+
   memory.iop_write8(0x1F402016u, 0x36u);
   const std::array<std::uint8_t, 15> expected_region = {
       0u, 0x08u, 0u, 'E', 'E', 'e', 'n', 'g', 'E', 'E', 0u, 0u, 0u, 0u, 0u};
