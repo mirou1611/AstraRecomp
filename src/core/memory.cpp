@@ -148,6 +148,10 @@ void Memory::clear() {
   timer5_target_future_ = false;
   sif0_cycles_remaining_ = 0;
   sif1_cycles_remaining_ = 0;
+  gif_cycles_remaining_ = 0;
+  gif_dma_source_ = 0;
+  gif_dma_qwc_ = 0;
+  gif_packets_.clear();
   spu2_dma_cycles_remaining_.fill(0);
   spu2_dma_source_.fill(0);
   spu2_dma_target_.fill(0);
@@ -496,6 +500,8 @@ std::uint32_t Memory::cycles_until_next_event() const {
     distance = std::min(distance, sif0_cycles_remaining_);
   if (sif1_cycles_remaining_ != 0u)
     distance = std::min(distance, sif1_cycles_remaining_);
+  if (gif_cycles_remaining_ != 0u)
+    distance = std::min(distance, gif_cycles_remaining_);
 
   // SIF starts are discovered by advance(), so an armed pair with no scheduled
   // countdown can transition on the very next call.
@@ -505,7 +511,11 @@ std::uint32_t Memory::cycles_until_next_event() const {
   const bool sif0_armed = sif0_cycles_remaining_ == 0u &&
       (raw_ee(0xC000u) & 0x100u) != 0u &&
       (raw_iop(0x0528u) & 0x01000000u) != 0u;
-  return sif0_armed || sif1_armed ? 1u : distance;
+  const auto gif_chcr = raw_ee(0xA000u);
+  const bool gif_armed = gif_cycles_remaining_ == 0u &&
+      (gif_chcr & 0x100u) != 0u && (gif_chcr & 0xCu) == 0u &&
+      (raw_ee(0xA020u) & 0xFFFFu) != 0u;
+  return sif0_armed || sif1_armed || gif_armed ? 1u : distance;
 }
 
 void Memory::advance(std::uint32_t cycles) {
@@ -710,6 +720,25 @@ void Memory::advance(std::uint32_t cycles) {
     store_iop(0x0070u, raw_iop(0x0070u) | (1u << 3));
   }
 
+  if (gif_cycles_remaining_ != 0u) {
+    if (cycles < gif_cycles_remaining_) {
+      gif_cycles_remaining_ -= cycles;
+    } else {
+      gif_cycles_remaining_ = 0u;
+      const auto bytes = static_cast<std::size_t>(gif_dma_qwc_) * 16u;
+      std::vector<std::uint8_t> packet(bytes);
+      for (std::size_t byte = 0; byte < bytes; ++byte)
+        packet[byte] = read8(gif_dma_source_ + static_cast<std::uint32_t>(byte));
+      gif_packets_.push_back(std::move(packet));
+      store_ee(0xA010u, gif_dma_source_ + static_cast<std::uint32_t>(bytes));
+      store_ee(0xA020u, 0u);
+      store_ee(0xA000u, raw_ee(0xA000u) & ~0x100u);
+      store_ee(0xE010u, raw_ee(0xE010u) | (1u << 2));
+      gif_dma_source_ = 0u;
+      gif_dma_qwc_ = 0u;
+    }
+  }
+
   if (sif0_cycles_remaining_ != 0u) {
     if (cycles < sif0_cycles_remaining_) {
       sif0_cycles_remaining_ -= cycles;
@@ -895,6 +924,25 @@ void Memory::advance(std::uint32_t cycles) {
       store_ee(0xF240u, raw_ee(0xF240u) | 0x20u | 0x2000u);
     }
   }
+
+  if (gif_cycles_remaining_ == 0u) {
+    const auto chcr = raw_ee(0xA000u);
+    const auto qwc = raw_ee(0xA020u) & 0xFFFFu;
+    const auto source = raw_ee(0xA010u) & 0x0FFFFFF0u;
+    if ((chcr & 0x100u) != 0u && (chcr & 0xCu) == 0u && qwc != 0u &&
+        valid(source, static_cast<std::size_t>(qwc) * 16u)) {
+      gif_dma_source_ = source;
+      gif_dma_qwc_ = qwc;
+      gif_cycles_remaining_ = qwc * 8u;
+    }
+  }
+}
+
+bool Memory::pop_gif_packet(std::vector<std::uint8_t>& packet) {
+  if (gif_packets_.empty()) return false;
+  packet = std::move(gif_packets_.front());
+  gif_packets_.pop_front();
+  return true;
 }
 
 std::uint32_t Memory::ee_interrupt_lines() const {

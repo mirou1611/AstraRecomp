@@ -2,6 +2,7 @@
 
 #include "ps2vita/cpu.hpp"
 #include "ps2vita/elf_loader.hpp"
+#include "ps2vita/gif.hpp"
 #include "ps2vita/gs.hpp"
 #include "ps2vita/iop_cpu.hpp"
 
@@ -16,6 +17,7 @@ public:
   bool load_bios(const void* data, std::size_t size);
   bool boot_bios();
   StopReason run_slice(std::uint32_t instructions);
+  void service_graphics();
   void reset();
 
   Memory& memory() { return memory_; }
@@ -26,6 +28,7 @@ public:
   const IopCpu& iop() const { return iop_; }
   Gs& gs() { return gs_; }
   const Gs& gs() const { return gs_; }
+  const Gif& gif() const { return gif_; }
   const ElfLoadResult& image() const { return image_; }
   bool ready() const { return ready_; }
 
@@ -34,6 +37,7 @@ private:
   Cpu cpu_;
   IopCpu iop_;
   Gs gs_;
+  Gif gif_;
   ElfLoadResult image_{};
   std::uint32_t ee_cycles_until_iop_ = 8u;
   bool ready_ = false;

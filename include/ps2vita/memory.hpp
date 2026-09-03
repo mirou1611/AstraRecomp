@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <deque>
 #include <vector>
 
 namespace ps2vita {
@@ -76,6 +77,8 @@ public:
   bool copy_in(std::uint32_t address, const void* source, std::size_t size);
   bool zero(std::uint32_t address, std::size_t size);
   bool load_bios(const void* source, std::size_t size);
+  // Retrieves one completed EE GIF DMA payload in submission order.
+  bool pop_gif_packet(std::vector<std::uint8_t>& packet);
   bool has_bios() const { return bios_loaded_; }
   std::uint32_t page_generation(std::uint32_t address) const;
   void clear_tlb();
@@ -140,6 +143,10 @@ private:
   bool timer5_target_future_ = false;
   std::uint32_t sif0_cycles_remaining_ = 0;
   std::uint32_t sif1_cycles_remaining_ = 0;
+  std::uint32_t gif_cycles_remaining_ = 0;
+  std::uint32_t gif_dma_source_ = 0;
+  std::uint32_t gif_dma_qwc_ = 0;
+  std::deque<std::vector<std::uint8_t>> gif_packets_;
   std::array<std::uint32_t, 2> spu2_dma_cycles_remaining_{};
   std::array<std::uint32_t, 2> spu2_dma_source_{};
   std::array<std::uint32_t, 2> spu2_dma_target_{};

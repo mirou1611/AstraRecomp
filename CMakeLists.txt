@@ -94,6 +94,7 @@ add_library(ps2core
   src/core/ee_block.cpp
   src/core/elf_loader.cpp
   src/core/emulator.cpp
+  src/core/gif.cpp
   src/core/gs.cpp
   src/core/iop_cpu.cpp
   src/core/memory.cpp

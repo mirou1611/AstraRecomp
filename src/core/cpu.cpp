@@ -646,7 +646,7 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
           state_.vu0_vi[destination] =
               (state_.vu0_vi[destination] & 0xFFFF0000u) | result;
         }
-      } else if (fn == 0x2Cu) { // VSUB
+      } else if (fn == 0x28u || fn == 0x2Cu) { // VADD / VSUB
         const unsigned ft = rt;
         const unsigned fs = rd;
         const unsigned fd = sa;
@@ -654,8 +654,11 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
           for (unsigned index = 0; index < 4; ++index) {
             if (ins & (1u << (24u - index))) {
               set_vu_lane(state_, fd, index,
-                          as_bits(as_float(vu_lane(state_, fs, index)) -
-                                  as_float(vu_lane(state_, ft, index))));
+                          as_bits(fn == 0x28u
+                              ? as_float(vu_lane(state_, fs, index)) +
+                                    as_float(vu_lane(state_, ft, index))
+                              : as_float(vu_lane(state_, fs, index)) -
+                                    as_float(vu_lane(state_, ft, index))));
             }
           }
         }
@@ -699,6 +702,18 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
           if (ins & (1u << (24u - lane))) {
             memory_.write32(Memory::kVu0DataBase + qword * 16u + lane * 4u,
                             value);
+          }
+        }
+      } else if (fn >= 0x3Cu && special2 == 0x31u) { // VMR32
+        const unsigned destination = rt;
+        const unsigned source = rd;
+        if (destination != 0u) {
+          const std::array<std::uint32_t, 4> rotated = {
+              vu_lane(state_, source, 1u), vu_lane(state_, source, 2u),
+              vu_lane(state_, source, 3u), vu_lane(state_, source, 0u)};
+          for (unsigned lane = 0; lane < 4u; ++lane) {
+            if (ins & (1u << (24u - lane)))
+              set_vu_lane(state_, destination, lane, rotated[lane]);
           }
         }
       } else {

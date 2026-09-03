@@ -13,10 +13,11 @@ void set_bios_reset_state(CpuState& state) {
 
 } // namespace
 
-Emulator::Emulator() : memory_(), cpu_(memory_), iop_(memory_) {}
+Emulator::Emulator() : memory_(), cpu_(memory_), iop_(memory_), gif_(gs_) {}
 
 ElfLoadResult Emulator::load_elf(const void* data, std::size_t size) {
   memory_.clear();
+  gif_.reset();
   image_ = load_elf32(data, size, memory_);
   ee_cycles_until_iop_ = 8u;
   ready_ = image_.ok;
@@ -36,6 +37,7 @@ bool Emulator::boot_bios() {
   cpu_.reset(0xBFC00000u);
   iop_.reset();
   ee_cycles_until_iop_ = 8u;
+  gif_.reset();
   set_bios_reset_state(cpu_.state());
   cpu_.set_exception_mode(true);
   return true;
@@ -43,7 +45,11 @@ bool Emulator::boot_bios() {
 
 StopReason Emulator::run_slice(std::uint32_t instructions) {
   if (!ready_) return StopReason::Halted;
-  if (image_.ok) return cpu_.run(instructions);
+  if (image_.ok) {
+    const auto result = cpu_.run(instructions);
+    service_graphics();
+    return result;
+  }
 
   std::uint32_t remaining = instructions;
   while (remaining != 0u) {
@@ -59,14 +65,22 @@ StopReason Emulator::run_slice(std::uint32_t instructions) {
       iop_.step();
       ee_cycles_until_iop_ = 8u;
     }
+    service_graphics();
     if (result != StopReason::StepLimit) return result;
     if (executed == 0u) return StopReason::Halted;
   }
   return StopReason::StepLimit;
 }
 
+void Emulator::service_graphics() {
+  std::vector<std::uint8_t> packet;
+  while (memory_.pop_gif_packet(packet))
+    gif_.submit(packet.data(), packet.size());
+}
+
 void Emulator::reset() {
   ee_cycles_until_iop_ = 8u;
+  gif_.reset();
   if (image_.ok) { cpu_.reset(image_.entry); cpu_.set_exception_mode(false); }
   else if (memory_.has_bios()) {
     cpu_.reset(0xBFC00000u);

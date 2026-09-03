@@ -2,10 +2,13 @@
 #include "ps2vita/emulator.hpp"
 #include "ps2vita/ee_block.hpp"
 #include "ps2vita/execution_census.hpp"
+#include "ps2vita/gif.hpp"
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -1379,22 +1382,44 @@ void test_vu0_cop2_transfers() {
         cpu.state().vu0_vf_hi[4] == 0x40A0000040800000ull,
         "VU0 VSUB updates selected vector lanes");
 
+  cpu.reset(0x10C8);
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull;
+  memory.write32(0x10C8, 0x4A202128u); // vadd.w vf4,vf4,vf0
+  memory.write32(0x10CC, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break,
+        "captured BIOS VU0 VADD executes");
+  check(cpu.state().vu0_vf[4] == 0x400000003F800000ull &&
+        cpu.state().vu0_vf_hi[4] == 0x40A0000040400000ull,
+        "VU0 VADD honors its W-only destination mask and VF0 constant");
+
   cpu.reset(0x10D0);
+  cpu.state().vu0_vf[4] = 0x2222222211111111ull;
+  cpu.state().vu0_vf_hi[4] = 0x4444444433333333ull;
+  memory.write32(0x10D0, 0x4BE5233Du); // vmr32.xyzw vf5,vf4
+  memory.write32(0x10D4, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break,
+        "captured BIOS VU0 VMR32 executes");
+  check(cpu.state().vu0_vf[5] == 0x3333333322222222ull &&
+        cpu.state().vu0_vf_hi[5] == 0x1111111144444444ull,
+        "VU0 VMR32 rotates XYZW lanes and honors the destination mask");
+
+  cpu.reset(0x10E0);
   cpu.state().vu0_vi[2] = 7;
   cpu.state().vu0_vi[3] = 9;
-  memory.write32(0x10D0, (0x12u << 26) | (0x10u << 21) | (3u << 16) |
+  memory.write32(0x10E0, (0x12u << 26) | (0x10u << 21) | (3u << 16) |
                               (2u << 11) | (4u << 6) | 0x30u);
-  memory.write32(0x10D4, 0x0000000Du);
+  memory.write32(0x10E4, 0x0000000Du);
   check(cpu.run(4) == ps2vita::StopReason::Break &&
         (cpu.state().vu0_vi[4] & 0xFFFFu) == 16u,
         "VU0 VIADD writes a 16-bit integer register result");
 
-  cpu.reset(0x10E0);
+  cpu.reset(0x10F0);
   cpu.state().vu0_vi[1] = 0x101u;
   cpu.state().vu0_vf[2] = 0x0123456789ABCDEFull;
   cpu.state().vu0_vf_hi[2] = 0xFEDCBA9876543210ull;
-  memory.write32(0x10E0, 0x4BE1137Du); // vsqi.xyzw vf2,(vi1++)
-  memory.write32(0x10E4, 0x0000000Du);
+  memory.write32(0x10F0, 0x4BE1137Du); // vsqi.xyzw vf2,(vi1++)
+  memory.write32(0x10F4, 0x0000000Du);
   check(cpu.run(4) == ps2vita::StopReason::Break, "VU0 VSQI executes");
   check(memory.read32(ps2vita::Memory::kVu0DataBase + 16u) == 0x89ABCDEFu &&
         memory.read32(ps2vita::Memory::kVu0DataBase + 28u) == 0xFEDCBA98u &&
@@ -1429,6 +1454,67 @@ void test_quarter_scale_gs() {
   gs.line({0, 0, 0, 0xFFFFFFFFu}, {159, 111, 0, 0xFFFFFFFFu});
   check(gs.pixel(0, 0) == 0xFFFFFFFFu && gs.pixel(159, 111) == 0xFFFFFFFFu,
         "GS line includes endpoints");
+}
+
+void test_gif_normal_dma_completion() {
+  ps2vita::Memory memory;
+  for (std::uint32_t byte = 0; byte < 32u; ++byte)
+    memory.write8(0x2000u + byte, static_cast<std::uint8_t>(0x80u + byte));
+  memory.write32(0x1000A010u, 0x2000u);
+  memory.write32(0x1000A020u, 2u);
+  memory.write32(0x1000A000u, 0x101u);
+
+  memory.advance(1u); // Discover the armed normal-mode transfer.
+  memory.advance(15u);
+  check((memory.read32(0x1000A000u) & 0x100u) != 0u,
+        "GIF DMA remains active before its QWC deadline");
+  memory.advance(1u);
+
+  std::vector<std::uint8_t> packet;
+  const bool queued = memory.pop_gif_packet(packet);
+  bool payload_matches = queued && packet.size() == 32u;
+  for (std::uint32_t byte = 0; payload_matches && byte < 32u; ++byte)
+    payload_matches = packet[byte] == static_cast<std::uint8_t>(0x80u + byte);
+  check(payload_matches, "GIF DMA queues an exact snapshot of its payload");
+  check(memory.read32(0x1000A010u) == 0x2020u &&
+        memory.read32(0x1000A020u) == 0u &&
+        (memory.read32(0x1000A000u) & 0x100u) == 0u &&
+        (memory.read32(0x1000E010u) & (1u << 2)) != 0u,
+        "GIF DMA retires registers and raises channel 2 completion");
+  check(!memory.pop_gif_packet(packet),
+        "GIF DMA completion payload is consumed exactly once");
+}
+
+void test_captured_bios_gif_sprite() {
+  // First packet emitted by the retail BIOS after CDVD/SIF initialization.
+  constexpr std::array<std::array<std::uint64_t, 2>, 15> qwords{{
+      {{0x100000000000800Eull, 0x000000000000000Eull}},
+      {{0x00000000000A0050ull, 0x000000000000004Cull}},
+      {{0x00000000000000A0ull, 0x000000000000004Eull}},
+      {{0x0000780000006C00ull, 0x0000000000000018ull}},
+      {{0x00FF0000027F0000ull, 0x0000000000000040ull}},
+      {{0x0000000000000001ull, 0x000000000000001Aull}},
+      {{0x0000000000000001ull, 0x0000000000000046ull}},
+      {{0x0000000000000000ull, 0x0000000000000045ull}},
+      {{0x0000000000050000ull, 0x0000000000000047ull}},
+      {{0x0000000000030000ull, 0x0000000000000047ull}},
+      {{0x0000000000000006ull, 0x0000000000000000ull}},
+      {{0x3F80000000000000ull, 0x0000000000000001ull}},
+      {{0x0000000078006C00ull, 0x0000000000000005ull}},
+      {{0x0000000088009400ull, 0x0000000000000005ull}},
+      {{0x0000000000050000ull, 0x0000000000000047ull}},
+  }};
+  std::vector<std::uint8_t> packet(sizeof(qwords));
+  std::memcpy(packet.data(), qwords.data(), packet.size());
+
+  ps2vita::Gs gs;
+  gs.clear(0xFFFF00FFu);
+  ps2vita::Gif gif(gs);
+  check(gif.submit(packet.data(), packet.size()),
+        "GIF frontend accepts the captured packed A+D packet");
+  check(gs.pixel(0, 0) == 0u && gs.pixel(159, 63) == 0u &&
+        gs.pixel(80, 64) == 0xFFFF00FFu,
+        "captured BIOS sprite clears exactly the quarter-scale 640x256 region");
 }
 
 void put16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
@@ -1840,6 +1926,8 @@ int main() {
   test_vu_memory_windows();
   test_vu0_cop2_transfers();
   test_quarter_scale_gs();
+  test_gif_normal_dma_completion();
+  test_captured_bios_gif_sprite();
   test_elf_and_emulator();
   test_phase0_aot_contract();
   if (failures) return EXIT_FAILURE;

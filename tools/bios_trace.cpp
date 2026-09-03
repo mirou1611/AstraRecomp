@@ -623,6 +623,7 @@ int main(int argc, char** argv) {
     }
     if (stop_pc != 0u && state.pc == stop_pc && ++hits >= stop_hit) break;
     reason = emulator.cpu().step();
+    emulator.service_graphics();
     if (reason != ps2vita::StopReason::None) break;
     if ((steps % iop_divisor) == iop_divisor - 1u) {
       const auto& iop = emulator.iop().state();
@@ -795,6 +796,9 @@ int main(int argc, char** argv) {
         static_cast<unsigned long long>(graphics_dma_first_step[channel]),
         graphics_dma_first_pc[channel]);
   }
+  std::printf("gif_packets=%llu gif_sprites=%llu\n",
+      static_cast<unsigned long long>(emulator.gif().packets_submitted()),
+      static_cast<unsigned long long>(emulator.gif().sprites_emitted()));
   std::printf("ee_sif0 chcr=%08X madr=%08X qwc=%08X tadr=%08X\n",
       emulator.memory().read32(0x1000C000u),
       emulator.memory().read32(0x1000C010u),
