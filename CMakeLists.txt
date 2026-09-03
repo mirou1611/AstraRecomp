@@ -58,6 +58,7 @@ add_custom_command(
     tools/astrair/analysis_effects.py
     tools/astrair/analysis_width.py
     tools/astrair/analysis_liveness.py
+    tools/astrair/deopt.py
     tools/astrair/profile.py
     tools/astrair/trace.py
     tools/make_smoke_elf.py

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import json
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Tuple
 
+from astrair.deopt import DeoptMap, Guard, validate_deopt_metadata
+
 
 @dataclass(frozen=True)
 class BlockProfile:
@@ -23,6 +25,7 @@ class EdgeProfile:
 class Trace:
     blocks: Tuple[int, ...]
     closes_loop: bool = False
+    guards: Tuple[Guard, ...] = ()
 
 
 def form_direct_traces(
@@ -80,8 +83,13 @@ def form_direct_traces(
     return traces
 
 
-def serialize_trace_plan(traces: Iterable[Trace], source_fingerprint: str) -> str:
+def serialize_trace_plan(traces: Iterable[Trace], source_fingerprint: str,
+                         deopt_maps: Iterable[DeoptMap] = ()) -> str:
     """Return a stable, reviewable plan without changing emitted code."""
+    traces = tuple(traces)
+    deopt_maps = tuple(deopt_maps)
+    guards = tuple(guard for trace in traces for guard in trace.guards)
+    validate_deopt_metadata(guards, deopt_maps)
     document = {
         "schema": "astrarecomp.trace-plan",
         "version": 1,
@@ -94,8 +102,34 @@ def serialize_trace_plan(traces: Iterable[Trace], source_fingerprint: str) -> st
                 "trace_id": index,
                 "blocks": [f"0x{pc:08X}" for pc in trace.blocks],
                 "closes_loop": trace.closes_loop,
+                "guards": [
+                    {
+                        "kind": guard.kind.value,
+                        "guest_pc": f"0x{guard.guest_pc:08X}",
+                        "expected": guard.expected,
+                        "side_exit_pc": f"0x{guard.side_exit_pc:08X}",
+                        "deopt_id": guard.deopt_id,
+                    }
+                    for guard in trace.guards
+                ],
             }
             for index, trace in enumerate(traces)
+        ],
+        "deopt_maps": [
+            {
+                "deopt_id": deopt_map.deopt_id,
+                "resume_pc": f"0x{deopt_map.resume_pc:08X}",
+                "recoveries": [
+                    {
+                        "register": recovery.register,
+                        "high_half": recovery.high_half,
+                        "kind": recovery.kind.value,
+                        "value": recovery.value,
+                    }
+                    for recovery in deopt_map.recoveries
+                ],
+            }
+            for deopt_map in sorted(deopt_maps, key=lambda item: item.deopt_id)
         ],
     }
     return json.dumps(document, indent=2, sort_keys=True) + "\n"

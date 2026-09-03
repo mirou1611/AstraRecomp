@@ -141,3 +141,16 @@ from the generator's recovered CFG are discarded, and an observed edge is
 followed only if static decoding independently proves it direct. Memory and
 other hard-effect blocks terminate a trace. This stage writes review metadata
 only and does not alter generated C++ or runtime dispatch.
+
+## Guard and deoptimization metadata
+
+Trace-plan schema version 1 now reserves explicit `guards` on every trace and a
+root `deopt_maps` table. Current direct traces emit both as empty arrays. Future
+branch-direction guards must reference an existing deopt map whose aligned
+resume PC exactly equals the guard's side-exit PC.
+
+Each deopt map can describe low/high guest-register recovery from architectural
+state, a trace-local value, or a constant. Validation rejects missing/duplicate
+map IDs, duplicate register-half recoveries, invalid registers or widths, and
+inconsistent side exits before serialization. No speculative trace is emitted;
+this establishes the reconstruction contract first.

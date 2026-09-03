@@ -10,6 +10,10 @@ from astrair.builder import build_data_instruction
 from astrair.analysis_effects import is_hard_barrier
 from astrair.analysis_liveness import analyze_block
 from astrair.analysis_width import infer_block_results
+from astrair.deopt import (
+    DeoptMap, Guard, GuardKind, RecoveryKind, RegisterRecovery,
+    validate_deopt_metadata,
+)
 from astrair.ir import Effect, Op, UpperBits, ValueKind
 from generate_astrart import defer_gpr_writeback, generate_trace_plan
 from make_aot_chain_elf import build as build_chain_elf
@@ -271,6 +275,29 @@ class AstraIrBuilderTests(unittest.TestCase):
         self.assertEqual(document["traces"][0]["blocks"],
                          ["0x00001000", "0x00001010"])
         self.assertTrue(document["traces"][0]["closes_loop"])
+        self.assertEqual(document["traces"][0]["guards"], [])
+        self.assertEqual(document["deopt_maps"], [])
+
+    def test_guard_requires_complete_deopt_map(self) -> None:
+        recovery = RegisterRecovery(2, False, RecoveryKind.TRACE_LOCAL, 3)
+        deopt_map = DeoptMap(7, 0x1020, (recovery,))
+        guard = Guard(GuardKind.BRANCH_DIRECTION, 0x1010, 1, 0x1020, 7)
+        validate_deopt_metadata((guard,), (deopt_map,))
+        document = json.loads(serialize_trace_plan(
+            (Trace((0x1000,), False, (guard,)),), "b" * 64, (deopt_map,)
+        ))
+        self.assertEqual(document["traces"][0]["guards"][0]["deopt_id"], 7)
+        self.assertEqual(document["deopt_maps"][0]["recoveries"][0], {
+            "high_half": False,
+            "kind": "trace_local",
+            "register": 2,
+            "value": 3,
+        })
+        with self.assertRaisesRegex(ValueError, "missing deopt ID"):
+            validate_deopt_metadata((guard,), ())
+        mismatched = DeoptMap(7, 0x1030, (recovery,))
+        with self.assertRaisesRegex(ValueError, "must match"):
+            validate_deopt_metadata((guard,), (mismatched,))
 
     def test_generator_builds_plan_only_from_matching_profile_and_static_cfg(self) -> None:
         elf = build_chain_elf()
