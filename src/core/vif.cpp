@@ -21,6 +21,12 @@ void Vif1::reset() {
   vectors_unpacked_ = 0;
   first_unsupported_code_ = 0;
   cycle_ = 0;
+  base_ = 0;
+  offset_ = 0;
+  tops_ = 0;
+  itops_ = 0;
+  top_ = 0;
+  double_buffer_ = false;
 }
 
 bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
@@ -36,7 +42,21 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       cycle_ = static_cast<std::uint16_t>(code);
       continue;
     }
-    if ((opcode >= 0x02u && opcode <= 0x07u) || opcode == 0x10u ||
+    if (opcode == 0x02u) { // OFFSET
+      offset_ = static_cast<std::uint16_t>(code & 0x3FFu);
+      tops_ = base_;
+      double_buffer_ = false;
+      continue;
+    }
+    if (opcode == 0x03u) { // BASE
+      base_ = static_cast<std::uint16_t>(code & 0x3FFu);
+      continue;
+    }
+    if (opcode == 0x04u) { // ITOP
+      itops_ = static_cast<std::uint16_t>(code & 0x3FFu);
+      continue;
+    }
+    if ((opcode >= 0x05u && opcode <= 0x07u) || opcode == 0x10u ||
         opcode == 0x11u || opcode == 0x13u) {
       continue; // Register state / synchronization without stream payload.
     }
@@ -46,11 +66,21 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       continue;
     }
     if (opcode == 0x14u || opcode == 0x15u) { // MSCAL / MSCALF
+      top_ = tops_ & 0x3FFu;
+      tops_ = double_buffer_ ? base_ :
+          static_cast<std::uint16_t>((base_ + offset_) & 0x3FFu);
+      double_buffer_ = !double_buffer_;
+      vu1_.set_top(top_);
       vu1_.start(static_cast<std::uint16_t>((code & 0x3FFu) * 8u));
       vu1_.run(100000u);
       continue;
     }
     if (opcode == 0x17u) { // MSCNT: continue at the current VU1 TPC.
+      top_ = tops_ & 0x3FFu;
+      tops_ = double_buffer_ ? base_ :
+          static_cast<std::uint16_t>((base_ + offset_) & 0x3FFu);
+      double_buffer_ = !double_buffer_;
+      vu1_.set_top(top_);
       vu1_.resume();
       vu1_.run(100000u);
       continue;
@@ -87,7 +117,10 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       }
       const auto bytes = static_cast<std::size_t>(count) * 16u;
       if (cursor + bytes > size) { ++packets_rejected_; return false; }
-      const auto address = static_cast<unsigned>((code << 4) & 0x3FF0u);
+      auto qword_address = static_cast<unsigned>(code & 0x3FFu);
+      if ((code & 0x8000u) != 0u)
+        qword_address = (qword_address + tops_) & 0x3FFu;
+      const auto address = qword_address * 16u;
       for (std::size_t byte = 0; byte < bytes; byte += 4u) {
         const auto destination = Memory::kVu1DataBase +
             static_cast<std::uint32_t>((address + byte) & 0x3FFFu);

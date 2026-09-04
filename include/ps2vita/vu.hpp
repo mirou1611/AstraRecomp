@@ -14,6 +14,7 @@ struct Vu1State {
   std::array<std::uint16_t, 16> vi{};
   std::array<std::uint32_t, 4> acc{};
   std::uint32_t i = 0;
+  std::uint32_t q = 0;
   std::uint16_t pc = 0;
 };
 
@@ -25,6 +26,7 @@ public:
   void reset();
   void start(std::uint16_t address);
   void resume();
+  void set_top(std::uint16_t top) { top_ = top & 0x3FFu; }
   void run(std::uint64_t max_pairs);
   bool pop_path1_packet(std::vector<std::uint8_t>& packet);
 
@@ -62,6 +64,7 @@ private:
   std::uint64_t last_kick_tag_ = 0;
   std::uint64_t path1_tags_queued_ = 0;
   std::uint64_t path1_tags_rejected_ = 0;
+  std::uint16_t top_ = 0;
   std::deque<std::vector<std::uint8_t>> path1_packets_;
 };
 

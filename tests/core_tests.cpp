@@ -1694,6 +1694,124 @@ void test_vu1_end_and_resume() {
         "VU1 MSCNT-style resume continues at the retained TPC");
 }
 
+void test_vu1_mtir_xtop() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8001FBFCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x800106BCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[31][0] = 0x12345678u;
+  vu.set_top(0x155u);
+  vu.start(0u);
+  vu.run(2u);
+  check(vu.state().vi[1] == 0x155u && vu.pairs_executed() == 2u,
+        "VU1 MTIR and XTOP feed the captured continuation integer register");
+}
+
+void test_vu1_integer_branch_and_load() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x52010001u); // ibne vi1,vi0,+1
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 16u, 0x810A0BFEu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 20u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1DataBase + 3u * 16u, 0x1234ABCDu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[1] = 3u;
+  vu.start(0u);
+  vu.run(3u);
+  check(vu.state().pc == 0x18u && vu.state().vi[10] == 0xABCDu,
+        "VU1 IBNE executes its delay pair then reaches masked ILWR");
+}
+
+void test_vu1_lq_sq() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x01EF0800u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x03E27800u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  for (unsigned lane = 0; lane < 4u; ++lane)
+    memory.write32(ps2vita::Memory::kVu1DataBase + 5u * 16u + lane * 4u,
+                   0xA0u + lane);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[1] = 5u;
+  vu.state().vi[2] = 9u;
+  vu.start(0u);
+  vu.run(2u);
+  check(memory.read32(ps2vita::Memory::kVu1DataBase + 9u * 16u) == 0xA0u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 9u * 16u + 12u) == 0xA3u,
+        "VU1 captured LQ/SQ pair copies all selected lanes between qwords");
+}
+
+void test_vu1_div_mulq() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x81F803BCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x800003BFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x01C0C61Cu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[24] = {{0x40800000u, 0x40800000u, 0x40800000u, 0x40000000u}};
+  vu.start(0u);
+  vu.run(2u);
+  check(vu.state().q == 0x3F000000u &&
+        vu.state().vf[24][0] == 0x40000000u &&
+        vu.state().vf[24][2] == 0x40000000u &&
+        vu.state().vf[24][3] == 0x40000000u,
+        "VU1 DIV/WAITQ/MULq normalizes captured XYZ lanes and preserves W");
+}
+
+void test_vu1_captured_max_sub() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01E06B50u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x01B897ACu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[13] = {{0xBF800000u, 0xC0000000u, 0xC0400000u, 0xC0800000u}};
+  vu.state().vf[18] = {{0x40A00000u, 0x40A00000u, 0x40A00000u, 0x40A00000u}};
+  vu.state().vf[24] = {{0x3F800000u, 0x40000000u, 0x40400000u, 0x40800000u}};
+  vu.start(0u);
+  vu.run(2u);
+  check(vu.state().vf[13][0] == 0u && vu.state().vf[13][3] == 0u &&
+        vu.state().vf[30][0] == 0x40800000u &&
+        vu.state().vf[30][1] == 0x40400000u &&
+        vu.state().vf[30][2] == 0u &&
+        vu.state().vf[30][3] == 0x3F800000u,
+        "VU1 captured MAXx/SUB sequence applies scalar, vector, and lane masks");
+}
+
+void test_vu1_ftoi4() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01D3C17Du);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[24] = {{0x3FC00000u, 0xBFC00000u, 0x3F000000u, 0x41200000u}};
+  vu.state().vf[19][3] = 0xDEADBEEFu;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vf[19][0] == 24u &&
+        vu.state().vf[19][1] == static_cast<std::uint32_t>(-24) &&
+        vu.state().vf[19][2] == 8u && vu.state().vf[19][3] == 0xDEADBEEFu,
+        "VU1 captured FTOI4 converts and masks scaled integer lanes");
+}
+
+void test_vif1_top_relative_unpack() {
+  std::array<std::uint32_t, 8> words{{
+      0x03000020u, 0x02000010u, 0x14000000u, 0x6C018000u,
+      1u, 2u, 3u, 4u,
+  }};
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(words.data()),
+                   sizeof(words)) && vif.top() == 0x20u,
+        "VIF1 MSCAL exposes the current double-buffer TOP to VU1");
+  check(memory.read32(ps2vita::Memory::kVu1DataBase + 0x30u * 16u) == 1u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 0x30u * 16u + 12u) == 4u,
+        "VIF1 top-relative UNPACK targets the post-MSCAL TOPS buffer");
+}
+
 void test_captured_bios_gif_sprite() {
   // First packet emitted by the retail BIOS after CDVD/SIF initialization.
   constexpr std::array<std::array<std::uint64_t, 2>, 15> qwords{{
@@ -2165,6 +2283,13 @@ int main() {
   test_vu1_sqi();
   test_vu1_xgkick_packet();
   test_vu1_end_and_resume();
+  test_vu1_mtir_xtop();
+  test_vu1_integer_branch_and_load();
+  test_vu1_lq_sq();
+  test_vu1_div_mulq();
+  test_vu1_captured_max_sub();
+  test_vu1_ftoi4();
+  test_vif1_top_relative_unpack();
   test_captured_bios_gif_sprite();
   test_gif_reglist_sprite();
   test_elf_and_emulator();

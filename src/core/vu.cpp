@@ -1,5 +1,6 @@
 #include "ps2vita/vu.hpp"
 
+#include <cmath>
 #include <cstring>
 
 namespace ps2vita {
@@ -38,6 +39,7 @@ void Vu1::reset() {
   last_kick_tag_ = 0;
   path1_tags_queued_ = 0;
   path1_tags_rejected_ = 0;
+  top_ = 0;
   path1_packets_.clear();
 }
 
@@ -92,6 +94,21 @@ bool Vu1::execute_lower(std::uint32_t code) {
   const auto group = code >> 25;
   const auto it = static_cast<unsigned>((code >> 16) & 0xFu);
   const auto is = static_cast<unsigned>((code >> 11) & 0xFu);
+  if (group == 0x00u || group == 0x01u) { // LQ / SQ
+    const bool store = group == 0x01u;
+    const auto vector_reg = static_cast<unsigned>(
+        store ? (code >> 11) & 0x1Fu : (code >> 16) & 0x1Fu);
+    const auto address_reg = store ? it : is;
+    const auto qword = static_cast<std::uint32_t>(
+        state_.vi[address_reg] + sign_extend(code & 0x7FFu, 11u)) & 0x3FFu;
+    for (unsigned lane = 0; lane < 4u; ++lane) {
+      if ((code & (1u << (24u - lane))) == 0u) continue;
+      const auto address = Memory::kVu1DataBase + qword * 16u + lane * 4u;
+      if (store) memory_.write32(address, state_.vf[vector_reg][lane]);
+      else if (vector_reg != 0u) state_.vf[vector_reg][lane] = memory_.read32(address);
+    }
+    return true;
+  }
   if (group == 0x08u || group == 0x09u) { // IADDIU / ISUBIU
     const auto raw = ((code >> 10) & 0x7800u) | (code & 0x7FFu);
     const auto immediate = sign_extend(raw, 15u);
@@ -108,9 +125,32 @@ bool Vu1::execute_lower(std::uint32_t code) {
     branch_pending_ = true;
     return true;
   }
+  if (group == 0x20u) { // B
+    branch_target_ = static_cast<std::uint16_t>((state_.pc + 8u +
+        sign_extend(code & 0x7FFu, 11u) * 8) & 0x3FFFu);
+    branch_pending_ = true;
+    return true;
+  }
   if (group == 0x24u) { // JR
     branch_target_ = static_cast<std::uint16_t>((state_.vi[is] * 8u) & 0x3FFFu);
     branch_pending_ = true;
+    return true;
+  }
+  if (group == 0x28u || group == 0x29u) { // IBEQ / IBNE
+    const bool equal = state_.vi[is] == state_.vi[it];
+    if ((group == 0x28u && equal) || (group == 0x29u && !equal)) {
+      branch_target_ = static_cast<std::uint16_t>((state_.pc + 8u +
+          sign_extend(code & 0x7FFu, 11u) * 8) & 0x3FFFu);
+      branch_pending_ = true;
+    }
+    return true;
+  }
+  if (group == 0x2Eu) { // IBLEZ
+    if (static_cast<std::int16_t>(state_.vi[is]) <= 0) {
+      branch_target_ = static_cast<std::uint16_t>((state_.pc + 8u +
+          sign_extend(code & 0x7FFu, 11u) * 8) & 0x3FFFu);
+      branch_pending_ = true;
+    }
     return true;
   }
   if (group != 0x40u) return false;
@@ -121,6 +161,13 @@ bool Vu1::execute_lower(std::uint32_t code) {
     const auto id = fd & 0xFu;
     if (id != 0u) state_.vi[id] = static_cast<std::uint16_t>(
         state_.vi[is] + state_.vi[it]);
+    return true;
+  }
+  if (function == 0x34u || function == 0x35u) { // IAND / IOR
+    const auto id = fd & 0xFu;
+    if (id != 0u) state_.vi[id] = static_cast<std::uint16_t>(
+        function == 0x34u ? state_.vi[is] & state_.vi[it]
+                          : state_.vi[is] | state_.vi[it]);
     return true;
   }
   if (function == 0x3Cu && fd == 0x0Cu) { // MOVE encoding of lower NOP.
@@ -140,6 +187,22 @@ bool Vu1::execute_lower(std::uint32_t code) {
     if (is != 0u) ++state_.vi[is];
     return true;
   }
+  if (function == 0x3Cu && fd == 0x0Eu) { // DIV
+    const auto fs = static_cast<unsigned>((code >> 11) & 0x1Fu);
+    const auto ft = static_cast<unsigned>((code >> 16) & 0x1Fu);
+    state_.q = as_bits(as_float(state_.vf[fs][(code >> 21) & 3u]) /
+                       as_float(state_.vf[ft][(code >> 23) & 3u]));
+    return true;
+  }
+  if (function == 0x3Cu && fd == 0x0Fu) { // MTIR
+    if (it != 0u) state_.vi[it] = static_cast<std::uint16_t>(
+        state_.vf[(code >> 11) & 0x1Fu][(code >> 21) & 3u]);
+    return true;
+  }
+  if (function == 0x3Cu && fd == 0x1Au) { // XTOP
+    if (it != 0u) state_.vi[it] = top_;
+    return true;
+  }
   if (function == 0x3Cu && fd == 0x1Bu) // XGKICK
     return kick_gif(is);
   if (function == 0x3Du && fd == 0x0Du) { // SQI
@@ -155,6 +218,29 @@ bool Vu1::execute_lower(std::uint32_t code) {
     if (address_reg != 0u) ++state_.vi[address_reg];
     return true;
   }
+  if (function == 0x3Du && fd == 0x0Fu) { // MFIR
+    const auto ft = static_cast<unsigned>((code >> 16) & 0x1Fu);
+    const auto value = static_cast<std::uint32_t>(static_cast<std::int32_t>(
+        static_cast<std::int16_t>(state_.vi[is])));
+    if (ft != 0u) {
+      for (unsigned lane = 0; lane < 4u; ++lane) {
+        if ((code & (1u << (24u - lane))) != 0u) state_.vf[ft][lane] = value;
+      }
+    }
+    return true;
+  }
+  if (function == 0x3Eu && fd == 0x0Fu) { // ILWR
+    if (it != 0u) {
+      const auto qword = state_.vi[is] & 0x3FFu;
+      for (unsigned lane = 0; lane < 4u; ++lane) {
+        if ((code & (1u << (24u - lane))) != 0u)
+          state_.vi[it] = static_cast<std::uint16_t>(memory_.read32(
+              Memory::kVu1DataBase + qword * 16u + lane * 4u));
+      }
+    }
+    return true;
+  }
+  if (function == 0x3Fu && fd == 0x0Eu) return true; // WAITQ
   return false;
 }
 
@@ -237,9 +323,51 @@ bool Vu1::execute_upper(std::uint32_t code) {
       apply_product(component, true, true);
       return true;
     }
+    if (function == 0x3Du && fd == 0x05u) { // FTOI4
+      if (ft != 0u) {
+        for (unsigned lane = 0; lane < 4u; ++lane) {
+          if ((code & (1u << (24u - lane))) != 0u)
+            state_.vf[ft][lane] = static_cast<std::uint32_t>(
+                static_cast<std::int32_t>(as_float(state_.vf[fs][lane]) * 16.0f));
+        }
+      }
+      return true;
+    }
   }
   if (function >= 0x08u && function <= 0x0Bu) { // MADDx/y/z/w
     apply_product(function - 0x08u, true, false);
+    return true;
+  }
+  if (function == 0x1Cu) { // MULq
+    const auto scalar = as_float(state_.q);
+    if (fd != 0u) {
+      for (unsigned lane = 0; lane < 4u; ++lane) {
+        if ((code & (1u << (24u - lane))) != 0u)
+          state_.vf[fd][lane] = as_bits(as_float(state_.vf[fs][lane]) * scalar);
+      }
+    }
+    return true;
+  }
+  const bool add_broadcast = function <= 0x03u;
+  const bool sub_broadcast = function >= 0x04u && function <= 0x07u;
+  const bool max_broadcast = function >= 0x10u && function <= 0x13u;
+  const bool vector_binary = function == 0x28u || function == 0x2Au ||
+                             function == 0x2Bu || function == 0x2Cu;
+  if (add_broadcast || sub_broadcast || max_broadcast || vector_binary) {
+    const auto component = function & 3u;
+    if (fd != 0u) {
+      for (unsigned lane = 0; lane < 4u; ++lane) {
+        if ((code & (1u << (24u - lane))) == 0u) continue;
+        const auto lhs = as_float(state_.vf[fs][lane]);
+        const auto rhs = as_float(state_.vf[ft][vector_binary ? lane : component]);
+        float result = 0.0f;
+        if (add_broadcast || function == 0x28u) result = lhs + rhs;
+        else if (sub_broadcast || function == 0x2Cu) result = lhs - rhs;
+        else if (max_broadcast || function == 0x2Bu) result = std::fmax(lhs, rhs);
+        else result = lhs * rhs;
+        state_.vf[fd][lane] = as_bits(result);
+      }
+    }
     return true;
   }
   return false;

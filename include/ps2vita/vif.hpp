@@ -26,6 +26,7 @@ public:
     return first_unsupported_code_;
   }
   std::uint16_t cycle() const { return cycle_; }
+  std::uint16_t top() const { return top_; }
   Vu1& vu1() { return vu1_; }
   const Vu1& vu1() const { return vu1_; }
 
@@ -38,6 +39,12 @@ private:
   std::uint64_t vectors_unpacked_ = 0;
   std::uint32_t first_unsupported_code_ = 0;
   std::uint16_t cycle_ = 0;
+  std::uint16_t base_ = 0;
+  std::uint16_t offset_ = 0;
+  std::uint16_t tops_ = 0;
+  std::uint16_t itops_ = 0;
+  std::uint16_t top_ = 0;
+  bool double_buffer_ = false;
 };
 
 } // namespace ps2vita
