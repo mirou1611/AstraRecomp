@@ -847,6 +847,12 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(emulator.vif1().vu1().last_kick_tag()),
       static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_queued()),
       static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_rejected()));
+  std::puts("VU1 integer registers:");
+  for (unsigned index = 0; index < 16u; ++index) {
+    std::printf("vi%-2u=%04X%c", index,
+        emulator.vif1().vu1().state().vi[index],
+        (index & 7u) == 7u ? '\n' : ' ');
+  }
   std::puts("VU1 data around XGKICK:");
   const auto kick_address = emulator.vif1().vu1().last_kick_address();
   for (unsigned qword = 0; qword < 16u; ++qword) {

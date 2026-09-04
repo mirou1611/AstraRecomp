@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace ps2vita {
 namespace {
@@ -21,6 +22,37 @@ std::uint32_t as_bits(float value) {
   std::uint32_t bits = 0;
   std::memcpy(&bits, &value, sizeof(bits));
   return bits;
+}
+
+std::uint32_t update_mac(std::uint16_t& mac, unsigned lane,
+                         std::uint32_t bits) {
+  const auto shift = 3u - lane;
+  const auto lane_mask = static_cast<std::uint16_t>(0x1111u << shift);
+  mac &= static_cast<std::uint16_t>(~lane_mask);
+  const auto sign = bits & 0x80000000u;
+  if (sign != 0u) mac |= static_cast<std::uint16_t>(0x10u << shift);
+  const auto exponent = (bits >> 23) & 0xFFu;
+  if ((bits & 0x7FFFFFFFu) == 0u) {
+    mac |= static_cast<std::uint16_t>(1u << shift);
+  } else if (exponent == 0u) {
+    mac |= static_cast<std::uint16_t>(0x101u << shift);
+    return sign;
+  } else if (exponent == 0xFFu) {
+    mac |= static_cast<std::uint16_t>(0x1000u << shift);
+    return sign | 0x7F7FFFFFu;
+  }
+  return bits;
+}
+
+std::uint32_t float_to_int(std::uint32_t bits, unsigned scale) {
+  const auto value = std::ldexp(static_cast<double>(as_float(bits)), scale);
+  if (std::isnan(value))
+    return (bits & 0x80000000u) != 0u ? 0x80000000u : 0x7FFFFFFFu;
+  if (value >= static_cast<double>(std::numeric_limits<std::int32_t>::max()))
+    return 0x7FFFFFFFu;
+  if (value <= static_cast<double>(std::numeric_limits<std::int32_t>::min()))
+    return 0x80000000u;
+  return static_cast<std::uint32_t>(static_cast<std::int32_t>(value));
 }
 
 } // namespace
@@ -68,6 +100,7 @@ bool Vu1::step() {
   const bool apply_branch = branch_pending_;
   const auto pending_target = branch_target_;
   const bool apply_end = end_pending_;
+  lower_mac_snapshot_ = state_.mac;
   branch_pending_ = false;
   end_pending_ = (upper & 0x40000000u) != 0u;
 
@@ -107,6 +140,11 @@ bool Vu1::execute_lower(std::uint32_t code) {
       if (store) memory_.write32(address, state_.vf[vector_reg][lane]);
       else if (vector_reg != 0u) state_.vf[vector_reg][lane] = memory_.read32(address);
     }
+    return true;
+  }
+  if (group == 0x1Au) { // FMAND
+    if (it != 0u) state_.vi[it] = static_cast<std::uint16_t>(
+        lower_mac_snapshot_ & state_.vi[is]);
     return true;
   }
   if (group == 0x08u || group == 0x09u) { // IADDIU / ISUBIU
@@ -161,6 +199,12 @@ bool Vu1::execute_lower(std::uint32_t code) {
     const auto id = fd & 0xFu;
     if (id != 0u) state_.vi[id] = static_cast<std::uint16_t>(
         state_.vi[is] + state_.vi[it]);
+    return true;
+  }
+  if (function == 0x32u) { // IADDI
+    const auto immediate = sign_extend((code >> 6) & 0x1Fu, 5u);
+    if (it != 0u) state_.vi[it] = static_cast<std::uint16_t>(
+        static_cast<std::int32_t>(state_.vi[is]) + immediate);
     return true;
   }
   if (function == 0x34u || function == 0x35u) { // IAND / IOR
@@ -305,11 +349,15 @@ bool Vu1::execute_upper(std::uint32_t code) {
     const auto scalar = as_float(state_.vf[ft][component]);
     const auto destination = static_cast<unsigned>((code >> 6) & 0x1Fu);
     for (unsigned lane = 0; lane < 4u; ++lane) {
-      if ((code & (1u << (24u - lane))) == 0u) continue;
+      if ((code & (1u << (24u - lane))) == 0u) {
+        state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
+        continue;
+      }
       auto value = as_float(state_.vf[fs][lane]) * scalar;
       if (add) value += as_float(state_.acc[lane]);
-      if (accumulator) state_.acc[lane] = as_bits(value);
-      else if (destination != 0u) state_.vf[destination][lane] = as_bits(value);
+      const auto bits = update_mac(state_.mac, lane, as_bits(value));
+      if (accumulator) state_.acc[lane] = bits;
+      else if (destination != 0u) state_.vf[destination][lane] = bits;
     }
   };
 
@@ -323,12 +371,13 @@ bool Vu1::execute_upper(std::uint32_t code) {
       apply_product(component, true, true);
       return true;
     }
-    if (function == 0x3Du && fd == 0x05u) { // FTOI4
+    if (fd == 0x05u) { // FTOI0 / FTOI4 / FTOI12 / FTOI15
+      constexpr unsigned scales[4] = {0u, 4u, 12u, 15u};
       if (ft != 0u) {
         for (unsigned lane = 0; lane < 4u; ++lane) {
           if ((code & (1u << (24u - lane))) != 0u)
-            state_.vf[ft][lane] = static_cast<std::uint32_t>(
-                static_cast<std::int32_t>(as_float(state_.vf[fs][lane]) * 16.0f));
+            state_.vf[ft][lane] = float_to_int(
+                state_.vf[fs][lane], scales[function - 0x3Cu]);
         }
       }
       return true;
@@ -342,8 +391,12 @@ bool Vu1::execute_upper(std::uint32_t code) {
     const auto scalar = as_float(state_.q);
     if (fd != 0u) {
       for (unsigned lane = 0; lane < 4u; ++lane) {
-        if ((code & (1u << (24u - lane))) != 0u)
-          state_.vf[fd][lane] = as_bits(as_float(state_.vf[fs][lane]) * scalar);
+        if ((code & (1u << (24u - lane))) != 0u) {
+          state_.vf[fd][lane] = update_mac(state_.mac, lane,
+              as_bits(as_float(state_.vf[fs][lane]) * scalar));
+        } else {
+          state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
+        }
       }
     }
     return true;
@@ -357,7 +410,10 @@ bool Vu1::execute_upper(std::uint32_t code) {
     const auto component = function & 3u;
     if (fd != 0u) {
       for (unsigned lane = 0; lane < 4u; ++lane) {
-        if ((code & (1u << (24u - lane))) == 0u) continue;
+        if ((code & (1u << (24u - lane))) == 0u) {
+          state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
+          continue;
+        }
         const auto lhs = as_float(state_.vf[fs][lane]);
         const auto rhs = as_float(state_.vf[ft][vector_binary ? lane : component]);
         float result = 0.0f;
@@ -365,7 +421,7 @@ bool Vu1::execute_upper(std::uint32_t code) {
         else if (sub_broadcast || function == 0x2Cu) result = lhs - rhs;
         else if (max_broadcast || function == 0x2Bu) result = std::fmax(lhs, rhs);
         else result = lhs * rhs;
-        state_.vf[fd][lane] = as_bits(result);
+        state_.vf[fd][lane] = update_mac(state_.mac, lane, as_bits(result));
       }
     }
     return true;

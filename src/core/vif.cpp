@@ -5,6 +5,11 @@
 namespace ps2vita {
 namespace {
 
+// The BIOS VU1 setup program contains a finite ~32K-iteration transform loop
+// that needs roughly one million instruction pairs. Keep a guard above that
+// observed workload so malformed microcode still cannot hang packet parsing.
+constexpr std::uint64_t kVu1ExecutionBudget = 2000000u;
+
 std::uint32_t load32(const std::uint8_t* data) {
   std::uint32_t value = 0;
   std::memcpy(&value, data, sizeof(value));
@@ -72,7 +77,12 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       double_buffer_ = !double_buffer_;
       vu1_.set_top(top_);
       vu1_.start(static_cast<std::uint16_t>((code & 0x3FFu) * 8u));
-      vu1_.run(100000u);
+      vu1_.run(kVu1ExecutionBudget);
+      if (vu1_.running()) {
+        if (first_unsupported_code_ == 0u) first_unsupported_code_ = code;
+        ++packets_rejected_;
+        return false;
+      }
       continue;
     }
     if (opcode == 0x17u) { // MSCNT: continue at the current VU1 TPC.
@@ -82,7 +92,12 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       double_buffer_ = !double_buffer_;
       vu1_.set_top(top_);
       vu1_.resume();
-      vu1_.run(100000u);
+      vu1_.run(kVu1ExecutionBudget);
+      if (vu1_.running()) {
+        if (first_unsupported_code_ == 0u) first_unsupported_code_ = code;
+        ++packets_rejected_;
+        return false;
+      }
       continue;
     }
     if (opcode == 0x30u || opcode == 0x31u) { // STROW / STCOL

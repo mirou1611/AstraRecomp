@@ -15,6 +15,7 @@ struct Vu1State {
   std::array<std::uint32_t, 4> acc{};
   std::uint32_t i = 0;
   std::uint32_t q = 0;
+  std::uint16_t mac = 0;
   std::uint16_t pc = 0;
 };
 
@@ -65,6 +66,7 @@ private:
   std::uint64_t path1_tags_queued_ = 0;
   std::uint64_t path1_tags_rejected_ = 0;
   std::uint16_t top_ = 0;
+  std::uint16_t lower_mac_snapshot_ = 0;
   std::deque<std::vector<std::uint8_t>> path1_packets_;
 };
 

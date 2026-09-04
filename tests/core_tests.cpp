@@ -1797,12 +1797,57 @@ void test_vu1_ftoi4() {
         "VU1 captured FTOI4 converts and masks scaled integer lanes");
 }
 
+void test_vu1_captured_ftoi0() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01F9D17Cu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[26] = {{0x40200000u, 0xC0200000u, 0x7F800000u, 0x3F000000u}};
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vf[25][0] == 2u &&
+        vu.state().vf[25][1] == static_cast<std::uint32_t>(-2) &&
+        vu.state().vf[25][2] == 0x7FFFFFFFu,
+        "VU1 captured FTOI0 truncates normal lanes and saturates overflow");
+}
+
+void test_vu1_captured_iaddi() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800A57F2u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[10] = 3u;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vi[10] == 2u,
+        "VU1 captured IADDI sign-extends its five-bit negative immediate");
+}
+
+void test_vu1_fmand_prior_pair_flags() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x34016000u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01ED49BCu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().mac = 0x00F0u;
+  vu.state().vi[12] = 0x0050u;
+  vu.state().vf[9][0] = 0x40000000u;
+  vu.state().vf[13][0] = 0x40400000u;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vi[1] == 0x0050u,
+        "VU1 FMAND reads the prior MAC flags from its paired upper instruction");
+}
+
 void test_vif1_top_relative_unpack() {
   std::array<std::uint32_t, 8> words{{
       0x03000020u, 0x02000010u, 0x14000000u, 0x6C018000u,
       1u, 2u, 3u, 4u,
   }};
   ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x400002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
   ps2vita::Vif1 vif(memory);
   check(vif.submit(reinterpret_cast<const std::uint8_t*>(words.data()),
                    sizeof(words)) && vif.top() == 0x20u,
@@ -2289,6 +2334,9 @@ int main() {
   test_vu1_div_mulq();
   test_vu1_captured_max_sub();
   test_vu1_ftoi4();
+  test_vu1_captured_ftoi0();
+  test_vu1_captured_iaddi();
+  test_vu1_fmand_prior_pair_flags();
   test_vif1_top_relative_unpack();
   test_captured_bios_gif_sprite();
   test_gif_reglist_sprite();
