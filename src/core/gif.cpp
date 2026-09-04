@@ -22,11 +22,14 @@ int scaled_coordinate(std::uint64_t xyz, std::uint64_t offset,
 
 } // namespace
 
+Gif::Gif(Gs& gs) : gs_(gs), local_memory_(4u * 1024u * 1024u) {}
+
 void Gif::reset() {
   prim_ = 0;
   rgbaq_ = 0x8000000080808080ull;
   xyoffset_[0] = xyoffset_[1] = 0;
   scissor_[0] = scissor_[1] = 0x07FF000007FF0000ull;
+  bitbltbuf_ = trxpos_ = trxreg_ = trxdir_ = 0;
   first_xyz2_ = 0;
   have_first_xyz2_ = false;
   vertex_count_ = 0;
@@ -34,10 +37,16 @@ void Gif::reset() {
   packets_submitted_ = 0;
   packets_rejected_ = 0;
   sprites_emitted_ = 0;
+  points_emitted_ = lines_emitted_ = triangles_emitted_ = 0;
   packed_tags_ = 0;
   reglist_tags_ = 0;
   image_tags_ = 0;
   image_bytes_ = 0;
+  first_image_bitbltbuf_ = first_image_trxpos_ = 0;
+  first_image_trxreg_ = first_image_trxdir_ = 0;
+  image_records_.clear();
+  std::fill(local_memory_.begin(), local_memory_.end(), 0u);
+  local_bytes_written_ = 0;
   first_unsupported_tag_ = 0;
 }
 
@@ -100,7 +109,29 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
       }
       cursor = (cursor + 15u) & ~std::size_t{15u};
     } else {
+      if (image_tags_ == 0u) {
+        first_image_bitbltbuf_ = bitbltbuf_;
+        first_image_trxpos_ = trxpos_;
+        first_image_trxreg_ = trxreg_;
+        first_image_trxdir_ = trxdir_;
+      }
       ++image_tags_;
+      GifImageRecord record{};
+      record.tag = tag;
+      record.bitbltbuf = bitbltbuf_;
+      record.trxpos = trxpos_;
+      record.trxreg = trxreg_;
+      record.trxdir = trxdir_;
+      record.bytes = payload_bytes;
+      record.first_qword = payload_bytes == 0u ? 0u :
+          load64(pending_.data() + cursor);
+      record.hash = 1469598103934665603ull;
+      for (std::size_t byte = 0; byte < payload_bytes; ++byte) {
+        record.hash ^= pending_[cursor + byte];
+        record.hash *= 1099511628211ull;
+      }
+      image_records_.push_back(record);
+      write_image(pending_.data() + cursor, payload_bytes);
       // IMAGE/IMAGE2 qwords contain raw transfer data, not register values.
       // Traverse them so later tags in the same DMA packet are still parsed.
       cursor += payload_bytes;
@@ -111,6 +142,43 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
     pending_.erase(pending_.begin(), pending_.begin() +
                    static_cast<std::ptrdiff_t>(cursor));
   return true;
+}
+
+std::uint32_t Gif::read_local32(std::uint32_t byte_address) const {
+  std::uint32_t value = 0;
+  for (unsigned byte = 0; byte < 4u; ++byte)
+    value |= static_cast<std::uint32_t>(
+        local_memory_[(byte_address + byte) & 0x3FFFFFu]) << (byte * 8u);
+  return value;
+}
+
+void Gif::write_image(const std::uint8_t* data, std::size_t size) {
+  if ((trxdir_ & 3u) != 0u) return; // This slice models host-to-local only.
+  const auto pixel_format = static_cast<unsigned>((bitbltbuf_ >> 56) & 0x3Fu);
+  const auto bytes_per_pixel = pixel_format == 0u ? 4u :
+                               pixel_format == 2u ? 2u : 0u;
+  if (bytes_per_pixel == 0u) return;
+  const auto base = static_cast<std::uint32_t>(
+      ((bitbltbuf_ >> 32) & 0x3FFFu) * 256u);
+  const auto buffer_width = static_cast<unsigned>(
+      (bitbltbuf_ >> 48) & 0x3Fu) * 64u;
+  const auto destination_x = static_cast<unsigned>((trxpos_ >> 32) & 0x7FFu);
+  const auto destination_y = static_cast<unsigned>((trxpos_ >> 48) & 0x7FFu);
+  const auto width = static_cast<unsigned>(trxreg_ & 0xFFFu);
+  const auto height = static_cast<unsigned>((trxreg_ >> 32) & 0xFFFu);
+  if (buffer_width == 0u || width == 0u || height == 0u) return;
+  const auto pixels = std::min<std::size_t>(
+      size / bytes_per_pixel, static_cast<std::size_t>(width) * height);
+  for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+    const auto x = destination_x + static_cast<unsigned>(pixel % width);
+    const auto y = destination_y + static_cast<unsigned>(pixel / width);
+    const auto destination = base +
+        static_cast<std::uint32_t>((y * buffer_width + x) * bytes_per_pixel);
+    for (unsigned byte = 0; byte < bytes_per_pixel; ++byte)
+      local_memory_[(destination + byte) & 0x3FFFFFu] =
+          data[pixel * bytes_per_pixel + byte];
+  }
+  local_bytes_written_ += pixels * bytes_per_pixel;
 }
 
 void Gif::set_prim(std::uint64_t value) {
@@ -130,6 +198,10 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   case 0x19: xyoffset_[1] = value; break;
   case 0x40: scissor_[0] = value; break;
   case 0x41: scissor_[1] = value; break;
+  case 0x50: bitbltbuf_ = value; break;
+  case 0x51: trxpos_ = value; break;
+  case 0x52: trxreg_ = value; break;
+  case 0x53: trxdir_ = value; break;
   default: break;
   }
 }
@@ -147,12 +219,14 @@ void Gif::emit_xyz2(std::uint64_t value) {
 
   if (primitive == 0u) {
     gs_.point(make_vertex(value));
+    ++points_emitted_;
     return;
   }
   if (primitive == 1u || primitive == 2u) {
     const auto vertex = make_vertex(value);
     if (vertex_count_ != 0u) {
       gs_.line(vertices_[0], vertex);
+      ++lines_emitted_;
       if (primitive == 1u) vertex_count_ = 0u;
       else vertices_[0] = vertex;
     } else {
@@ -168,6 +242,7 @@ void Gif::emit_xyz2(std::uint64_t value) {
       return;
     }
     gs_.triangle(vertices_[0], vertices_[1], vertex);
+    ++triangles_emitted_;
     if (primitive == 3u) vertex_count_ = 0u;
     else if (primitive == 4u) {
       vertices_[0] = vertices_[1];

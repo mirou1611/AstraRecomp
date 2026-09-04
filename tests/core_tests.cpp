@@ -1933,6 +1933,30 @@ void test_gif_image_continues_to_pre_primitive() {
         "GIF PRE field selects the primitive before packed XYZ2");
 }
 
+void test_gif_psmct32_host_to_local_transfer() {
+  constexpr std::array<std::array<std::uint64_t, 2>, 7> qwords{{
+      {{0x1000000000008004ull, 0xEull}},
+      {{0x0001000100000000ull, 0x50ull}}, // DBP=1, DBW=1, PSMCT32
+      {{0u, 0x51ull}},
+      {{0x0000000200000002ull, 0x52ull}}, // 2x2 rectangle
+      {{0u, 0x53ull}},
+      {{0x0800000000008001ull, 0u}},
+      {{0x2222222211111111ull, 0x4444444433333333ull}},
+  }};
+  std::vector<std::uint8_t> packet(sizeof(qwords));
+  std::memcpy(packet.data(), qwords.data(), packet.size());
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  check(gif.submit(packet.data(), packet.size()) &&
+        gif.local_bytes_written() == 16u,
+        "GIF PSMCT32 IMAGE writes a host-to-local rectangle");
+  check(gif.read_local32(0x100u) == 0x11111111u &&
+        gif.read_local32(0x104u) == 0x22222222u &&
+        gif.read_local32(0x200u) == 0x33333333u &&
+        gif.read_local32(0x204u) == 0x44444444u,
+        "GS local-memory oracle applies DBP, DBW, and row stride");
+}
+
 void put16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
   v[at] = static_cast<std::uint8_t>(x); v[at + 1] = static_cast<std::uint8_t>(x >> 8);
 }
@@ -2364,6 +2388,7 @@ int main() {
   test_captured_bios_gif_sprite();
   test_gif_reglist_sprite();
   test_gif_image_continues_to_pre_primitive();
+  test_gif_psmct32_host_to_local_transfer();
   test_elf_and_emulator();
   test_phase0_aot_contract();
   if (failures) return EXIT_FAILURE;

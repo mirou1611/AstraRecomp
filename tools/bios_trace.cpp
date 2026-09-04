@@ -819,7 +819,7 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(nonzero_pixels),
       ps2vita::Gs::kWidth * ps2vita::Gs::kHeight);
   std::printf("gif_packets=%llu rejected=%llu sprites=%llu tags=%llu/%llu/%llu "
-              "image_bytes=%llu first_unsupported=%016llX\n",
+              "image_bytes=%llu local_bytes=%llu pending=%llu first_unsupported=%016llX\n",
       static_cast<unsigned long long>(emulator.gif().packets_submitted()),
       static_cast<unsigned long long>(emulator.gif().packets_rejected()),
       static_cast<unsigned long long>(emulator.gif().sprites_emitted()),
@@ -827,7 +827,32 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(emulator.gif().reglist_tags()),
       static_cast<unsigned long long>(emulator.gif().image_tags()),
       static_cast<unsigned long long>(emulator.gif().image_bytes()),
+      static_cast<unsigned long long>(emulator.gif().local_bytes_written()),
+      static_cast<unsigned long long>(emulator.gif().pending_bytes()),
       static_cast<unsigned long long>(emulator.gif().first_unsupported_tag()));
+  std::printf("gif_primitives points=%llu lines=%llu triangles=%llu "
+              "first_image_regs=%016llX/%016llX/%016llX/%016llX\n",
+      static_cast<unsigned long long>(emulator.gif().points_emitted()),
+      static_cast<unsigned long long>(emulator.gif().lines_emitted()),
+      static_cast<unsigned long long>(emulator.gif().triangles_emitted()),
+      static_cast<unsigned long long>(emulator.gif().first_image_bitbltbuf()),
+      static_cast<unsigned long long>(emulator.gif().first_image_trxpos()),
+      static_cast<unsigned long long>(emulator.gif().first_image_trxreg()),
+      static_cast<unsigned long long>(emulator.gif().first_image_trxdir()));
+  for (std::size_t index = 0; index < emulator.gif().image_records().size();
+       ++index) {
+    const auto& image = emulator.gif().image_records()[index];
+    std::printf("gif_image[%zu] tag=%016llX regs=%016llX/%016llX/%016llX/%016llX "
+                "bytes=%llu first=%016llX hash=%016llX\n", index,
+        static_cast<unsigned long long>(image.tag),
+        static_cast<unsigned long long>(image.bitbltbuf),
+        static_cast<unsigned long long>(image.trxpos),
+        static_cast<unsigned long long>(image.trxreg),
+        static_cast<unsigned long long>(image.trxdir),
+        static_cast<unsigned long long>(image.bytes),
+        static_cast<unsigned long long>(image.first_qword),
+        static_cast<unsigned long long>(image.hash));
+  }
   std::printf("vif1_packets=%llu rejected=%llu mpg_instructions=%llu "
               "unpacked_vectors=%llu first_unsupported=%08X\n",
       static_cast<unsigned long long>(emulator.vif1().packets_submitted()),
