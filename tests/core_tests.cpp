@@ -1910,6 +1910,29 @@ void test_gif_reglist_sprite() {
         "GIF REGLIST registers emit a masked quarter-scale sprite");
 }
 
+void test_gif_image_continues_to_pre_primitive() {
+  // One IMAGE qword followed by a PRE=1 packed point tag. Raw image data has
+  // no descriptors and must not terminate parsing of the enclosing DMA packet.
+  constexpr std::array<std::array<std::uint64_t, 2>, 4> qwords{{
+      {{0x0800000000008001ull, 0u}},
+      {{0x0123456789ABCDEFull, 0xFEDCBA9876543210ull}},
+      {{0x1000400000008001ull, 0x0000000000000005ull}},
+      {{0x0000000000100010ull, 0u}},
+  }};
+  std::vector<std::uint8_t> packet(sizeof(qwords));
+  std::memcpy(packet.data(), qwords.data(), packet.size());
+  ps2vita::Gs gs;
+  gs.clear(0u);
+  ps2vita::Gif gif(gs);
+  check(gif.submit(packet.data(), 24u) && gif.image_tags() == 0u &&
+        gif.submit(packet.data() + 24u, packet.size() - 24u) &&
+        gif.image_tags() == 1u && gif.image_bytes() == 16u &&
+        gif.packets_rejected() == 0u,
+        "GIF IMAGE traversal spans DMA bursts and reaches a following tag");
+  check(gs.pixel(0, 0) == 0x80808080u,
+        "GIF PRE field selects the primitive before packed XYZ2");
+}
+
 void put16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
   v[at] = static_cast<std::uint8_t>(x); v[at + 1] = static_cast<std::uint8_t>(x >> 8);
 }
@@ -2340,6 +2363,7 @@ int main() {
   test_vif1_top_relative_unpack();
   test_captured_bios_gif_sprite();
   test_gif_reglist_sprite();
+  test_gif_image_continues_to_pre_primitive();
   test_elf_and_emulator();
   test_phase0_aot_contract();
   if (failures) return EXIT_FAILURE;

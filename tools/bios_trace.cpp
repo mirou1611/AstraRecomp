@@ -819,13 +819,14 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(nonzero_pixels),
       ps2vita::Gs::kWidth * ps2vita::Gs::kHeight);
   std::printf("gif_packets=%llu rejected=%llu sprites=%llu tags=%llu/%llu/%llu "
-              "first_unsupported=%016llX\n",
+              "image_bytes=%llu first_unsupported=%016llX\n",
       static_cast<unsigned long long>(emulator.gif().packets_submitted()),
       static_cast<unsigned long long>(emulator.gif().packets_rejected()),
       static_cast<unsigned long long>(emulator.gif().sprites_emitted()),
       static_cast<unsigned long long>(emulator.gif().packed_tags()),
       static_cast<unsigned long long>(emulator.gif().reglist_tags()),
       static_cast<unsigned long long>(emulator.gif().image_tags()),
+      static_cast<unsigned long long>(emulator.gif().image_bytes()),
       static_cast<unsigned long long>(emulator.gif().first_unsupported_tag()));
   std::printf("vif1_packets=%llu rejected=%llu mpg_instructions=%llu "
               "unpacked_vectors=%llu first_unsupported=%08X\n",

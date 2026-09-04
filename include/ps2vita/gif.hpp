@@ -2,8 +2,10 @@
 
 #include "ps2vita/gs.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace ps2vita {
 
@@ -20,9 +22,11 @@ public:
   std::uint64_t packed_tags() const { return packed_tags_; }
   std::uint64_t reglist_tags() const { return reglist_tags_; }
   std::uint64_t image_tags() const { return image_tags_; }
+  std::uint64_t image_bytes() const { return image_bytes_; }
   std::uint64_t first_unsupported_tag() const { return first_unsupported_tag_; }
 
 private:
+  void set_prim(std::uint64_t value);
   void write_register(std::uint8_t address, std::uint64_t value);
   void emit_xyz2(std::uint64_t value);
 
@@ -34,12 +38,16 @@ private:
                             0x07FF000007FF0000ull};
   std::uint64_t first_xyz2_ = 0;
   bool have_first_xyz2_ = false;
+  std::array<GsVertex, 3> vertices_{};
+  unsigned vertex_count_ = 0;
+  std::vector<std::uint8_t> pending_;
   std::uint64_t packets_submitted_ = 0;
   std::uint64_t packets_rejected_ = 0;
   std::uint64_t sprites_emitted_ = 0;
   std::uint64_t packed_tags_ = 0;
   std::uint64_t reglist_tags_ = 0;
   std::uint64_t image_tags_ = 0;
+  std::uint64_t image_bytes_ = 0;
   std::uint64_t first_unsupported_tag_ = 0;
 };
 

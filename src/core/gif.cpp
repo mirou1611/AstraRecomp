@@ -29,26 +29,42 @@ void Gif::reset() {
   scissor_[0] = scissor_[1] = 0x07FF000007FF0000ull;
   first_xyz2_ = 0;
   have_first_xyz2_ = false;
+  vertex_count_ = 0;
+  pending_.clear();
   packets_submitted_ = 0;
   packets_rejected_ = 0;
   sprites_emitted_ = 0;
   packed_tags_ = 0;
   reglist_tags_ = 0;
   image_tags_ = 0;
+  image_bytes_ = 0;
   first_unsupported_tag_ = 0;
 }
 
 bool Gif::submit(const std::uint8_t* data, std::size_t size) {
   ++packets_submitted_;
+  pending_.insert(pending_.end(), data, data + size);
   std::size_t cursor = 0;
-  while (cursor + 16u <= size) {
-    const auto tag = load64(data + cursor);
-    const auto registers = load64(data + cursor + 8u);
-    cursor += 16u;
+  while (cursor + 16u <= pending_.size()) {
+    const auto tag_start = cursor;
+    const auto tag = load64(pending_.data() + cursor);
+    const auto registers = load64(pending_.data() + cursor + 8u);
     const auto loops = static_cast<unsigned>(tag & 0x7FFFu);
     const auto format = static_cast<unsigned>((tag >> 58) & 3u);
     auto register_count = static_cast<unsigned>((tag >> 60) & 0xFu);
     if (register_count == 0u) register_count = 16u;
+    std::size_t payload_bytes = 0;
+    if (format == 0u)
+      payload_bytes = static_cast<std::size_t>(loops) * register_count * 16u;
+    else if (format == 1u)
+      payload_bytes = ((static_cast<std::size_t>(loops) * register_count + 1u) /
+                       2u) * 16u;
+    else
+      payload_bytes = static_cast<std::size_t>(loops) * 16u;
+    if (pending_.size() - tag_start < 16u + payload_bytes) break;
+    cursor += 16u;
+    if ((tag & (1ull << 46)) != 0u)
+      set_prim((tag >> 47) & 0x7FFu);
 
     if (format == 0u) {
       ++packed_tags_;
@@ -57,11 +73,10 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
       // of the common packed registers.
       for (unsigned loop = 0; loop < loops; ++loop) {
         for (unsigned reg = 0; reg < register_count; ++reg) {
-          if (cursor + 16u > size) { ++packets_rejected_; return false; }
           const auto descriptor = static_cast<unsigned>(
               (registers >> ((reg & 15u) * 4u)) & 0xFu);
-          const auto value = load64(data + cursor);
-          const auto upper = load64(data + cursor + 8u);
+          const auto value = load64(pending_.data() + cursor);
+          const auto upper = load64(pending_.data() + cursor + 8u);
           if (descriptor == 0xEu)
             write_register(static_cast<std::uint8_t>(upper), value);
           else if (descriptor != 0xFu)
@@ -75,31 +90,40 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
       // value count to the next qword. Register descriptors are direct.
       for (unsigned loop = 0; loop < loops; ++loop) {
         for (unsigned reg = 0; reg < register_count; ++reg) {
-          if (cursor + 8u > size) { ++packets_rejected_; return false; }
           const auto descriptor = static_cast<unsigned>(
               (registers >> ((reg & 15u) * 4u)) & 0xFu);
           if (descriptor != 0xEu && descriptor != 0xFu)
             write_register(static_cast<std::uint8_t>(descriptor),
-                           load64(data + cursor));
+                           load64(pending_.data() + cursor));
           cursor += 8u;
         }
       }
       cursor = (cursor + 15u) & ~std::size_t{15u};
-      if (cursor > size) { ++packets_rejected_; return false; }
     } else {
       ++image_tags_;
-      if (first_unsupported_tag_ == 0u) first_unsupported_tag_ = tag;
-      ++packets_rejected_;
-      return false;
+      // IMAGE/IMAGE2 qwords contain raw transfer data, not register values.
+      // Traverse them so later tags in the same DMA packet are still parsed.
+      cursor += payload_bytes;
+      image_bytes_ += payload_bytes;
     }
   }
-  if (cursor > size) { ++packets_rejected_; return false; }
+  if (cursor != 0u)
+    pending_.erase(pending_.begin(), pending_.begin() +
+                   static_cast<std::ptrdiff_t>(cursor));
   return true;
+}
+
+void Gif::set_prim(std::uint64_t value) {
+  if (prim_ != value) {
+    vertex_count_ = 0;
+    have_first_xyz2_ = false;
+  }
+  prim_ = value;
 }
 
 void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   switch (address) {
-  case 0x00: prim_ = value; break;
+  case 0x00: set_prim(value); break;
   case 0x01: rgbaq_ = value; break;
   case 0x05: emit_xyz2(value); break;
   case 0x18: xyoffset_[0] = value; break;
@@ -111,14 +135,55 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
 }
 
 void Gif::emit_xyz2(std::uint64_t value) {
-  if ((prim_ & 7u) != 6u) return; // This slice implements GS sprites.
+  const auto primitive = static_cast<unsigned>(prim_ & 7u);
+  const auto context = static_cast<unsigned>((prim_ >> 9) & 1u);
+  const auto make_vertex = [&](std::uint64_t xyz) {
+    return GsVertex{
+        scaled_coordinate(xyz, xyoffset_[context], 0u, 0u),
+        scaled_coordinate(xyz, xyoffset_[context], 16u, 32u),
+        static_cast<std::uint32_t>(xyz >> 32),
+        static_cast<std::uint32_t>(rgbaq_)};
+  };
+
+  if (primitive == 0u) {
+    gs_.point(make_vertex(value));
+    return;
+  }
+  if (primitive == 1u || primitive == 2u) {
+    const auto vertex = make_vertex(value);
+    if (vertex_count_ != 0u) {
+      gs_.line(vertices_[0], vertex);
+      if (primitive == 1u) vertex_count_ = 0u;
+      else vertices_[0] = vertex;
+    } else {
+      vertices_[0] = vertex;
+      vertex_count_ = 1u;
+    }
+    return;
+  }
+  if (primitive >= 3u && primitive <= 5u) {
+    const auto vertex = make_vertex(value);
+    if (vertex_count_ < 2u) {
+      vertices_[vertex_count_++] = vertex;
+      return;
+    }
+    gs_.triangle(vertices_[0], vertices_[1], vertex);
+    if (primitive == 3u) vertex_count_ = 0u;
+    else if (primitive == 4u) {
+      vertices_[0] = vertices_[1];
+      vertices_[1] = vertex;
+    } else {
+      vertices_[1] = vertex;
+    }
+    return;
+  }
+  if (primitive != 6u) return;
   if (!have_first_xyz2_) {
     first_xyz2_ = value;
     have_first_xyz2_ = true;
     return;
   }
 
-  const auto context = static_cast<unsigned>((prim_ >> 9) & 1u);
   auto x0 = scaled_coordinate(first_xyz2_, xyoffset_[context], 0u, 0u);
   auto y0 = scaled_coordinate(first_xyz2_, xyoffset_[context], 16u, 32u);
   auto x1 = scaled_coordinate(value, xyoffset_[context], 0u, 0u);
