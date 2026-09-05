@@ -53,12 +53,16 @@ private:
   void set_prim(std::uint64_t value);
   void write_register(std::uint8_t address, std::uint64_t value);
   void write_image(const std::uint8_t* data, std::size_t size);
+  std::uint32_t sample_texture(unsigned context, unsigned u, unsigned v,
+                               std::uint32_t vertex_color) const;
   void emit_xyz2(std::uint64_t value);
 
   Gs& gs_;
   std::vector<std::uint8_t> local_memory_;
   std::uint64_t prim_ = 0;
   std::uint64_t rgbaq_ = 0x8000000080808080ull;
+  std::uint64_t tex0_[2]{};
+  std::uint64_t uv_ = 0;
   std::uint64_t xyoffset_[2]{};
   std::uint64_t scissor_[2]{0x07FF000007FF0000ull,
                             0x07FF000007FF0000ull};
@@ -67,6 +71,7 @@ private:
   std::uint64_t trxreg_ = 0;
   std::uint64_t trxdir_ = 0;
   std::uint64_t first_xyz2_ = 0;
+  std::uint64_t first_uv_ = 0;
   bool have_first_xyz2_ = false;
   std::array<GsVertex, 3> vertices_{};
   unsigned vertex_count_ = 0;

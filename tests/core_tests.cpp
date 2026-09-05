@@ -1957,6 +1957,43 @@ void test_gif_psmct32_host_to_local_transfer() {
         "GS local-memory oracle applies DBP, DBW, and row stride");
 }
 
+void test_gif_textured_sprite_from_local_memory() {
+  constexpr std::array<std::array<std::uint64_t, 2>, 7> upload{{
+      {{0x1000000000008004ull, 0xEull}},
+      {{0x0001000100000000ull, 0x50ull}},
+      {{0u, 0x51ull}},
+      {{0x0000000200000002ull, 0x52ull}},
+      {{0u, 0x53ull}},
+      {{0x0800000000008001ull, 0u}},
+      {{0xFF00FF00FF0000FFull, 0xFFFFFFFFFFFF0000ull}},
+  }};
+  constexpr std::uint64_t tex0 = 1ull | (1ull << 14) | (1ull << 26) |
+      (1ull << 30) | (1ull << 34) | (1ull << 35);
+  constexpr std::array<std::array<std::uint64_t, 2>, 8> draw{{
+      {{0x1000000000008002ull, 0xEull}},
+      {{tex0, 0x06ull}},
+      {{0x116ull, 0x00ull}}, // SPRITE + TME + FST
+      {{0x2000000000008002ull, 0x53ull}},
+      {{0u, 0u}},
+      {{0u, 0u}},
+      {{0x00200020ull, 0u}},
+      {{0x00800080ull, 0u}},
+  }};
+  ps2vita::Gs gs;
+  gs.clear(0u);
+  ps2vita::Gif gif(gs);
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()),
+                   sizeof(upload)) &&
+        gif.submit(reinterpret_cast<const std::uint8_t*>(draw.data()),
+                   sizeof(draw)),
+        "GIF textured-sprite fixture uploads and draws");
+  check(gs.pixel(0, 0) == 0xFF0000FFu &&
+        gs.pixel(1, 0) == 0xFF00FF00u &&
+        gs.pixel(0, 1) == 0xFFFF0000u &&
+        gs.pixel(1, 1) == 0xFFFFFFFFu,
+        "GIF UV sprite samples the logical PSMCT32 surface");
+}
+
 void put16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
   v[at] = static_cast<std::uint8_t>(x); v[at + 1] = static_cast<std::uint8_t>(x >> 8);
 }
@@ -2389,6 +2426,7 @@ int main() {
   test_gif_reglist_sprite();
   test_gif_image_continues_to_pre_primitive();
   test_gif_psmct32_host_to_local_transfer();
+  test_gif_textured_sprite_from_local_memory();
   test_elf_and_emulator();
   test_phase0_aot_contract();
   if (failures) return EXIT_FAILURE;
