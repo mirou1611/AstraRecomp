@@ -71,6 +71,8 @@ void Vu1::reset() {
   last_kick_tag_ = 0;
   path1_tags_queued_ = 0;
   path1_tags_rejected_ = 0;
+  first_rejected_tag_ = 0;
+  first_rejected_address_ = 0;
   top_ = 0;
   path1_packets_.clear();
 }
@@ -313,6 +315,10 @@ bool Vu1::kick_gif(unsigned address_reg) {
       payload_size = ((std::uint64_t{loops} * registers + 1u) / 2u) * 16u;
     else payload_size = std::uint64_t{loops} * 16u;
     if (payload_size > 0x3FF0u) {
+      if (path1_tags_rejected_ == 0u) {
+        first_rejected_tag_ = tag;
+        first_rejected_address_ = static_cast<std::uint16_t>((offset - 16u) & 0x3FFFu);
+      }
       ++path1_tags_rejected_;
       return true;
     }
@@ -408,20 +414,24 @@ bool Vu1::execute_upper(std::uint32_t code) {
                              function == 0x2Bu || function == 0x2Cu;
   if (add_broadcast || sub_broadcast || max_broadcast || vector_binary) {
     const auto component = function & 3u;
+    const auto broadcast = as_float(state_.vf[ft][component]);
+    const bool changes_mac = !max_broadcast && function != 0x2Bu;
     if (fd != 0u) {
       for (unsigned lane = 0; lane < 4u; ++lane) {
         if ((code & (1u << (24u - lane))) == 0u) {
-          state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
+          if (changes_mac)
+            state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
           continue;
         }
         const auto lhs = as_float(state_.vf[fs][lane]);
-        const auto rhs = as_float(state_.vf[ft][vector_binary ? lane : component]);
+        const auto rhs = vector_binary ? as_float(state_.vf[ft][lane]) : broadcast;
         float result = 0.0f;
         if (add_broadcast || function == 0x28u) result = lhs + rhs;
         else if (sub_broadcast || function == 0x2Cu) result = lhs - rhs;
         else if (max_broadcast || function == 0x2Bu) result = std::fmax(lhs, rhs);
         else result = lhs * rhs;
-        state_.vf[fd][lane] = update_mac(state_.mac, lane, as_bits(result));
+        state_.vf[fd][lane] = changes_mac ?
+            update_mac(state_.mac, lane, as_bits(result)) : as_bits(result);
       }
     }
     return true;

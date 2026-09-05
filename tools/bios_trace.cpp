@@ -874,6 +874,9 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_queued()),
       static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_rejected()));
   std::puts("VU1 integer registers:");
+  std::printf("vu1_first_rejected_tag=%016llX address=%04X\n",
+      static_cast<unsigned long long>(emulator.vif1().vu1().first_rejected_tag()),
+      emulator.vif1().vu1().first_rejected_address());
   for (unsigned index = 0; index < 16u; ++index) {
     std::printf("vi%-2u=%04X%c", index,
         emulator.vif1().vu1().state().vi[index],

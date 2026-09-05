@@ -1674,6 +1674,13 @@ void test_vu1_xgkick_packet() {
   if (packet.size() == 32u) std::memcpy(&payload, packet.data() + 16u, 8u);
   check(payload == 0x0123456789ABCDEFull,
         "VU1 XGKICK preserves path-1 GIF payload bytes");
+  const auto oversized = (1ull << 60) | (1ull << 15) | 0x400ull;
+  memory.write64(packet_address, oversized);
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.path1_tags_rejected() == 1u && vu.first_rejected_tag() == oversized &&
+        vu.first_rejected_address() == 64u,
+        "XGKICK records the exact tag and address exceeding its capture limit");
 }
 
 void test_vu1_end_and_resume() {
@@ -1841,6 +1848,29 @@ void test_vu1_unsigned_immediate_mask() {
   vu.run(1u);
   check(vu.state().vi[11] == 0x8001u,
         "VU1 ISUBIU subtracts the unsigned 15-bit immediate");
+}
+
+void test_vu1_broadcast_alias_and_max_flags() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  // ADDx.xy vf2,vf1,vf2x: writing vf2.x must not change the y-lane operand.
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u,
+      (0x18u << 20) | (2u << 16) | (1u << 11) | (2u << 6));
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[1] = {{0x3F800000u, 0x40000000u, 0u, 0u}};
+  vu.state().vf[2][0] = 0x40400000u;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vf[2][0] == 0x40800000u &&
+        vu.state().vf[2][1] == 0x40A00000u,
+        "VU broadcast reads its scalar before an aliased destination write");
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u,
+      (0x10u << 20) | (2u << 16) | (1u << 11) | (3u << 6) | 0x10u);
+  vu.state().mac = 0xA5C3u;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().mac == 0xA5C3u && vu.state().vf[3][0] == 0x40800000u,
+        "VU MAX preserves all MAC flags, including masked lanes");
 }
 
 void test_vu1_fmand_prior_pair_flags() {
@@ -2577,6 +2607,7 @@ int main() {
   test_vu1_captured_ftoi0();
   test_vu1_captured_iaddi();
   test_vu1_unsigned_immediate_mask();
+  test_vu1_broadcast_alias_and_max_flags();
   test_vu1_fmand_prior_pair_flags();
   test_vif1_top_relative_unpack();
   test_captured_bios_gif_sprite();

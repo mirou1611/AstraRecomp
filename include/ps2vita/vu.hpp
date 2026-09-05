@@ -45,6 +45,8 @@ public:
   std::uint64_t last_kick_tag() const { return last_kick_tag_; }
   std::uint64_t path1_tags_queued() const { return path1_tags_queued_; }
   std::uint64_t path1_tags_rejected() const { return path1_tags_rejected_; }
+  std::uint64_t first_rejected_tag() const { return first_rejected_tag_; }
+  std::uint16_t first_rejected_address() const { return first_rejected_address_; }
 
 private:
   bool step();
@@ -65,6 +67,8 @@ private:
   std::uint64_t last_kick_tag_ = 0;
   std::uint64_t path1_tags_queued_ = 0;
   std::uint64_t path1_tags_rejected_ = 0;
+  std::uint64_t first_rejected_tag_ = 0;
+  std::uint16_t first_rejected_address_ = 0;
   std::uint16_t top_ = 0;
   std::uint16_t lower_mac_snapshot_ = 0;
   std::deque<std::vector<std::uint8_t>> path1_packets_;
