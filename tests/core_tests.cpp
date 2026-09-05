@@ -65,6 +65,44 @@ void test_triangle_trace() {
   check(gif.triangle_records().empty(), "Reset clears triangle records");
 }
 
+void test_gif_shading_modes() {
+  for (unsigned primitive : {1u, 2u, 3u, 4u, 5u}) {
+    for (bool gouraud : {false, true}) {
+      ps2vita::Gs gs;
+      ps2vita::Gif gif(gs);
+      gif.enable_triangle_trace(true);
+      const auto reg = [&](std::uint64_t value, std::uint64_t address) {
+        const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull,
+            0xEull, value, address}};
+        check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                         sizeof(packet)), "Shading fixture register accepted");
+      };
+      reg(primitive | (gouraud ? 8u : 0u), 0u);
+      reg(0xFF0000FFu, 1u);
+      reg(0u, 5u);
+      reg(0xFF00FF00u, 1u);
+      reg(256u, 5u);
+      if (primitive >= 3u) {
+        reg(0xFFFF0000u, 1u);
+        reg(256ull << 16, 5u);
+      }
+      const auto last_color = primitive >= 3u ? 0xFFFF0000u : 0xFF00FF00u;
+      check(gs.pixel(0, 0) == (gouraud ? 0xFF0000FFu : last_color),
+            "IIP selects interpolated or last-vertex flat color");
+      if (primitive == 4u || primitive == 5u) {
+        // The next kick retains source colors in strip/fan assembly even
+        // when the preceding draw used flat shading.
+        gs.clear(0u);
+        reg(0xFFFFFFFFu, 1u);
+        reg(256u | (256ull << 16), 5u);
+        check(gif.triangle_records().back().vertices[0].color ==
+                  (primitive == 4u ? 0xFF00FF00u : 0xFF0000FFu),
+              "Flat draw preserves retained strip/fan vertex color");
+      }
+    }
+  }
+}
+
 void test_degenerate_triangle() {
   ps2vita::Gs gs;
   gs.clear(0u);
@@ -2787,6 +2825,7 @@ int main() {
   test_gif_depth_state();
   test_framebuffer_dump();
   test_triangle_trace();
+  test_gif_shading_modes();
   test_degenerate_triangle();
   test_captured_bios_triangles();
   test_vif_stops_after_unsupported_vu();

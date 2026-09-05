@@ -313,7 +313,9 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
     const auto vertex = make_vertex(value);
     if (vertex_count_ != 0u) {
       if (draw) {
-        gs_.line(vertices_[0], vertex);
+        auto first = vertices_[0];
+        if ((prim_ & (1u << 3)) == 0u) first.color = vertex.color;
+        gs_.line(first, vertex);
         ++lines_emitted_;
       }
       if (primitive == 1u) vertex_count_ = 0u;
@@ -337,7 +339,13 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
             {triangle_xyz_[0], triangle_xyz_[1], value},
             prim_, xyoffset_[context], scissor_[context], test_[context],
             zbuf_[context]});
-      gs_.triangle(vertices_[0], vertices_[1], vertex);
+      auto first = vertices_[0];
+      auto second = vertices_[1];
+      // Flat shading uses the drawing kick's color. Keep the assembly
+      // vertices intact: a subsequent strip/fan may enable interpolation.
+      if ((prim_ & (1u << 3)) == 0u)
+        first.color = second.color = vertex.color;
+      gs_.triangle(first, second, vertex);
       ++triangles_emitted_;
     }
     if (primitive == 3u) vertex_count_ = 0u;
