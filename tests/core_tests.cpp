@@ -3,6 +3,7 @@
 #include "ps2vita/ee_block.hpp"
 #include "ps2vita/execution_census.hpp"
 #include "ps2vita/gif.hpp"
+#include "ps2vita/framebuffer_dump.hpp"
 #include "ps2vita/vif.hpp"
 #include "ps2vita/vu.hpp"
 
@@ -12,12 +13,33 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <sstream>
 
 namespace {
 int failures = 0;
 
 void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
+}
+
+void test_framebuffer_dump() {
+  ps2vita::Gs gs;
+  gs.clear(0xFF000000u);
+  gs.point({0, 0, 0u, 0x80402010u});
+  gs.point({0, 1, 0u, 0x00332211u});
+  std::ostringstream output;
+  check(ps2vita::write_framebuffer_ppm(output, gs), "Framebuffer PPM writes");
+  const auto bytes = output.str();
+  const std::string header = "P6\n160 112\n255\n";
+  check(bytes.size() == header.size() + 160u * 112u * 3u &&
+        bytes.compare(0, header.size(), header) == 0,
+        "Framebuffer PPM header and payload size");
+  check(bytes.substr(header.size(), 6) == std::string("\x10\x20\x40\0\0\0", 6) &&
+        bytes.substr(header.size() + 160u * 3u, 3) == "\x11\x22\x33",
+        "Framebuffer PPM preserves RGB, row order, and omits alpha");
+  std::ostringstream failed;
+  failed.setstate(std::ios::badbit);
+  check(!ps2vita::write_framebuffer_ppm(failed, gs), "Framebuffer PPM reports failure");
 }
 
 constexpr std::uint32_t i_type(unsigned op, unsigned rs, unsigned rt, std::uint16_t imm) {
@@ -2700,6 +2722,7 @@ int main() {
   test_gif_pre_ignored_outside_nonempty_packed();
   test_gif_xyzf_depth_and_adc();
   test_gif_depth_state();
+  test_framebuffer_dump();
   test_vif_stops_after_unsupported_vu();
   test_image_cursor_across_tags();
   test_textured_sprite_scissor_preserves_uv();

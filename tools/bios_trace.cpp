@@ -1,5 +1,6 @@
 #include "ps2vita/emulator.hpp"
 #include "ps2vita/execution_census.hpp"
+#include "ps2vita/framebuffer_dump.hpp"
 
 #include <algorithm>
 #include <array>
@@ -322,11 +323,11 @@ void write_execution_census(std::ostream& output, std::uint64_t ee_steps,
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 11) {
+  if (argc < 2 || argc > 12) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
         "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP] "
-        "[TIMER5_PROBE_STEP] [CENSUS_JSON]\n");
+        "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM]\n");
     return 2;
   }
 
@@ -356,6 +357,7 @@ int main(int argc, char** argv) {
   const std::uint64_t timer5_probe_step = argc >= 10
       ? std::strtoull(argv[9], nullptr, 0) : 0u;
   const char* census_path = argc >= 11 ? argv[10] : nullptr;
+  const char* framebuffer_path = argc >= 12 ? argv[11] : nullptr;
 
   ps2vita::Emulator emulator;
   if (!emulator.load_bios(bios.data(), bios.size()) || !emulator.boot_bios()) {
@@ -806,18 +808,31 @@ int main(int argc, char** argv) {
   }
   std::uint64_t framebuffer_hash = 1469598103934665603ull;
   std::size_t nonzero_pixels = 0;
+  std::size_t nonzero_rgb_pixels = 0;
   for (int y = 0; y < ps2vita::Gs::kHeight; ++y) {
     for (int x = 0; x < ps2vita::Gs::kWidth; ++x) {
       const auto pixel = emulator.gs().pixel(x, y);
       if (pixel != 0u) ++nonzero_pixels;
+      if ((pixel & 0xFFFFFFu) != 0u) ++nonzero_rgb_pixels;
       framebuffer_hash ^= pixel;
       framebuffer_hash *= 1099511628211ull;
     }
   }
-  std::printf("framebuffer_hash=%016llX nonzero_pixels=%llu/%u\n",
+  std::printf("framebuffer_hash=%016llX nonzero_pixels=%llu/%u nonzero_rgb_pixels=%llu\n",
       static_cast<unsigned long long>(framebuffer_hash),
       static_cast<unsigned long long>(nonzero_pixels),
-      ps2vita::Gs::kWidth * ps2vita::Gs::kHeight);
+      ps2vita::Gs::kWidth * ps2vita::Gs::kHeight,
+      static_cast<unsigned long long>(nonzero_rgb_pixels));
+  if (framebuffer_path) {
+    std::ofstream snapshot(framebuffer_path, std::ios::binary | std::ios::trunc);
+    const bool written = ps2vita::write_framebuffer_ppm(snapshot, emulator.gs());
+    snapshot.close();
+    if (!written || !snapshot) {
+      std::fprintf(stderr, "could not write framebuffer: %s\n", framebuffer_path);
+      return 2;
+    }
+    std::printf("framebuffer snapshot: %s\n", framebuffer_path);
+  }
   std::printf("gif_packets=%llu rejected=%llu sprites=%llu tags=%llu/%llu/%llu "
               "image_bytes=%llu local_bytes=%llu pending=%llu first_unsupported=%016llX\n",
       static_cast<unsigned long long>(emulator.gif().packets_submitted()),
