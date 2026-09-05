@@ -70,6 +70,7 @@ private:
   std::uint64_t trxpos_ = 0;
   std::uint64_t trxreg_ = 0;
   std::uint64_t trxdir_ = 0;
+  std::size_t transfer_pixels_ = 0;
   std::uint64_t first_xyz2_ = 0;
   std::uint64_t first_uv_ = 0;
   bool have_first_xyz2_ = false;

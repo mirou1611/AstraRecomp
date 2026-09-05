@@ -77,7 +77,8 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       vu1_.set_top(top_);
       vu1_.start(static_cast<std::uint16_t>((code & 0x3FFu) * 8u));
       vu1_.run(kVu1ExecutionBudget);
-      if (vu1_.running()) {
+      if (vu1_.running() || vu1_.first_unsupported_lower() != 0u ||
+          vu1_.first_unsupported_upper() != 0u) {
         if (first_unsupported_code_ == 0u) first_unsupported_code_ = code;
         ++packets_rejected_;
         return false;
@@ -92,7 +93,8 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       vu1_.set_top(top_);
       vu1_.resume();
       vu1_.run(kVu1ExecutionBudget);
-      if (vu1_.running()) {
+      if (vu1_.running() || vu1_.first_unsupported_lower() != 0u ||
+          vu1_.first_unsupported_upper() != 0u) {
         if (first_unsupported_code_ == 0u) first_unsupported_code_ = code;
         ++packets_rejected_;
         return false;

@@ -32,6 +32,7 @@ void Gif::reset() {
   xyoffset_[0] = xyoffset_[1] = 0;
   scissor_[0] = scissor_[1] = 0x07FF000007FF0000ull;
   bitbltbuf_ = trxpos_ = trxreg_ = trxdir_ = 0;
+  transfer_pixels_ = 0;
   first_xyz2_ = 0;
   have_first_xyz2_ = false;
   vertex_count_ = 0;
@@ -98,6 +99,13 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
             rgbaq_ = (rgbaq_ & 0xFFFFFFFF00000000ull) | rgba;
           } else if (descriptor == 0x03u) {
             uv_ = (value & 0x3FFFu) | (((value >> 32) & 0x3FFFu) << 16);
+          } else if (descriptor == 0x04u || descriptor == 0x0Cu) {
+            // XYZF packs Z in bits 68..91, unlike XYZ2's bits 64..95.
+            const auto xyz = (value & 0xFFFFu) |
+                (((value >> 32) & 0xFFFFu) << 16) |
+                (((upper >> 4) & 0xFFFFFFu) << 32);
+            emit_xyz2(xyz, descriptor == 0x04u &&
+                (upper & (1ull << 47)) == 0u);
           } else if (descriptor == 0x05u || descriptor == 0x0Du) {
             const auto xyz = (value & 0xFFFFu) |
                 (((value >> 32) & 0xFFFFu) << 16) |
@@ -184,17 +192,20 @@ void Gif::write_image(const std::uint8_t* data, std::size_t size) {
   const auto width = static_cast<unsigned>(trxreg_ & 0xFFFu);
   const auto height = static_cast<unsigned>((trxreg_ >> 32) & 0xFFFu);
   if (buffer_width == 0u || width == 0u || height == 0u) return;
-  const auto pixels = std::min<std::size_t>(
-      size / bytes_per_pixel, static_cast<std::size_t>(width) * height);
+  const auto total_pixels = static_cast<std::size_t>(width) * height;
+  const auto pixels = std::min<std::size_t>(size / bytes_per_pixel,
+      total_pixels - std::min(transfer_pixels_, total_pixels));
   for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
-    const auto x = destination_x + static_cast<unsigned>(pixel % width);
-    const auto y = destination_y + static_cast<unsigned>(pixel / width);
+    const auto position = transfer_pixels_ + pixel;
+    const auto x = destination_x + static_cast<unsigned>(position % width);
+    const auto y = destination_y + static_cast<unsigned>(position / width);
     const auto destination = base +
         static_cast<std::uint32_t>((y * buffer_width + x) * bytes_per_pixel);
     for (unsigned byte = 0; byte < bytes_per_pixel; ++byte)
       local_memory_[(destination + byte) & 0x3FFFFFu] =
           data[pixel * bytes_per_pixel + byte];
   }
+  transfer_pixels_ += pixels;
   local_bytes_written_ += pixels * bytes_per_pixel;
 }
 
@@ -252,6 +263,9 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   case 0x06: tex0_[0] = value; break;
   case 0x07: tex0_[1] = value; break;
   case 0x05: emit_xyz2(value); break;
+  case 0x04: emit_xyz2(value & 0x00FFFFFFFFFFFFFFull); break;
+  case 0x0C: emit_xyz2(value & 0x00FFFFFFFFFFFFFFull, false); break;
+  case 0x0D: emit_xyz2(value, false); break;
   case 0x18: xyoffset_[0] = value; break;
   case 0x19: xyoffset_[1] = value; break;
   case 0x40: scissor_[0] = value; break;
@@ -259,7 +273,7 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   case 0x50: bitbltbuf_ = value; break;
   case 0x51: trxpos_ = value; break;
   case 0x52: trxreg_ = value; break;
-  case 0x53: trxdir_ = value; break;
+  case 0x53: trxdir_ = value; transfer_pixels_ = 0; break;
   default: break;
   }
 }
@@ -332,6 +346,10 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   auto y0 = scaled_coordinate(first_xyz2_, xyoffset_[context], 16u, 32u);
   auto x1 = scaled_coordinate(value, xyoffset_[context], 0u, 0u);
   auto y1 = scaled_coordinate(value, xyoffset_[context], 16u, 32u);
+  const auto origin_x = x0;
+  const auto origin_y = y0;
+  const auto span_x = x1 == x0 ? 1 : x1 - x0;
+  const auto span_y = y1 == y0 ? 1 : y1 - y0;
   if (x0 > x1) std::swap(x0, x1);
   if (y0 > y1) std::swap(y0, y1);
 
@@ -352,14 +370,12 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   const auto v0 = static_cast<int>((first_uv_ >> 16) & 0x3FFFu) >> 4;
   const auto u1 = static_cast<int>(uv_ & 0x3FFFu) >> 4;
   const auto v1 = static_cast<int>((uv_ >> 16) & 0x3FFFu) >> 4;
-  const auto span_x = std::max(1, x1 - x0);
-  const auto span_y = std::max(1, y1 - y0);
   for (auto y = y0; y < y1; ++y) {
     for (auto x = x0; x < x1; ++x) {
       auto pixel_color = color;
       if (textured_uv) {
-        const auto u = u0 + (x - x0) * (u1 - u0) / span_x;
-        const auto v = v0 + (y - y0) * (v1 - v0) / span_y;
+        const auto u = u0 + (x - origin_x) * (u1 - u0) / span_x;
+        const auto v = v0 + (y - origin_y) * (v1 - v0) / span_y;
         pixel_color = sample_texture(context,
             static_cast<unsigned>(std::max(0, u)),
             static_cast<unsigned>(std::max(0, v)), color);

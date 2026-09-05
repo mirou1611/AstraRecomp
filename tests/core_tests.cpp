@@ -2056,6 +2056,100 @@ void test_gif_pre_ignored_outside_nonempty_packed() {
         "PRE cannot change primitive state on empty PACKED or REGLIST tags");
 }
 
+void test_gif_xyzf_depth_and_adc() {
+  std::array<std::array<std::uint64_t, 2>, 2> packet{{
+      {{0x1000400000008001ull, 0x4ull}},
+      {{0x000000C000000080ull, (0xABull << 36) | (7ull << 4)}},
+  }};
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gs.clear(0u, 7u);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0x80808080u,
+        "PACKED XYZF2 extracts 24-bit Z without fog or padding");
+  gs.clear(0u, 6u);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0u, "XYZF2 depth participates in raster rejection");
+  gs.clear(0u);
+  packet[1][1] |= 1ull << 47;
+  const auto before = gif.points_emitted();
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0u && gif.points_emitted() == before,
+        "XYZF2 ADC suppresses the drawing kick");
+}
+
+void test_vif_stops_after_unsupported_vu() {
+  for (const auto command : {0x14000000u, 0x17000000u}) {
+    ps2vita::Memory memory;
+    memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+    memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x7FFFFFFFu);
+    ps2vita::Vif1 vif(memory);
+    const std::array<std::uint32_t, 6> words{{command, 0x6C010000u, 1u, 2u, 3u, 4u}};
+    check(!vif.submit(reinterpret_cast<const std::uint8_t*>(words.data()), sizeof(words)) &&
+          vif.packets_rejected() == 1u && vif.vectors_unpacked() == 0u &&
+          memory.read32(ps2vita::Memory::kVu1DataBase) == 0u,
+          "VIF MSCAL/MSCNT does not execute trailing UNPACK after unsupported VU");
+  }
+}
+
+void test_image_cursor_across_tags() {
+  const std::array<std::array<std::uint64_t, 2>, 4> setup{{
+      {{0x1000000000008003ull, 0xEull}},
+      {{0x0001000100000000ull, 0x50ull}},
+      {{0x0000000400000002ull, 0x52ull}},
+      {{0u, 0x53ull}},
+  }};
+  const std::array<std::uint64_t, 4> image1{{0x0800000000008001ull, 0u,
+      0x2222222211111111ull, 0x4444444433333333ull}};
+  const std::array<std::uint64_t, 4> image2{{0x0800000000008001ull, 0u,
+      0x6666666655555555ull, 0x8888888877777777ull}};
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(setup.data()), sizeof(setup));
+  gif.submit(reinterpret_cast<const std::uint8_t*>(image1.data()), sizeof(image1));
+  gif.submit(reinterpret_cast<const std::uint8_t*>(image2.data()), sizeof(image2));
+  check(gif.read_local32(0x100u) == 0x11111111u &&
+        gif.read_local32(0x300u) == 0x55555555u &&
+        gif.read_local32(0x404u) == 0x88888888u && gif.local_bytes_written() == 32u,
+        "Multiple IMAGE tags advance within one TRXDIR transfer");
+  gif.submit(reinterpret_cast<const std::uint8_t*>(image1.data()), sizeof(image1));
+  check(gif.local_bytes_written() == 32u && gif.read_local32(0x100u) == 0x11111111u,
+        "IMAGE data beyond the rectangle does not restart or overwrite it");
+  gif.submit(reinterpret_cast<const std::uint8_t*>(setup.data()), sizeof(setup));
+  gif.submit(reinterpret_cast<const std::uint8_t*>(image2.data()), sizeof(image2));
+  check(gif.read_local32(0x100u) == 0x55555555u,
+        "Writing TRXDIR starts a new transfer cursor");
+}
+
+void test_textured_sprite_scissor_preserves_uv() {
+  const std::array<std::array<std::uint64_t, 2>, 6> upload{{
+      {{0x1000000000008003ull, 0xEull}},
+      {{0x0001000100000000ull, 0x50ull}},
+      {{0x0000000100000004ull, 0x52ull}},
+      {{0u, 0x53ull}},
+      {{0x0800000000008001ull, 0u}},
+      {{0xFF222222FF111111ull, 0xFF444444FF333333ull}},
+  }};
+  const std::array<std::array<std::uint64_t, 2>, 9> draw{{
+      {{0x1000000000008008ull, 0xEull}},
+      {{1ull | (1ull << 14) | (1ull << 35), 6u}},
+      {{0x116u, 0u}},
+      {{0x00030000000F0008ull, 0x40u}}, // host scissor X=2..3, Y=0
+      {{0u, 3u}},
+      {{0u, 5u}},
+      {{0x00100040u, 3u}},
+      {{0x00400100u, 5u}}, // host rectangle X=0..4, Y=0..1
+      {{0u, 0xFu}},
+  }};
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()), sizeof(upload));
+  gif.submit(reinterpret_cast<const std::uint8_t*>(draw.data()), sizeof(draw));
+  check(gs.pixel(0, 0) == 0u && gs.pixel(1, 0) == 0u &&
+        gs.pixel(2, 0) == 0xFF333333u && gs.pixel(3, 0) == 0xFF444444u,
+        "Scissor clips textured sprites without restarting or stretching UV");
+}
+
 void put16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
   v[at] = static_cast<std::uint8_t>(x); v[at + 1] = static_cast<std::uint8_t>(x >> 8);
 }
@@ -2492,6 +2586,10 @@ int main() {
   test_gif_textured_sprite_from_local_memory();
   test_gif_packed_color_position_depth_and_adc();
   test_gif_pre_ignored_outside_nonempty_packed();
+  test_gif_xyzf_depth_and_adc();
+  test_vif_stops_after_unsupported_vu();
+  test_image_cursor_across_tags();
+  test_textured_sprite_scissor_preserves_uv();
   test_elf_and_emulator();
   test_phase0_aot_contract();
   if (failures) return EXIT_FAILURE;
