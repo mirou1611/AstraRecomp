@@ -68,7 +68,8 @@ void Gs::line(GsVertex a, GsVertex b) {
 
 void Gs::triangle(GsVertex a, GsVertex b, GsVertex c) {
   std::int64_t area = edge(a, b, c.x, c.y);
-  if (area == 0) { line(a, b); line(b, c); line(c, a); return; }
+  // A collapsed triangle has no coverage; it is not a line primitive.
+  if (area == 0) return;
   if (area < 0) { std::swap(b, c); area = -area; }
   const int min_x = std::max(0, std::min({a.x, b.x, c.x}));
   const int max_x = std::min(kWidth - 1, std::max({a.x, b.x, c.x}));

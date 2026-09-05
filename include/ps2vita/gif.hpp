@@ -20,12 +20,22 @@ struct GifImageRecord {
   std::uint64_t bytes = 0;
 };
 
+struct GifTriangleRecord {
+  std::array<GsVertex, 3> vertices{};
+  std::array<std::uint64_t, 3> xyz{};
+  std::uint64_t prim = 0, xyoffset = 0, scissor = 0, test = 0, zbuf = 0;
+};
+
 // GIF packet frontend. It owns guest GS register state while Gs remains the
 // small host raster backend.
 class Gif {
 public:
   explicit Gif(Gs& gs);
   void reset();
+  void enable_triangle_trace(bool enabled) { trace_triangles_ = enabled; }
+  const std::vector<GifTriangleRecord>& triangle_records() const {
+    return triangle_records_;
+  }
   bool submit(const std::uint8_t* data, std::size_t size);
   std::uint64_t packets_submitted() const { return packets_submitted_; }
   std::uint64_t packets_rejected() const { return packets_rejected_; }
@@ -58,6 +68,8 @@ private:
   void emit_xyz2(std::uint64_t value, bool draw = true);
 
   Gs& gs_;
+  bool trace_triangles_ = false;
+  std::vector<GifTriangleRecord> triangle_records_;
   std::vector<std::uint8_t> local_memory_;
   std::uint64_t prim_ = 0;
   std::uint64_t rgbaq_ = 0x8000000080808080ull;
@@ -77,6 +89,7 @@ private:
   std::uint64_t first_uv_ = 0;
   bool have_first_xyz2_ = false;
   std::array<GsVertex, 3> vertices_{};
+  std::array<std::uint64_t, 3> triangle_xyz_{};
   unsigned vertex_count_ = 0;
   std::vector<std::uint8_t> pending_;
   std::uint64_t packets_submitted_ = 0;

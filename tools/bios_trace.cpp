@@ -360,6 +360,7 @@ int main(int argc, char** argv) {
   const char* framebuffer_path = argc >= 12 ? argv[11] : nullptr;
 
   ps2vita::Emulator emulator;
+  emulator.enable_triangle_trace(true);
   if (!emulator.load_bios(bios.data(), bios.size()) || !emulator.boot_bios()) {
     std::fprintf(stderr, "BIOS must be exactly 4 MiB\n");
     return 2;
@@ -854,6 +855,20 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(emulator.gif().first_image_trxpos()),
       static_cast<unsigned long long>(emulator.gif().first_image_trxreg()),
       static_cast<unsigned long long>(emulator.gif().first_image_trxdir()));
+  for (std::size_t index = 0; index < emulator.gif().triangle_records().size(); ++index) {
+    const auto& t = emulator.gif().triangle_records()[index];
+    std::printf("gif_triangle[%zu] prim=%llX xyoffset=%llX scissor=%llX test=%llX zbuf=%llX",
+        index, static_cast<unsigned long long>(t.prim),
+        static_cast<unsigned long long>(t.xyoffset),
+        static_cast<unsigned long long>(t.scissor),
+        static_cast<unsigned long long>(t.test),
+        static_cast<unsigned long long>(t.zbuf));
+    for (const auto& v : t.vertices)
+      std::printf(" vertex=(%d,%d,%u,%08X)", v.x, v.y, v.z, v.color);
+    for (const auto xyz : t.xyz)
+      std::printf(" xyz=%016llX", static_cast<unsigned long long>(xyz));
+    std::putchar('\n');
+  }
   for (std::size_t index = 0; index < emulator.gif().image_records().size();
        ++index) {
     const auto& image = emulator.gif().image_records()[index];

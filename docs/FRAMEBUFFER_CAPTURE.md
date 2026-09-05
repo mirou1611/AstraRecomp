@@ -28,3 +28,11 @@ Open the PPM in an image viewer that supports Netpbm, or convert it losslessly t
 PNG locally. Keep BIOS-derived snapshots and replay dumps local while debugging;
 do not commit BIOS or game assets. Tests cover channel order, row order, alpha
 omission, exact payload length, and stream failure.
+
+The host tracer also enables bounded triangle tracing (first 64 drawing kicks).
+Each `gif_triangle` line includes PRIM, XYOFFSET, SCISSOR, TEST and ZBUF from the
+selected context, three host vertices `(x,y,z,AABBGGRR)`, and their original
+decoded GS XYZ values. XYZF's fog field is not included in these decoded values.
+ADC-suppressed assembly updates do not create records. Zero-area drawing kicks
+can appear in the trace even though the rasterizer correctly gives them no
+coverage. Tracing is off by default in the runtime and never caps rendering.

@@ -25,6 +25,7 @@ int scaled_coordinate(std::uint64_t xyz, std::uint64_t offset,
 Gif::Gif(Gs& gs) : gs_(gs), local_memory_(4u * 1024u * 1024u) {}
 
 void Gif::reset() {
+  triangle_records_.clear();
   prim_ = 0;
   rgbaq_ = 0x8000000080808080ull;
   tex0_[0] = tex0_[1] = 0;
@@ -326,18 +327,27 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   if (primitive >= 3u && primitive <= 5u) {
     const auto vertex = make_vertex(value);
     if (vertex_count_ < 2u) {
+      triangle_xyz_[vertex_count_] = value;
       vertices_[vertex_count_++] = vertex;
       return;
     }
     if (draw) {
+      if (trace_triangles_ && triangle_records_.size() < 64u)
+        triangle_records_.push_back({{vertices_[0], vertices_[1], vertex},
+            {triangle_xyz_[0], triangle_xyz_[1], value},
+            prim_, xyoffset_[context], scissor_[context], test_[context],
+            zbuf_[context]});
       gs_.triangle(vertices_[0], vertices_[1], vertex);
       ++triangles_emitted_;
     }
     if (primitive == 3u) vertex_count_ = 0u;
     else if (primitive == 4u) {
+      triangle_xyz_[0] = triangle_xyz_[1];
+      triangle_xyz_[1] = value;
       vertices_[0] = vertices_[1];
       vertices_[1] = vertex;
     } else {
+      triangle_xyz_[1] = value;
       vertices_[1] = vertex;
     }
     return;

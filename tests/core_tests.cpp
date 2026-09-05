@@ -42,6 +42,69 @@ void test_framebuffer_dump() {
   check(!ps2vita::write_framebuffer_ppm(failed, gs), "Framebuffer PPM reports failure");
 }
 
+void test_triangle_trace() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  const std::array<std::uint64_t, 10> packet{{0x1000000000008004ull, 0xEull,
+      3u, 0u, 0u, 5u, 128u, 5u, 128ull << 16, 5u}};
+  const auto submit = [&]() {
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                     sizeof(packet)), "Triangle trace fixture accepted");
+  };
+  submit();
+  check(gif.triangle_records().empty(), "Triangle tracing disabled by default");
+  gif.enable_triangle_trace(true);
+  for (unsigned i = 0; i < 65; ++i) submit();
+  check(gif.triangle_records().size() == 64u && gif.triangles_emitted() == 66u,
+        "Triangle trace bounded without limiting rendering");
+  const auto& t = gif.triangle_records().front();
+  check(t.prim == 3u && t.vertices[1].x == 2 && t.vertices[2].y == 2 &&
+        t.test == 0u && t.zbuf == 0u && t.xyz[1] == 128u &&
+        t.xyz[2] == (128ull << 16), "Triangle trace records geometry and GS state");
+  gif.reset();
+  check(gif.triangle_records().empty(), "Reset clears triangle records");
+}
+
+void test_degenerate_triangle() {
+  ps2vita::Gs gs;
+  gs.clear(0u);
+  gs.triangle({1, 1, 0u, 0xFFFFFFFFu}, {5, 5, 0u, 0xFFFFFFFFu},
+              {9, 9, 0u, 0xFFFFFFFFu});
+  gs.triangle({3, 3, 0u, 0xFFFFFFFFu}, {3, 3, 0u, 0xFFFFFFFFu},
+              {3, 3, 0u, 0xFFFFFFFFu});
+  bool empty = true;
+  for (int y = 0; y < ps2vita::Gs::kHeight; ++y)
+    for (int x = 0; x < ps2vita::Gs::kWidth; ++x)
+      empty = empty && gs.pixel(x, y) == 0u;
+  check(empty, "Collinear and coincident triangles do not become lines");
+  gs.line({1, 1, 0u, 0xFFFFFFFFu}, {9, 9, 0u, 0xFFFFFFFFu});
+  check(gs.pixel(5, 5) == 0xFFFFFFFFu, "Explicit line primitives still draw");
+}
+
+void test_captured_bios_triangles() {
+  // Host-scaled output from the 248.8M-step trace; a reproducibility fixture,
+  // not a hardware geometry oracle. Two triangles collapse to one point.
+  const ps2vita::GsVertex center{80, 32, 16053920u, 0x80333333u};
+  const std::array<std::array<ps2vita::GsVertex, 3>, 5> triangles{{
+      {{center, center, center}}, {{center, center, center}},
+      {{{115,17,15813920u,0x80B3B3B3u}, {72,34,16053920u,0x80B3B3B3u},
+        {87,29,16053920u,0x80333333u}}},
+      {{{72,29,16053920u,0x80333333u}, {115,46,15813920u,0x80333333u},
+        {87,34,16053920u,0x80333333u}}},
+      {{{115,46,15813920u,0x80333333u}, {87,34,16053920u,0x80333333u},
+        {87,29,16053920u,0x80333333u}}},
+  }};
+  ps2vita::Gs gs;
+  gs.clear(0u, 0u);
+  gs.set_depth_state(ps2vita::Gs::DepthTest::GreaterEqual, true);
+  for (const auto& t : triangles) gs.triangle(t[0], t[1], t[2]);
+  unsigned visible = 0;
+  for (int y = 0; y < ps2vita::Gs::kHeight; ++y)
+    for (int x = 0; x < ps2vita::Gs::kWidth; ++x)
+      visible += (gs.pixel(x, y) & 0xFFFFFFu) != 0u;
+  check(visible == 122u, "Captured nondegenerate triangles explain 122 RGB pixels");
+}
+
 constexpr std::uint32_t i_type(unsigned op, unsigned rs, unsigned rt, std::uint16_t imm) {
   return (op << 26) | (rs << 21) | (rt << 16) | imm;
 }
@@ -2723,6 +2786,9 @@ int main() {
   test_gif_xyzf_depth_and_adc();
   test_gif_depth_state();
   test_framebuffer_dump();
+  test_triangle_trace();
+  test_degenerate_triangle();
+  test_captured_bios_triangles();
   test_vif_stops_after_unsupported_vu();
   test_image_cursor_across_tags();
   test_textured_sprite_scissor_preserves_uv();
