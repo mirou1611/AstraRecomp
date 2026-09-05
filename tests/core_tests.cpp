@@ -1888,6 +1888,30 @@ void test_vu1_fmand_prior_pair_flags() {
         "VU1 FMAND reads the prior MAC flags from its paired upper instruction");
 }
 
+void test_vu1_fmand_four_issue_latency() {
+  ps2vita::Memory memory;
+  // SUB.x vf3,vf1,vf2 sets a negative-x MAC flag. Following FMANDs see
+  // the old flags for three intervening slots, then this result in slot 4.
+  for (unsigned pair = 0; pair < 5; ++pair) {
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pair * 8u,
+        pair == 0 ? 0x8000033Cu : 0x34016000u);
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pair * 8u + 4u,
+        pair == 0 ? (1u << 24) | (2u << 16) | (1u << 11) | (3u << 6) | 0x2Cu
+                  : 0x000002FFu);
+  }
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[1][0] = 0x3F800000u;
+  vu.state().vf[2][0] = 0x40000000u;
+  vu.state().vi[12] = 0xFFFFu;
+  vu.start(0u);
+  vu.run(4u);
+  check(vu.state().vi[1] == 0u,
+        "FMAND cannot observe an FMAC result before four issue slots");
+  vu.run(1u);
+  check(vu.state().vi[1] == 0x80u,
+        "FMAND sees the negative-x MAC result at its fourth issue slot");
+}
+
 void test_vif1_top_relative_unpack() {
   std::array<std::uint32_t, 8> words{{
       0x03000020u, 0x02000010u, 0x14000000u, 0x6C018000u,
@@ -2609,6 +2633,7 @@ int main() {
   test_vu1_unsigned_immediate_mask();
   test_vu1_broadcast_alias_and_max_flags();
   test_vu1_fmand_prior_pair_flags();
+  test_vu1_fmand_four_issue_latency();
   test_vif1_top_relative_unpack();
   test_captured_bios_gif_sprite();
   test_gif_reglist_sprite();

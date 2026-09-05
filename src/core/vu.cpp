@@ -74,10 +74,14 @@ void Vu1::reset() {
   first_rejected_tag_ = 0;
   first_rejected_address_ = 0;
   top_ = 0;
+  mac_pipeline_.fill(0u);
+  mac_pipeline_slot_ = 0u;
   path1_packets_.clear();
 }
 
 void Vu1::start(std::uint16_t address) {
+  mac_pipeline_.fill(state_.mac);
+  mac_pipeline_slot_ = 0u;
   state_.pc = address & 0x3FF8u;
   running_ = true;
   branch_pending_ = false;
@@ -85,6 +89,8 @@ void Vu1::start(std::uint16_t address) {
 }
 
 void Vu1::resume() {
+  mac_pipeline_.fill(state_.mac);
+  mac_pipeline_slot_ = 0u;
   running_ = true;
   branch_pending_ = false;
   end_pending_ = false;
@@ -102,7 +108,7 @@ bool Vu1::step() {
   const bool apply_branch = branch_pending_;
   const auto pending_target = branch_target_;
   const bool apply_end = end_pending_;
-  lower_mac_snapshot_ = state_.mac;
+  lower_mac_snapshot_ = mac_pipeline_[mac_pipeline_slot_];
   branch_pending_ = false;
   end_pending_ = (upper & 0x40000000u) != 0u;
 
@@ -119,6 +125,8 @@ bool Vu1::step() {
     return false;
   }
 
+  mac_pipeline_[mac_pipeline_slot_] = state_.mac;
+  mac_pipeline_slot_ = (mac_pipeline_slot_ + 1u) & 3u;
   ++pairs_executed_;
   state_.pc = apply_branch ? pending_target : sequential_pc;
   if (apply_end) running_ = false;

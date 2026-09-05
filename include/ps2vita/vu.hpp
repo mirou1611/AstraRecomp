@@ -71,6 +71,10 @@ private:
   std::uint16_t first_rejected_address_ = 0;
   std::uint16_t top_ = 0;
   std::uint16_t lower_mac_snapshot_ = 0;
+  // Four issue slots for FMAC flag visibility. Dependency stalls are not yet
+  // modeled, so this is the unstalled pipeline, not a complete cycle model.
+  std::array<std::uint16_t, 4> mac_pipeline_{};
+  unsigned mac_pipeline_slot_ = 0;
   std::deque<std::vector<std::uint8_t>> path1_packets_;
 };
 
