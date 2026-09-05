@@ -2,11 +2,12 @@
   <img src="docs/assets/astrarecomp-title-banner.png" alt="AstraRecomp title surrounded by crystalline code and luminous translation streams" width="100%">
 </p>
 
-<h1 align="center">AstraRecomp</h1>
+<h1 align="center">AstraRecomp — PS2 on PS Vita</h1>
 
 <p align="center">
-  <strong>Translate the past. Run it close to the metal.</strong><br>
-  An experimental PS2 static-recompilation and hybrid runtime for homebrew-enabled PlayStation Vita systems.
+  <strong>Exploring a native path from PlayStation 2 to PlayStation Vita.</strong><br>
+  Experimental PC-assisted static recompilation, PS2 BIOS bring-up, and a Vita-native hybrid runtime.<br>
+  Early research: no playable retail games, no confirmed startup intro, and no audio output yet.
 </p>
 
 <p align="center">
@@ -31,6 +32,19 @@ and translation happen on the PC; the Vita runs a small native runtime called
 **AstraRT**. The existing Emotion Engine interpreter remains a correctness oracle,
 BIOS/bootstrap path, and future cold-code fallback rather than the final fast path.
 
+The goal is to investigate whether selected PS2 software can become practical on
+Vita through **per-title analysis and native ARM code**, rather than assuming a
+general-purpose desktop emulator can simply be moved to a handheld. The PC does
+the expensive preparation; the Vita executes the resulting runtime and generated
+code. This is a research direction, not a promise of universal compatibility or
+full-speed PS2 games.
+
+**Follow active development:**
+[`research/spu2-dma-checkpoint`](https://github.com/mirou1611/AstraRecomp/tree/research/spu2-dma-checkpoint).
+The status below describes that research branch; `main` is an earlier code
+checkpoint with this updated project overview. For the latest implementation,
+switch to the research branch before building.
+
 The current milestone is intentionally small but real: PS2Recomp analyzes the
 initial MIPS corpora, while an independently written subset backend now reads the
 ELF code and automatically emits compact AstraRT C++. Differential tests execute
@@ -53,19 +67,51 @@ performance decision.
 It now executes a user-supplied retail BIOS through EE hardware initialization,
 relocation into RAM, IOP reset-ROM startup, DECI2 startup, bidirectional SIF boot
 traffic, and repeated `Restart Without Memory Clear` completion.
-It does **not yet render the PS2 startup or run retail games**. Those require deeper IOP, DMA,
+It does **not yet render a confirmed recognizable PS2 startup or run retail games**. Those require deeper IOP, DMA,
 interrupt, GIF/GS, SPU2, and disc emulation described in the roadmap. The existing
 core is real BIOS execution, not a renamed frontend or a fake compatibility screen.
 
 ## Project status
+
+Latest verified research checkpoint: **September 5, 2026**. These are development
+results, not a game-compatibility list or a measured completion percentage.
 
 | Area | Current state |
 | --- | --- |
 | BIOS bootstrap | Executes through DECI2 startup, multi-tag SIF transfers, relocated EE code, and repeated no-clear restart completion |
 | PC recompiler | Phase-0 analysis, a tested R5900-to-C++ subset, and a generated mixed-workload performance gate |
 | Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
-| Guest graphics | Reference rasterizer exists; guest GIF packets are not connected yet |
+| Guest graphics | GIF/VIF1/VU1 path connected to a 160×112 software rasterizer; BIOS replay emits 5 triangles and 122 nonzero pixels, not a confirmed intro |
+| VU1 | Tested instruction subset, microprogram upload, vector unpacking, XGKICK delivery, and partial MAC-flag latency; full timing remains incomplete |
+| Audio / SPU2 | Sound RAM and tested DMA4/DMA7 transfer timing, status and interrupts; no sound decoding, voice mixing, or Vita speaker output yet |
 | Retail games | **Not playable**—IOP devices, GIF/GS, VU, SPU2, media, and compatibility work remain |
+
+### What the latest graphics milestone actually means
+
+A deterministic host replay executes **248,800,000 EE steps**, with **998 VU1
+instruction pairs**, **5 emitted triangles**, and **122/17,920 nonzero framebuffer
+pixels**. Correct guest depth comparisons changed the previous fully black result.
+The host test suite passes (2/2 CTest targets), and the Vita VPK cross-build passes.
+
+This is evidence that part of the guest graphics pipeline reaches the rasterizer,
+**not evidence of a recognizable boot animation, playable games, or acceptable
+speed on physical Vita hardware**. One oversized XGKICK tag remains rejected.
+Texture/fog rendering, GS depth-buffer formats/addressing, other pixel tests, and
+VU timing still need work. See the
+[saved investigation and replay details](https://github.com/mirou1611/AstraRecomp/blob/research/spu2-dma-checkpoint/docs/SESSION_2026-09-05.md).
+
+### What comes next
+
+- Capture and inspect the BIOS framebuffer and trace the rejected graphics packet.
+- Improve the VU and GS behavior needed for a recognizable startup sequence.
+- Build the missing SPU2 sound-generation and Vita audio-output path.
+- Expand native-code coverage while checking it against the interpreter.
+- Measure correctness and performance on a physical Vita before making speed claims.
+
+PS2 and Vita developers can help with small reproducible tests, hardware reports,
+instruction/device correctness, and graphics debugging. See
+[Contributing](CONTRIBUTING.md). Please do not submit BIOS files or copyrighted
+game assets; this repository does not include them.
 
 ## System shape
 
@@ -145,6 +191,12 @@ PS2 ELF / user BIOS
 - Scalar COP1 memory transfers (`LWC1`/`SWC1`)
 - Verified native semantic zero-fill acceleration for the BIOS's large RAM clear
 - 160x112 software GS reference framebuffer with depth-tested points, lines, and triangles
+- Research branch: GIF PACKED/REGLIST/IMAGE parsing, logical texture uploads,
+  initial textured sprites, ADC draw suppression, and guest depth-test/write-mask state
+- Research branch: VIF1 microprogram upload/unpack and a VU1 interpreter subset
+  delivering XGKICK packets to the GIF frontend
+- Research branch: 2 MiB SPU2 sound RAM with scheduled DMA4/DMA7 transfers;
+  transfer support does not yet synthesize audio
 - Native 960x544 monitor UI and Vita controls
 - Host-side deterministic tests
 - Redistributable PS2 ELF smoke-test generator
