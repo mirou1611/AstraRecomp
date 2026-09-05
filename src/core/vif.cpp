@@ -5,9 +5,8 @@
 namespace ps2vita {
 namespace {
 
-// The BIOS VU1 setup program contains a finite ~32K-iteration transform loop
-// that needs roughly one million instruction pairs. Keep a guard above that
-// observed workload so malformed microcode still cannot hang packet parsing.
+// Defensive execution ceiling, not a measured BIOS workload. The former
+// million-pair loop was caused by incorrect IADDIU sign extension.
 constexpr std::uint64_t kVu1ExecutionBudget = 2000000u;
 
 std::uint32_t load32(const std::uint8_t* data) {

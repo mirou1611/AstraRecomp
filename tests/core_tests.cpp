@@ -1823,6 +1823,26 @@ void test_vu1_captured_iaddi() {
         "VU1 captured IADDI sign-extends its five-bit negative immediate");
 }
 
+void test_vu1_unsigned_immediate_mask() {
+  ps2vita::Memory memory;
+  // Captured BIOS IADDIU vi11,vi0,0x7FFF followed by IAND vi10,vi11,vi10.
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x11EB07FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x800A5AB4u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[10] = 0x8004u;
+  vu.start(0u);
+  vu.run(2u);
+  check(vu.state().vi[11] == 0x7FFFu && vu.state().vi[10] == 4u,
+        "VU1 IADDIU zero-extends the BIOS mask and removes the count flag");
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x13EB07FFu);
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vi[11] == 0x8001u,
+        "VU1 ISUBIU subtracts the unsigned 15-bit immediate");
+}
+
 void test_vu1_fmand_prior_pair_flags() {
   ps2vita::Memory memory;
   memory.write32(ps2vita::Memory::kVu1MicroBase, 0x34016000u);
@@ -1917,7 +1937,7 @@ void test_gif_image_continues_to_pre_primitive() {
       {{0x0800000000008001ull, 0u}},
       {{0x0123456789ABCDEFull, 0xFEDCBA9876543210ull}},
       {{0x1000400000008001ull, 0x0000000000000005ull}},
-      {{0x0000000000100010ull, 0u}},
+      {{0x0000001000000010ull, 0u}},
   }};
   std::vector<std::uint8_t> packet(sizeof(qwords));
   std::memcpy(packet.data(), qwords.data(), packet.size());
@@ -1976,8 +1996,8 @@ void test_gif_textured_sprite_from_local_memory() {
       {{0x2000000000008002ull, 0x53ull}},
       {{0u, 0u}},
       {{0u, 0u}},
-      {{0x00200020ull, 0u}},
-      {{0x00800080ull, 0u}},
+      {{0x0000002000000020ull, 0u}},
+      {{0x0000008000000080ull, 0u}},
   }};
   ps2vita::Gs gs;
   gs.clear(0u);
@@ -1992,6 +2012,48 @@ void test_gif_textured_sprite_from_local_memory() {
         gs.pixel(0, 1) == 0xFFFF0000u &&
         gs.pixel(1, 1) == 0xFFFFFFFFu,
         "GIF UV sprite samples the logical PSMCT32 surface");
+}
+
+void test_gif_packed_color_position_depth_and_adc() {
+  // Deliberately distinct lanes: R/G/B/A occupy four 32-bit slots, X/Y two
+  // slots, and Z comes from the upper qword. Padding must not become color.
+  constexpr std::array<std::array<std::uint64_t, 2>, 3> packet{{
+      {{0x2000400000008001ull, 0x51ull}}, // PRE point, RGBA then XYZ2
+      {{0xDEADBE22DEADBE11ull, 0xDEADBE80DEADBE33ull}},
+      {{0xFFFF00C0FFFF0080ull, 7ull}}, // host point (2,3), depth 7
+  }};
+  ps2vita::Gs gs;
+  gs.clear(0u, 6u);
+  ps2vita::Gif gif(gs);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0u, "PACKED XYZ2 decodes Z from the upper qword");
+  gs.clear(0u);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0x80332211u && gs.pixel(2, 0) == 0u,
+        "PACKED RGBA and XYZ2 decode independent lanes and ignore padding");
+  auto suppressed = packet;
+  suppressed[2][1] |= 1ull << 47;
+  gs.clear(0u);
+  const auto before = gif.points_emitted();
+  gif.submit(reinterpret_cast<const std::uint8_t*>(suppressed.data()), sizeof(suppressed));
+  check(gs.pixel(2, 3) == 0u && gif.points_emitted() == before,
+        "PACKED XYZ2 ADC suppresses the drawing kick");
+}
+
+void test_gif_pre_ignored_outside_nonempty_packed() {
+  constexpr std::array<std::array<std::uint64_t, 2>, 4> packet{{
+      {{0x1000000000008001ull, 0xEull}},
+      {{6u, 0u}}, // establish SPRITE through A+D
+      {{0x1000400000008000ull, 0x5ull}}, // empty PACKED PRE point: ignored
+      {{0x1400400000008001ull, 0x5ull}}, // REGLIST PRE point: ignored
+  }};
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  const std::array<std::uint64_t, 2> xyz{{0u, 0u}};
+  gif.submit(reinterpret_cast<const std::uint8_t*>(xyz.data()), sizeof(xyz));
+  check(gif.points_emitted() == 0u && gif.pending_bytes() == 0u,
+        "PRE cannot change primitive state on empty PACKED or REGLIST tags");
 }
 
 void put16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
@@ -2420,6 +2482,7 @@ int main() {
   test_vu1_ftoi4();
   test_vu1_captured_ftoi0();
   test_vu1_captured_iaddi();
+  test_vu1_unsigned_immediate_mask();
   test_vu1_fmand_prior_pair_flags();
   test_vif1_top_relative_unpack();
   test_captured_bios_gif_sprite();
@@ -2427,6 +2490,8 @@ int main() {
   test_gif_image_continues_to_pre_primitive();
   test_gif_psmct32_host_to_local_transfer();
   test_gif_textured_sprite_from_local_memory();
+  test_gif_packed_color_position_depth_and_adc();
+  test_gif_pre_ignored_outside_nonempty_packed();
   test_elf_and_emulator();
   test_phase0_aot_contract();
   if (failures) return EXIT_FAILURE;

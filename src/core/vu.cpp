@@ -149,7 +149,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
   }
   if (group == 0x08u || group == 0x09u) { // IADDIU / ISUBIU
     const auto raw = ((code >> 10) & 0x7800u) | (code & 0x7FFu);
-    const auto immediate = sign_extend(raw, 15u);
+    const auto immediate = static_cast<std::int32_t>(raw);
     const auto lhs = static_cast<std::int32_t>(state_.vi[is]);
     const auto result = group == 0x08u ? lhs + immediate : lhs - immediate;
     if (it != 0u) state_.vi[it] = static_cast<std::uint16_t>(result);

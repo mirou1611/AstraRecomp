@@ -55,7 +55,7 @@ private:
   void write_image(const std::uint8_t* data, std::size_t size);
   std::uint32_t sample_texture(unsigned context, unsigned u, unsigned v,
                                std::uint32_t vertex_color) const;
-  void emit_xyz2(std::uint64_t value);
+  void emit_xyz2(std::uint64_t value, bool draw = true);
 
   Gs& gs_;
   std::vector<std::uint8_t> local_memory_;

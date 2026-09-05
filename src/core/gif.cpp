@@ -74,7 +74,7 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
       payload_bytes = static_cast<std::size_t>(loops) * 16u;
     if (pending_.size() - tag_start < 16u + payload_bytes) break;
     cursor += 16u;
-    if ((tag & (1ull << 46)) != 0u)
+    if (format == 0u && loops != 0u && (tag & (1ull << 46)) != 0u)
       set_prim((tag >> 47) & 0x7FFu);
 
     if (format == 0u) {
@@ -90,6 +90,21 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
           const auto upper = load64(pending_.data() + cursor + 8u);
           if (descriptor == 0xEu)
             write_register(static_cast<std::uint8_t>(upper), value);
+          else if (descriptor == 0x01u) {
+            const auto rgba = (value & 0xFFu) |
+                (((value >> 32) & 0xFFu) << 8) |
+                ((upper & 0xFFu) << 16) |
+                (((upper >> 32) & 0xFFu) << 24);
+            rgbaq_ = (rgbaq_ & 0xFFFFFFFF00000000ull) | rgba;
+          } else if (descriptor == 0x03u) {
+            uv_ = (value & 0x3FFFu) | (((value >> 32) & 0x3FFFu) << 16);
+          } else if (descriptor == 0x05u || descriptor == 0x0Du) {
+            const auto xyz = (value & 0xFFFFu) |
+                (((value >> 32) & 0xFFFFu) << 16) |
+                ((upper & 0xFFFFFFFFu) << 32);
+            emit_xyz2(xyz, descriptor == 0x05u &&
+                (upper & (1ull << 47)) == 0u);
+          }
           else if (descriptor != 0xFu)
             write_register(static_cast<std::uint8_t>(descriptor), value);
           cursor += 16u;
@@ -249,7 +264,7 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   }
 }
 
-void Gif::emit_xyz2(std::uint64_t value) {
+void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   const auto primitive = static_cast<unsigned>(prim_ & 7u);
   const auto context = static_cast<unsigned>((prim_ >> 9) & 1u);
   const auto make_vertex = [&](std::uint64_t xyz) {
@@ -261,15 +276,19 @@ void Gif::emit_xyz2(std::uint64_t value) {
   };
 
   if (primitive == 0u) {
-    gs_.point(make_vertex(value));
-    ++points_emitted_;
+    if (draw) {
+      gs_.point(make_vertex(value));
+      ++points_emitted_;
+    }
     return;
   }
   if (primitive == 1u || primitive == 2u) {
     const auto vertex = make_vertex(value);
     if (vertex_count_ != 0u) {
-      gs_.line(vertices_[0], vertex);
-      ++lines_emitted_;
+      if (draw) {
+        gs_.line(vertices_[0], vertex);
+        ++lines_emitted_;
+      }
       if (primitive == 1u) vertex_count_ = 0u;
       else vertices_[0] = vertex;
     } else {
@@ -284,8 +303,10 @@ void Gif::emit_xyz2(std::uint64_t value) {
       vertices_[vertex_count_++] = vertex;
       return;
     }
-    gs_.triangle(vertices_[0], vertices_[1], vertex);
-    ++triangles_emitted_;
+    if (draw) {
+      gs_.triangle(vertices_[0], vertices_[1], vertex);
+      ++triangles_emitted_;
+    }
     if (primitive == 3u) vertex_count_ = 0u;
     else if (primitive == 4u) {
       vertices_[0] = vertices_[1];
@@ -303,6 +324,10 @@ void Gif::emit_xyz2(std::uint64_t value) {
     return;
   }
 
+  if (!draw) {
+    have_first_xyz2_ = false;
+    return;
+  }
   auto x0 = scaled_coordinate(first_xyz2_, xyoffset_[context], 0u, 0u);
   auto y0 = scaled_coordinate(first_xyz2_, xyoffset_[context], 16u, 32u);
   auto x1 = scaled_coordinate(value, xyoffset_[context], 0u, 0u);
