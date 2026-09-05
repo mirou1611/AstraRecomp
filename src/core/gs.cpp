@@ -34,8 +34,12 @@ void Gs::clear(std::uint32_t color, std::uint32_t depth) {
 void Gs::write(int x, int y, std::uint32_t z, std::uint32_t color) {
   if (x < 0 || y < 0 || x >= kWidth || y >= kHeight) return;
   const auto index = static_cast<std::size_t>(y * kWidth + x);
-  if (z <= depth_[index]) {
-    depth_[index] = z;
+  const bool pass = depth_test_ == DepthTest::Always ||
+      (depth_test_ == DepthTest::GreaterEqual && z >= depth_[index]) ||
+      (depth_test_ == DepthTest::Greater && z > depth_[index]) ||
+      (depth_test_ == DepthTest::LessEqual && z <= depth_[index]);
+  if (pass) {
+    if (depth_write_) depth_[index] = z;
     color_[index] = color;
   }
 }

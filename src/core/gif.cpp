@@ -28,6 +28,8 @@ void Gif::reset() {
   prim_ = 0;
   rgbaq_ = 0x8000000080808080ull;
   tex0_[0] = tex0_[1] = 0;
+  test_[0] = test_[1] = 0;
+  zbuf_[0] = zbuf_[1] = 0;
   uv_ = 0;
   xyoffset_[0] = xyoffset_[1] = 0;
   scissor_[0] = scissor_[1] = 0x07FF000007FF0000ull;
@@ -270,6 +272,10 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   case 0x19: xyoffset_[1] = value; break;
   case 0x40: scissor_[0] = value; break;
   case 0x41: scissor_[1] = value; break;
+  case 0x47: test_[0] = value; break;
+  case 0x48: test_[1] = value; break;
+  case 0x4E: zbuf_[0] = value; break;
+  case 0x4F: zbuf_[1] = value; break;
   case 0x50: bitbltbuf_ = value; break;
   case 0x51: trxpos_ = value; break;
   case 0x52: trxreg_ = value; break;
@@ -281,6 +287,12 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
 void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   const auto primitive = static_cast<unsigned>(prim_ & 7u);
   const auto context = static_cast<unsigned>((prim_ >> 9) & 1u);
+  const bool zte = (test_[context] & (1ull << 16)) != 0;
+  const auto ztst = static_cast<Gs::DepthTest>((test_[context] >> 17) & 3u);
+  // ZTE=0 bypasses comparison AND suppresses depth writes. ZMSK only
+  // suppresses writes; it must not bypass an enabled comparison.
+  gs_.set_depth_state(zte ? ztst : Gs::DepthTest::Always,
+                      zte && (zbuf_[context] & (1ull << 32)) == 0);
   const auto make_vertex = [&](std::uint64_t xyz) {
     return GsVertex{
         scaled_coordinate(xyz, xyoffset_[context], 0u, 0u),

@@ -2068,6 +2068,60 @@ void test_gif_textured_sprite_from_local_memory() {
         "GIF UV sprite samples the logical PSMCT32 surface");
 }
 
+void gif_depth_register(ps2vita::Gif& gif, std::uint64_t value,
+                        std::uint64_t address = 0x47u) {
+  const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull,
+      0xEull, value, address}};
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                   sizeof(packet)), "GIF depth register accepted");
+}
+
+void test_gif_depth_state() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  const auto point = [&](std::uint32_t z, std::uint32_t color, unsigned context) {
+    const std::array<std::uint64_t, 8> packet{{0x1000000000008003ull, 0xEull,
+        static_cast<std::uint64_t>(context) << 9, 0u, color, 1u,
+        static_cast<std::uint64_t>(z) << 32, 5u}};
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                     sizeof(packet)), "GIF depth point accepted");
+  };
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    gif_depth_register(gif, (1u << 16) | (mode << 17));
+    for (unsigned z : {6u, 7u, 8u}) {
+      gs.clear(0u, 7u);
+      point(z, 1u, 0u);
+      const bool pass = mode == 1 || (mode == 2 && z >= 7) ||
+                        (mode == 3 && z > 7);
+      check(gs.pixel(0, 0) == (pass ? 1u : 0u), "GS guest ZTST comparison");
+    }
+  }
+  gs.clear(0u, 7u);
+  gif_depth_register(gif, 0x50000u);
+  gif_depth_register(gif, 1ull << 32, 0x4Eu);
+  point(9u, 1u, 0u);
+  point(8u, 2u, 0u);
+  check(gs.pixel(0, 0) == 2u, "ZMSK prevents depth writes");
+  point(6u, 3u, 0u);
+  check(gs.pixel(0, 0) == 2u, "ZMSK preserves depth comparison");
+  gif_depth_register(gif, 0u, 0x4Eu);
+  point(100u, 4u, 1u); // Reset context 1 has ZTE=0.
+  point(8u, 5u, 0u);
+  check(gs.pixel(0, 0) == 5u, "ZTE=0 bypasses test without updating depth");
+  gif_depth_register(gif, 0x30000u, 0x48u); // Context 1 ALWAYS.
+  gif_depth_register(gif, 1ull << 32, 0x4Fu);
+  point(100u, 6u, 1u);
+  point(8u, 7u, 0u);
+  check(gs.pixel(0, 0) == 7u, "TEST_2 and ZBUF_2 use independent context state");
+  gif_depth_register(gif, 0u, 0x4Fu);
+  point(100u, 8u, 1u);
+  point(9u, 9u, 0u);
+  check(gs.pixel(0, 0) == 8u, "Unmasked context 1 updates the host depth surface");
+  gif.reset();
+  point(0u, 6u, 0u);
+  check(gs.pixel(0, 0) == 6u, "GIF reset clears guest depth state");
+}
+
 void test_gif_packed_color_position_depth_and_adc() {
   // Deliberately distinct lanes: R/G/B/A occupy four 32-bit slots, X/Y two
   // slots, and Z comes from the upper qword. Padding must not become color.
@@ -2077,11 +2131,12 @@ void test_gif_packed_color_position_depth_and_adc() {
       {{0xFFFF00C0FFFF0080ull, 7ull}}, // host point (2,3), depth 7
   }};
   ps2vita::Gs gs;
-  gs.clear(0u, 6u);
+  gs.clear(0u, 8u);
   ps2vita::Gif gif(gs);
+  gif_depth_register(gif, 0x50000u);
   gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
   check(gs.pixel(2, 3) == 0u, "PACKED XYZ2 decodes Z from the upper qword");
-  gs.clear(0u);
+  gs.clear(0u, 0u);
   gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
   check(gs.pixel(2, 3) == 0x80332211u && gs.pixel(2, 0) == 0u,
         "PACKED RGBA and XYZ2 decode independent lanes and ignore padding");
@@ -2117,11 +2172,12 @@ void test_gif_xyzf_depth_and_adc() {
   }};
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
+  gif_depth_register(gif, 0x50000u);
   gs.clear(0u, 7u);
   gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
   check(gs.pixel(2, 3) == 0x80808080u,
         "PACKED XYZF2 extracts 24-bit Z without fog or padding");
-  gs.clear(0u, 6u);
+  gs.clear(0u, 8u);
   gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
   check(gs.pixel(2, 3) == 0u, "XYZF2 depth participates in raster rejection");
   gs.clear(0u);
@@ -2643,6 +2699,7 @@ int main() {
   test_gif_packed_color_position_depth_and_adc();
   test_gif_pre_ignored_outside_nonempty_packed();
   test_gif_xyzf_depth_and_adc();
+  test_gif_depth_state();
   test_vif_stops_after_unsupported_vu();
   test_image_cursor_across_tags();
   test_textured_sprite_scissor_preserves_uv();

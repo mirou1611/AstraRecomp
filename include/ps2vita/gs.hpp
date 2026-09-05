@@ -18,6 +18,11 @@ public:
   static constexpr int kHeight = 112;
 
   Gs();
+  enum class DepthTest { Never, Always, GreaterEqual, Greater, LessEqual };
+  void set_depth_state(DepthTest test, bool write) {
+    depth_test_ = test;
+    depth_write_ = write;
+  }
   void clear(std::uint32_t color, std::uint32_t depth = 0xFFFFFFFFu);
   void point(const GsVertex& vertex);
   void line(GsVertex a, GsVertex b);
@@ -30,7 +35,8 @@ private:
   void write(int x, int y, std::uint32_t z, std::uint32_t color);
   std::vector<std::uint32_t> color_;
   std::vector<std::uint32_t> depth_;
+  DepthTest depth_test_ = DepthTest::LessEqual; // Standalone host drawing.
+  bool depth_write_ = true;
 };
 
 } // namespace ps2vita
-

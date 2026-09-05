@@ -62,6 +62,8 @@ private:
   std::uint64_t prim_ = 0;
   std::uint64_t rgbaq_ = 0x8000000080808080ull;
   std::uint64_t tex0_[2]{};
+  std::uint64_t test_[2]{};
+  std::uint64_t zbuf_[2]{};
   std::uint64_t uv_ = 0;
   std::uint64_t xyoffset_[2]{};
   std::uint64_t scissor_[2]{0x07FF000007FF0000ull,
