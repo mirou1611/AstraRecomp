@@ -47,6 +47,13 @@ public:
   std::uint64_t path1_tags_rejected() const { return path1_tags_rejected_; }
   std::uint64_t first_rejected_tag() const { return first_rejected_tag_; }
   std::uint16_t first_rejected_address() const { return first_rejected_address_; }
+  std::uint16_t first_rejected_pc() const { return first_rejected_pc_; }
+  std::uint16_t first_rejected_kick_start() const { return first_rejected_kick_start_; }
+  unsigned first_rejected_tag_index() const { return first_rejected_tag_index_; }
+  std::uint64_t first_rejected_previous_tag() const { return first_rejected_previous_tag_; }
+  const std::array<std::uint32_t, 32>& first_rejected_data() const {
+    return first_rejected_data_;
+  }
 
 private:
   bool step();
@@ -69,6 +76,11 @@ private:
   std::uint64_t path1_tags_rejected_ = 0;
   std::uint64_t first_rejected_tag_ = 0;
   std::uint16_t first_rejected_address_ = 0;
+  std::uint16_t first_rejected_pc_ = 0;
+  std::uint16_t first_rejected_kick_start_ = 0;
+  unsigned first_rejected_tag_index_ = 0;
+  std::uint64_t first_rejected_previous_tag_ = 0;
+  std::array<std::uint32_t, 32> first_rejected_data_{};
   std::uint16_t top_ = 0;
   std::uint16_t lower_mac_snapshot_ = 0;
   // Four issue slots for FMAC flag visibility. Dependency stalls are not yet

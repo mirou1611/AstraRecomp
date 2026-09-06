@@ -288,6 +288,14 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
 void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   const auto primitive = static_cast<unsigned>(prim_ & 7u);
   const auto context = static_cast<unsigned>((prim_ >> 9) & 1u);
+  const auto clip = scissor_[context];
+  gs_.set_scissor(static_cast<int>((clip & 0x7FFu) / 4u),
+                  static_cast<int>(((clip >> 32) & 0x7FFu) / 4u),
+                  static_cast<int>(((clip >> 16) & 0x7FFu) / 4u),
+                  static_cast<int>(((clip >> 48) & 0x7FFu) / 4u));
+  if ((clip & 0x7FFu) > ((clip >> 16) & 0x7FFu) ||
+      ((clip >> 32) & 0x7FFu) > ((clip >> 48) & 0x7FFu))
+    gs_.set_scissor(1, 1, 0, 0);
   const bool zte = (test_[context] & (1ull << 16)) != 0;
   const auto ztst = static_cast<Gs::DepthTest>((test_[context] >> 17) & 3u);
   // ZTE=0 bypasses comparison AND suppresses depth writes. ZMSK only

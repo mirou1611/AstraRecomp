@@ -73,6 +73,10 @@ void Vu1::reset() {
   path1_tags_rejected_ = 0;
   first_rejected_tag_ = 0;
   first_rejected_address_ = 0;
+  first_rejected_pc_ = first_rejected_kick_start_ = 0;
+  first_rejected_tag_index_ = 0;
+  first_rejected_previous_tag_ = 0;
+  first_rejected_data_.fill(0u);
   top_ = 0;
   mac_pipeline_.fill(0u);
   mac_pipeline_slot_ = 0u;
@@ -302,6 +306,7 @@ bool Vu1::kick_gif(unsigned address_reg) {
   auto offset = static_cast<std::uint32_t>(state_.vi[address_reg] & 0x3FFu) * 16u;
   last_kick_address_ = static_cast<std::uint16_t>(offset);
   last_kick_tag_ = 0;
+  std::uint64_t previous_tag = 0;
   for (unsigned tag_index = 0; tag_index < 256u; ++tag_index) {
     std::array<std::uint8_t, 16> tag_bytes{};
     for (unsigned byte = 0; byte < tag_bytes.size(); ++byte)
@@ -326,6 +331,13 @@ bool Vu1::kick_gif(unsigned address_reg) {
       if (path1_tags_rejected_ == 0u) {
         first_rejected_tag_ = tag;
         first_rejected_address_ = static_cast<std::uint16_t>((offset - 16u) & 0x3FFFu);
+        first_rejected_pc_ = state_.pc;
+        first_rejected_kick_start_ = last_kick_address_;
+        first_rejected_tag_index_ = tag_index;
+        first_rejected_previous_tag_ = previous_tag;
+        for (unsigned word = 0; word < first_rejected_data_.size(); ++word)
+          first_rejected_data_[word] = memory_.read32(Memory::kVu1DataBase +
+              ((last_kick_address_ + word * 4u) & 0x3FFFu));
       }
       ++path1_tags_rejected_;
       return true;
@@ -336,6 +348,7 @@ bool Vu1::kick_gif(unsigned address_reg) {
     offset = (offset + static_cast<std::uint32_t>(payload_size)) & 0x3FFFu;
     path1_packets_.push_back(std::move(packet));
     ++path1_tags_queued_;
+    previous_tag = tag;
     if ((tag & (1ull << 15)) != 0u) return true;
   }
   ++path1_tags_rejected_;

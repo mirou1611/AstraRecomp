@@ -904,9 +904,21 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_queued()),
       static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_rejected()));
   std::puts("VU1 integer registers:");
-  std::printf("vu1_first_rejected_tag=%016llX address=%04X\n",
+  std::printf("vu1_first_rejected_tag=%016llX address=%04X pc=%04X kick_start=%04X tag_index=%u previous=%016llX\n",
       static_cast<unsigned long long>(emulator.vif1().vu1().first_rejected_tag()),
-      emulator.vif1().vu1().first_rejected_address());
+      emulator.vif1().vu1().first_rejected_address(),
+      emulator.vif1().vu1().first_rejected_pc(),
+      emulator.vif1().vu1().first_rejected_kick_start(),
+      emulator.vif1().vu1().first_rejected_tag_index(),
+      static_cast<unsigned long long>(emulator.vif1().vu1().first_rejected_previous_tag()));
+  if (emulator.vif1().vu1().path1_tags_rejected() != 0u) {
+    const auto& vu = emulator.vif1().vu1();
+    const auto& words = vu.first_rejected_data();
+    for (unsigned i = 0; i < words.size(); i += 4u)
+      std::printf("vu1_rejected_snapshot[%04X]=%08X %08X %08X %08X\n",
+          (vu.first_rejected_kick_start() + i * 4u) & 0x3FFFu,
+          words[i], words[i + 1u], words[i + 2u], words[i + 3u]);
+  }
   for (unsigned index = 0; index < 16u; ++index) {
     std::printf("vi%-2u=%04X%c", index,
         emulator.vif1().vu1().state().vi[index],

@@ -23,6 +23,10 @@ public:
     depth_test_ = test;
     depth_write_ = write;
   }
+  void set_scissor(int left, int top, int right, int bottom) {
+    scissor_left_ = left; scissor_top_ = top;
+    scissor_right_ = right; scissor_bottom_ = bottom;
+  }
   void clear(std::uint32_t color, std::uint32_t depth = 0xFFFFFFFFu);
   void point(const GsVertex& vertex);
   void line(GsVertex a, GsVertex b);
@@ -37,6 +41,8 @@ private:
   std::vector<std::uint32_t> depth_;
   DepthTest depth_test_ = DepthTest::LessEqual; // Standalone host drawing.
   bool depth_write_ = true;
+  int scissor_left_ = 0, scissor_top_ = 0;
+  int scissor_right_ = kWidth - 1, scissor_bottom_ = kHeight - 1;
 };
 
 } // namespace ps2vita

@@ -103,6 +103,41 @@ void test_gif_shading_modes() {
   }
 }
 
+void test_gif_primitive_scissor() {
+  for (unsigned primitive : {0u, 1u, 3u}) {
+    ps2vita::Gs gs;
+    ps2vita::Gif gif(gs);
+    const auto reg = [&](std::uint64_t value, std::uint64_t address) {
+      const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull,
+          0xEull, value, address}};
+      check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                       sizeof(packet)), "Scissor fixture accepted");
+    };
+    // Inclusive guest [4,8] maps to host [1,2] on each axis.
+    reg(4ull | (8ull << 16) | (4ull << 32) | (8ull << 48), 0x40u);
+    const auto draw = [&](unsigned context) {
+      reg(primitive | (context << 9), 0u);
+      reg(0xFFFFFFFFu, 1u);
+      reg(0u, 5u);
+      if (primitive == 0u) reg(64ull | (64ull << 16), 5u);
+      else if (primitive == 1u) reg(256ull | (256ull << 16), 5u);
+      else { reg(256u, 5u); reg(256ull << 16, 5u); }
+    };
+    draw(0u);
+    check(gs.pixel(0, 0) == 0u && gs.pixel(1, 1) == 0xFFFFFFFFu &&
+          gs.pixel(3, 3) == 0u, "Guest scissor clips non-sprite primitives");
+    gs.clear(0u);
+    draw(1u);
+    check(gs.pixel(0, 0) == 0xFFFFFFFFu, "Scissor selects independent context");
+    gs.clear(0u);
+    // Inverted bounds remain empty even when quarter-scale division would
+    // collapse both ends to the same host coordinate.
+    reg(7ull | (4ull << 16) | (4ull << 32) | (8ull << 48), 0x40u);
+    draw(0u);
+    check(gs.pixel(1, 1) == 0u, "Inverted guest scissor is empty before scaling");
+  }
+}
+
 void test_degenerate_triangle() {
   ps2vita::Gs gs;
   gs.clear(0u);
@@ -1804,6 +1839,25 @@ void test_vu1_xgkick_packet() {
   check(vu.path1_tags_rejected() == 1u && vu.first_rejected_tag() == oversized &&
         vu.first_rejected_address() == 64u,
         "XGKICK records the exact tag and address exceeding its capture limit");
+  vu.reset();
+  memory.write64(packet_address, 1ull << 60); // Empty non-EOP tag.
+  memory.write64(packet_address + 16u, oversized);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x800016FCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  vu.state().vi[2] = 4u;
+  vu.start(8u);
+  vu.run(1u);
+  check(vu.first_rejected_address() == 80u && vu.first_rejected_kick_start() == 64u &&
+        vu.first_rejected_tag_index() == 1u && vu.first_rejected_pc() == 8u &&
+        vu.first_rejected_previous_tag() == (1ull << 60),
+        "XGKICK rejection distinguishes kick origin from later chain tag");
+  memory.write64(packet_address, 0u);
+  check(vu.first_rejected_data()[1] == 0x10000000u &&
+        vu.first_rejected_data()[4] == static_cast<std::uint32_t>(oversized),
+        "Rejected packet snapshot survives later VU data writes");
+  vu.reset();
+  check(vu.first_rejected_kick_start() == 0u && vu.first_rejected_previous_tag() == 0u,
+        "VU reset clears rejection provenance");
 }
 
 void test_vu1_end_and_resume() {
@@ -2826,6 +2880,7 @@ int main() {
   test_framebuffer_dump();
   test_triangle_trace();
   test_gif_shading_modes();
+  test_gif_primitive_scissor();
   test_degenerate_triangle();
   test_captured_bios_triangles();
   test_vif_stops_after_unsupported_vu();
