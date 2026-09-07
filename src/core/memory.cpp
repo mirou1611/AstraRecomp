@@ -157,6 +157,7 @@ void Memory::clear() {
   vif1_final_tadr_ = 0;
   vif1_final_madr_ = 0;
   vif1_packets_.clear();
+  vif_dma_spans_.clear();
   spu2_dma_cycles_remaining_.fill(0);
   spu2_dma_source_.fill(0);
   spu2_dma_target_.fill(0);
@@ -532,7 +533,8 @@ std::uint32_t Memory::cycles_until_next_event() const {
 bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
                               std::uint32_t& final_tadr,
                               std::uint32_t& final_madr,
-                              std::uint32_t& total_qwc) const {
+                              std::uint32_t& total_qwc,
+                              std::vector<VifDmaSpan>* spans) const {
   auto tadr = read32(0x10009030u) & 0x0FFFFFF0u;
   const auto chcr = read32(0x10009000u);
   std::array<std::uint32_t, 2> return_stack{};
@@ -543,6 +545,7 @@ bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
   const auto append = [&](std::uint32_t source, std::size_t bytes) {
     if (packet == nullptr) return;
     const auto old_size = packet->size();
+    if (spans && bytes != 0u) spans->push_back({source, old_size, bytes});
     packet->resize(old_size + bytes);
     for (std::size_t byte = 0; byte < bytes; ++byte)
       (*packet)[old_size + byte] = read8(source + static_cast<std::uint32_t>(byte));
@@ -818,7 +821,9 @@ void Memory::advance(std::uint32_t cycles) {
       std::uint32_t final_tadr = 0;
       std::uint32_t final_madr = 0;
       std::uint32_t total_qwc = 0;
-      if (build_vif1_chain(&packet, final_tadr, final_madr, total_qwc)) {
+      std::vector<VifDmaSpan> spans;
+      if (build_vif1_chain(&packet, final_tadr, final_madr, total_qwc, &spans)) {
+        vif_dma_spans_ = std::move(spans);
         vif1_packets_.push_back(std::move(packet));
         store_ee(0x9010u, vif1_final_madr_);
         store_ee(0x9020u, 0u);

@@ -8,6 +8,12 @@
 
 namespace ps2vita {
 
+struct VifDmaSpan {
+  std::uint32_t source = 0;
+  std::size_t stream_offset = 0;
+  std::size_t bytes = 0;
+};
+
 class Memory {
 public:
   static constexpr std::uint32_t kRamSize = 32u * 1024u * 1024u;
@@ -80,6 +86,7 @@ public:
   // Retrieves one completed EE GIF DMA payload in submission order.
   bool pop_gif_packet(std::vector<std::uint8_t>& packet);
   bool pop_vif1_packet(std::vector<std::uint8_t>& packet);
+  const std::vector<VifDmaSpan>& vif_dma_spans() const { return vif_dma_spans_; }
   bool has_bios() const { return bios_loaded_; }
   std::uint32_t page_generation(std::uint32_t address) const;
   void clear_tlb();
@@ -102,7 +109,8 @@ private:
   bool build_vif1_chain(std::vector<std::uint8_t>* packet,
                         std::uint32_t& final_tadr,
                         std::uint32_t& final_madr,
-                        std::uint32_t& total_qwc) const;
+                        std::uint32_t& total_qwc,
+                        std::vector<VifDmaSpan>* spans = nullptr) const;
   std::vector<std::uint8_t> ram_;
   std::vector<std::uint8_t> bios_;
   std::vector<std::uint8_t> scratch_;
@@ -156,6 +164,7 @@ private:
   std::uint32_t vif1_final_tadr_ = 0;
   std::uint32_t vif1_final_madr_ = 0;
   std::deque<std::vector<std::uint8_t>> vif1_packets_;
+  std::vector<VifDmaSpan> vif_dma_spans_;
   std::array<std::uint32_t, 2> spu2_dma_cycles_remaining_{};
   std::array<std::uint32_t, 2> spu2_dma_source_{};
   std::array<std::uint32_t, 2> spu2_dma_target_{};

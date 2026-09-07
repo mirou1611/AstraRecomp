@@ -1721,6 +1721,14 @@ void test_vif1_source_chain_completion() {
   std::vector<std::uint8_t> packet;
   check(memory.pop_vif1_packet(packet) && packet.size() == 48u,
         "VIF1 source chain queues TTE tag data and inline payloads");
+  const auto& spans = memory.vif_dma_spans();
+  check(spans.size() == 4u && spans[0].source == 0x2008u &&
+        spans[0].stream_offset == 0u && spans[0].bytes == 8u &&
+        spans[1].source == 0x2010u && spans[1].stream_offset == 8u &&
+        spans[1].bytes == 16u && spans[2].source == 0x2028u &&
+        spans[2].stream_offset == 24u && spans[3].source == 0x2030u &&
+        spans[3].stream_offset == 32u,
+        "VIF provenance maps inline payload and TTE bytes without offset gaps");
   check(memory.read32(0x10009030u) == 0x2040u &&
         memory.read32(0x10009020u) == 0u &&
         (memory.read32(0x10009000u) & 0x100u) == 0u &&
@@ -1733,6 +1741,18 @@ void test_vif1_source_chain_completion() {
   check(first == 0x1111222233334444ull &&
         second_tag == 0x5555666677778888ull,
         "VIF1 TTE data is interleaved at each source-chain boundary");
+  memory.clear();
+  check(memory.vif_dma_spans().empty(), "Memory reset clears VIF source mapping");
+  memory.write64(0x2000u, (0x3000ull << 32) | 1u); // REFE, one external qword.
+  memory.write32(0x10009030u, 0x2000u);
+  memory.write32(0x10009000u, 0x105u); // No TTE.
+  memory.advance(1u);
+  memory.advance(8u);
+  check(memory.vif_dma_spans().size() == 1u &&
+        memory.vif_dma_spans()[0].source == 0x3000u &&
+        memory.vif_dma_spans()[0].stream_offset == 0u &&
+        memory.vif_dma_spans()[0].bytes == 16u,
+        "VIF source mapping records referenced payload without TTE");
 }
 
 void test_vif1_mpg_upload() {

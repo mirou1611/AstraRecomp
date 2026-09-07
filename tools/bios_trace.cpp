@@ -373,6 +373,8 @@ int main(int argc, char** argv) {
   std::array<IopTraceEntry, kTraceSize> iop_trace{};
   std::array<CacheEntry, kTraceSize> cache_trace{};
   std::array<StoreEntry, kTraceSize> low_store_trace{};
+  std::array<StoreEntry, kTraceSize> vif_parameter_store_trace{};
+  std::size_t vif_parameter_store_cursor = 0;
   std::array<StoreEntry, kTraceSize> syscall_store_trace{};
   std::array<StoreEntry, kTraceSize> sbus_store_trace{};
   std::array<StoreEntry, kTraceSize> dma_store_trace{};
@@ -559,6 +561,16 @@ int main(int argc, char** argv) {
       if (physical == 0x1000F180u && serial_output.size() < 16384u)
         serial_output.push_back(static_cast<char>(state.gpr[source]));
     }
+    if (opcode == 0x39u) { // SWC1 source comes from FPR, not GPR.
+      const auto base = (instruction >> 21) & 31u;
+      const auto source = (instruction >> 16) & 31u;
+      const auto address = static_cast<std::uint32_t>(state.gpr[base] +
+          static_cast<std::int16_t>(instruction));
+      const auto physical = ee_physical_address(address);
+      if (physical >= 0x00274200u && physical < 0x00274240u)
+        vif_parameter_store_trace[vif_parameter_store_cursor++ % kTraceSize] = {
+            state.pc, instruction, address, state.fpr[source], 0u};
+    }
     if ((opcode >= 0x28u && opcode <= 0x2Eu) || opcode == 0x1Fu ||
         opcode == 0x3Fu) {
       const unsigned base = (instruction >> 21) & 31u;
@@ -572,6 +584,12 @@ int main(int argc, char** argv) {
         low_store_trace[low_store_cursor++ % kTraceSize] = {
             state.pc, instruction, address, state.gpr[source],
             state.gpr_hi[source]};
+      }
+      // Captured 2.00E BIOS first-VIF parameter packet. Like the other
+      // instruction traces, these are attempted stores, not bus-write proof.
+      if (physical >= 0x00274200u && physical < 0x00274240u) {
+        vif_parameter_store_trace[vif_parameter_store_cursor++ % kTraceSize] = {
+            state.pc, instruction, address, state.gpr[source], state.gpr_hi[source]};
       }
       if (physical >= 0x1C0003C0u && physical < 0x1C000420u) {
         mailbox_store_trace.push_back({state.pc, instruction, address,
@@ -810,6 +828,21 @@ int main(int argc, char** argv) {
         static_cast<unsigned long long>(emulator.memory().read64(address)));
   }
   std::uint64_t framebuffer_hash = 1469598103934665603ull;
+  {
+    const auto count = std::min(vif_parameter_store_cursor, kTraceSize);
+    const auto first = vif_parameter_store_cursor < kTraceSize ? 0u :
+        vif_parameter_store_cursor % kTraceSize;
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto& item = vif_parameter_store_trace[(first + i) % kTraceSize];
+      std::printf("vif_parameter_store pc=%08X opcode=%08X address=%08X value=%016llX:%016llX\n",
+          item.pc, item.instruction, item.address,
+          static_cast<unsigned long long>(item.value_hi),
+          static_cast<unsigned long long>(item.value_lo));
+    }
+  }
+  for (const auto& span : emulator.memory().vif_dma_spans())
+    std::printf("vif_dma_span offset=%zu bytes=%zu source=%08X\n",
+        span.stream_offset, span.bytes, span.source);
   if (vif_path) {
     const auto& vif = emulator.vif1();
     if (vif.packet_capture_overflow() || vif.captured_packet().empty()) {

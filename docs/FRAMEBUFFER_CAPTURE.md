@@ -61,3 +61,11 @@ This is not a savestate: prior path-3 GS setup, textures, earlier VU state and
 other device state are absent. Establish agreement for the specific failure
 before relying on isolated replay. Its image is not the full BIOS image.
 Keep the BIOS-derived binary capture and images local and uncommitted.
+
+The BIOS tracer prints `vif_dma_span` records for the last successfully assembled
+VIF DMA chain. Each maps a stream interval to its EE source address, including
+separate intervals for TTE tag bytes. For stream offset `n` within a span,
+the source address is `source + (n - offset)`. The mapping is built alongside
+the actual byte copy; it is not reconstructed from final DMA registers. It is
+cleared on memory reset and replaced by each successful chain. With multiple
+submissions, do not mistake this last-chain mapping for the first captured stream.
