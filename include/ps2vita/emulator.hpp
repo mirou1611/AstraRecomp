@@ -31,6 +31,7 @@ public:
   const Gs& gs() const { return gs_; }
   const Gif& gif() const { return gif_; }
   void enable_triangle_trace(bool enabled) { gif_.enable_triangle_trace(enabled); }
+  void enable_vif_packet_capture(bool enabled) { vif1_.enable_packet_capture(enabled); }
   const Vif1& vif1() const { return vif1_; }
   const ElfLoadResult& image() const { return image_; }
   bool ready() const { return ready_; }

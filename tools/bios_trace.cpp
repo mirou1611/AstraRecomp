@@ -323,11 +323,11 @@ void write_execution_census(std::ostream& output, std::uint64_t ee_steps,
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 12) {
+  if (argc < 2 || argc > 13) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
         "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP] "
-        "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM]\n");
+        "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM] [FIRST_VIF_BIN]\n");
     return 2;
   }
 
@@ -358,8 +358,10 @@ int main(int argc, char** argv) {
       ? std::strtoull(argv[9], nullptr, 0) : 0u;
   const char* census_path = argc >= 11 ? argv[10] : nullptr;
   const char* framebuffer_path = argc >= 12 ? argv[11] : nullptr;
+  const char* vif_path = argc >= 13 ? argv[12] : nullptr;
 
   ps2vita::Emulator emulator;
+  emulator.enable_vif_packet_capture(vif_path != nullptr);
   emulator.enable_triangle_trace(true);
   if (!emulator.load_bios(bios.data(), bios.size()) || !emulator.boot_bios()) {
     std::fprintf(stderr, "BIOS must be exactly 4 MiB\n");
@@ -808,6 +810,19 @@ int main(int argc, char** argv) {
         static_cast<unsigned long long>(emulator.memory().read64(address)));
   }
   std::uint64_t framebuffer_hash = 1469598103934665603ull;
+  if (vif_path) {
+    const auto& vif = emulator.vif1();
+    if (vif.packet_capture_overflow() || vif.captured_packet().empty()) {
+      std::fprintf(stderr, "first VIF capture unavailable or exceeds 1 MiB\n");
+      return 2;
+    }
+    std::ofstream capture(vif_path, std::ios::binary | std::ios::trunc);
+    const auto& bytes = vif.captured_packet();
+    capture.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    capture.close();
+    if (!capture) { std::fprintf(stderr, "could not write VIF capture\n"); return 2; }
+    std::printf("first VIF capture: %s bytes=%zu\n", vif_path, bytes.size());
+  }
   std::size_t nonzero_pixels = 0;
   std::size_t nonzero_rgb_pixels = 0;
   for (int y = 0; y < ps2vita::Gs::kHeight; ++y) {

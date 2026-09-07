@@ -65,6 +65,29 @@ void test_triangle_trace() {
   check(gif.triangle_records().empty(), "Reset clears triangle records");
 }
 
+void test_vif_packet_capture() {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  std::array<std::uint8_t, 4> nop{};
+  vif.submit(nop.data(), nop.size());
+  check(vif.captured_packet().empty(), "VIF capture disabled by default");
+  vif.reset();
+  vif.enable_packet_capture(true);
+  vif.submit(nop.data(), nop.size());
+  nop[0] = 42u;
+  vif.submit(nop.data(), nop.size());
+  check(vif.captured_packet().size() == 4u && vif.captured_packet()[0] == 0u,
+        "VIF captures an owned copy of only the first submission");
+  vif.reset();
+  std::vector<std::uint8_t> oversized(1024u * 1024u + 4u);
+  vif.submit(oversized.data(), oversized.size());
+  check(vif.packet_capture_overflow() && vif.captured_packet().empty(),
+        "VIF refuses oversized diagnostic capture without truncation");
+  vif.reset();
+  check(!vif.packet_capture_overflow() && vif.captured_packet().empty(),
+        "VIF reset clears diagnostic capture");
+}
+
 void test_gif_shading_modes() {
   for (unsigned primitive : {1u, 2u, 3u, 4u, 5u}) {
     for (bool gouraud : {false, true}) {
@@ -2879,6 +2902,7 @@ int main() {
   test_gif_depth_state();
   test_framebuffer_dump();
   test_triangle_trace();
+  test_vif_packet_capture();
   test_gif_shading_modes();
   test_gif_primitive_scissor();
   test_degenerate_triangle();

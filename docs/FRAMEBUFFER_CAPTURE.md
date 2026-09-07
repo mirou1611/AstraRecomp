@@ -36,3 +36,28 @@ decoded GS XYZ values. XYZF's fog field is not included in these decoded values.
 ADC-suppressed assembly updates do not create records. Zero-area drawing kicks
 can appear in the trace even though the rasterizer correctly gives them no
 coverage. Tracing is off by default in the runtime and never caps rendering.
+
+## Isolated VIF replay
+
+Append `FIRST_VIF_BIN` after the framebuffer path to save the first submitted
+VIF1 stream, up to 1 MiB. Capture owns its bytes before VIF/VU execution and
+survives later memory writes. It is disabled by default. Missing, empty or
+oversized captures are reported as errors rather than written as partial data.
+
+```sh
+./build-release/ps2bios_trace bios.bin 0 248800000 1 0 8 0 0 0 \
+  build-release/vif-capture-census.json build-release/vif-capture.ppm \
+  build-release/first-vif.bin > build-release/vif-capture-2488m.txt 2>&1
+./build-release/ps2vif_replay build-release/first-vif.bin build-release/vif-only.ppm
+```
+
+The replay tool starts with reset memory, VIF, VU and GS state, processes the
+captured stream, then submits its path-1 packets to GIF. Its summary exposes
+VU pair counts and rejection origin. Exit 1 indicates a processing rejection;
+exit 2 indicates usage or I/O errors. Output files are overwritten if they exist.
+The input size is checked before allocating its buffer.
+
+This is not a savestate: prior path-3 GS setup, textures, earlier VU state and
+other device state are absent. Establish agreement for the specific failure
+before relying on isolated replay. Its image is not the full BIOS image.
+Keep the BIOS-derived binary capture and images local and uncommitted.

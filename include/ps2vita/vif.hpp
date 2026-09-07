@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace ps2vita {
 
@@ -14,6 +15,9 @@ class Vif1 {
 public:
   explicit Vif1(Memory& memory) : memory_(memory), vu1_(memory) {}
   void reset();
+  void enable_packet_capture(bool enabled) { capture_packet_ = enabled; }
+  const std::vector<std::uint8_t>& captured_packet() const { return captured_packet_; }
+  bool packet_capture_overflow() const { return capture_overflow_; }
   bool submit(const std::uint8_t* data, std::size_t size);
 
   std::uint64_t packets_submitted() const { return packets_submitted_; }
@@ -45,6 +49,9 @@ private:
   std::uint16_t itops_ = 0;
   std::uint16_t top_ = 0;
   bool double_buffer_ = false;
+  bool capture_packet_ = false;
+  bool capture_overflow_ = false;
+  std::vector<std::uint8_t> captured_packet_;
 };
 
 } // namespace ps2vita

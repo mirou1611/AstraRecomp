@@ -18,6 +18,8 @@ std::uint32_t load32(const std::uint8_t* data) {
 } // namespace
 
 void Vif1::reset() {
+  captured_packet_.clear();
+  capture_overflow_ = false;
   vu1_.reset();
   packets_submitted_ = 0;
   packets_rejected_ = 0;
@@ -34,6 +36,10 @@ void Vif1::reset() {
 }
 
 bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
+  if (capture_packet_ && packets_submitted_ == 0u) {
+    if (size > 1024u * 1024u) capture_overflow_ = true;
+    else if (size != 0u) captured_packet_.assign(data, data + size);
+  }
   ++packets_submitted_;
   std::size_t cursor = 0;
   while (cursor + 4u <= size) {
