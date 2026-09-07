@@ -657,6 +657,49 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
           state_.vu0_vi[destination] =
               (state_.vu0_vi[destination] & 0xFFFF0000u) | result;
         }
+      } else if (fn >= 0x3Cu && (special2 == 0x38u || special2 == 0x39u)) {
+        // Functional VDIV / VSQRT. Q is immediately visible in this subset;
+        // a cycle-accurate division pipeline is still outstanding.
+        const auto denominator_bits = vu_lane(state_, rt, (ins >> 23) & 3u);
+        const auto denominator = as_float(denominator_bits);
+        state_.vu0_vi[16] &= ~0x30u;
+        if (special2 == 0x39u) {
+          if (denominator < 0.0f) state_.vu0_vi[16] |= 0x10u;
+          state_.vu0_vi[22] = as_bits(std::sqrt(std::fabs(denominator)));
+        } else {
+          const auto numerator_bits = vu_lane(state_, rd, (ins >> 21) & 3u);
+          const auto numerator = as_float(numerator_bits);
+          if (denominator == 0.0f) {
+            state_.vu0_vi[16] |= numerator == 0.0f ? 0x10u : 0x20u;
+            state_.vu0_vi[22] = ((numerator_bits ^ denominator_bits) & 0x80000000u) |
+                                0x7F7FFFFFu;
+          } else state_.vu0_vi[22] = as_bits(numerator / denominator);
+        }
+      } else if (fn >= 0x3Cu && special2 == 0x3Bu) { // VWAITQ, functional Q ready.
+      } else if (fn <= 0x03u || fn == 0x20u) { // VADDx/y/z/w / VADDq
+        const auto scalar = as_float(fn == 0x20u ? state_.vu0_vi[22] :
+            vu_lane(state_, rt, fn & 3u));
+        if (sa != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane)
+            if ((ins & (1u << (24u - lane))) != 0u)
+              set_vu_lane(state_, sa, lane,
+                  as_bits(as_float(vu_lane(state_, rd, lane)) + scalar));
+        }
+      } else if ((fn >= 0x18u && fn <= 0x1Cu) || fn == 0x2Au) { // VMUL[x/y/z/w/q]
+        // Capture the broadcast scalar before writing any destination lane;
+        // FD may alias FT. Timing/MAC/status follow the current functional
+        // macro-mode subset, not a complete VU0 pipeline model.
+        const bool broadcast = fn != 0x2Au;
+        const auto scalar = broadcast ? as_float(fn == 0x1Cu ? state_.vu0_vi[22] :
+            vu_lane(state_, rt, fn & 3u)) : 0.0f;
+        if (sa != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane) {
+            if ((ins & (1u << (24u - lane))) != 0u)
+              set_vu_lane(state_, sa, lane,
+                  as_bits(as_float(vu_lane(state_, rd, lane)) *
+                      (broadcast ? scalar : as_float(vu_lane(state_, rt, lane)))));
+          }
+        }
       } else if (fn == 0x28u || fn == 0x2Cu) { // VADD / VSUB
         const unsigned ft = rt;
         const unsigned fs = rd;

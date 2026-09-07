@@ -1548,6 +1548,92 @@ void test_vu_memory_windows() {
         "VU address-map holes remain unmapped");
 }
 
+void test_vu0_broadcast_multiply() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  for (unsigned bc = 0; bc < 4; ++bc) {
+    cpu.reset(0x1000u);
+    cpu.state().vu0_vf[4] = 0x400000003F800000ull; // 1,2
+    cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull; // 3,4
+    cpu.state().vu0_vf[5] = 0x4000000040000000ull; // 2,2
+    cpu.state().vu0_vf_hi[5] = 0x4000000040000000ull;
+    // Alias FD=FT to expose reading a modified broadcast lane.
+    memory.write32(0x1000u, 0x4BE52158u | bc);
+    check(cpu.step() == ps2vita::StopReason::None &&
+          cpu.state().vu0_vf[5] == 0x4080000040000000ull &&
+          cpu.state().vu0_vf_hi[5] == 0x4100000040C00000ull,
+          "VMUL broadcast captures scalar across destination aliasing");
+  }
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull;
+  cpu.state().vu0_vf[5] = 0x4000000040000000ull;
+  memory.write32(0x1000u, 0x4BE52198u); // Captured VMULx.xyzw vf6,vf4,vf5.
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vf[6] == 0x4080000040000000ull &&
+        cpu.state().vu0_vf_hi[6] == 0x4100000040C00000ull,
+        "Captured BIOS VMULx produces the expected vector");
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull;
+  cpu.state().vu0_vf_hi[5] = 0x4000000000000000ull;
+  // W-only multiply by VF5.w=2, self alias; other lanes must survive.
+  memory.write32(0x1000u, 0x4A25211Bu);
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vf[4] == 0x400000003F800000ull &&
+        cpu.state().vu0_vf_hi[4] == 0x4100000040400000ull,
+        "VMUL honors destination mask without changing other lanes");
+  cpu.reset(0x1000u);
+  memory.write32(0x1000u, 0x4BE52018u); // FD=0 must not change the constant.
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vf[0] == 0u &&
+        cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull,
+        "VMUL preserves VF0 on destination writes");
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull;
+  cpu.state().vu0_vf_hi[5] = 0x1234567800000000ull;
+  memory.write32(0x1000u, 0x4BC4216Au); // Captured VMUL.xyz VF5,VF4,VF4.
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vf[5] == 0x408000003F800000ull &&
+        cpu.state().vu0_vf_hi[5] == 0x1234567841100000ull,
+        "Captured vector VMUL squares XYZ and preserves W");
+}
+
+void test_vu0_captured_normalization() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  // Arithmetic sequence from BIOS PC 0x273894..0x2738B8, omitting only
+  // the caller's LQC2, return, and SQC2. No synthetic opcode substitution.
+  constexpr std::array<std::uint32_t, 10> code{{
+      0x4BC4216Au, 0x4B052941u, 0x4B052942u, 0x4A2503BDu, 0x4A0003BFu,
+      0x4B000160u, 0x4A6503BCu, 0x4BE001ACu, 0x4A0003BFu, 0x4BC0219Cu}};
+  for (unsigned i = 0; i < code.size(); ++i) memory.write32(0x1000u + i * 4u, code[i]);
+  for (bool zero : {false, true}) {
+    cpu.reset(0x1000u);
+    cpu.state().vu0_vf[4] = zero ? 0u : 0x4080000040400000ull; // 3,4
+    cpu.state().vu0_vf_hi[4] = 0x42C6000000000000ull; // Z=0,W=99 ignored.
+    check(cpu.run(code.size()) == ps2vita::StopReason::StepLimit,
+          "Captured VU0 normalization instruction sequence executes");
+    check(cpu.state().vu0_vf[6] == (zero ? 0u : 0x3F4CCCCD3F19999Aull) &&
+          cpu.state().vu0_vf_hi[6] == 0u,
+          "Captured VU0 normalizes 3,4,0 and safely handles zero vector");
+  }
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[5] = 0xC0800000u; // -4
+  cpu.state().vu0_vi[16] = 0x120u;
+  memory.write32(0x1000u, 0x4A2503BDu);
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vi[22] == 0x40000000u && cpu.state().vu0_vi[16] == 0x110u,
+        "VSQRT uses absolute input and updates invalid/divide status bits");
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[5] = 0x80000000u; // -0
+  memory.write32(0x1000u, 0x4A6503BCu); // VF0.w / VF5.x
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vi[22] == 0xFF7FFFFFu && (cpu.state().vu0_vi[16] & 0x30u) == 0x20u,
+        "VDIV by negative zero saturates with the correct sign");
+}
+
 void test_vu0_cop2_transfers() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -2888,6 +2974,8 @@ int main() {
   test_fpu_memory_transfer();
   test_vu_memory_windows();
   test_vu0_cop2_transfers();
+  test_vu0_broadcast_multiply();
+  test_vu0_captured_normalization();
   test_quarter_scale_gs();
   test_gif_normal_dma_completion();
   test_vif1_source_chain_completion();
