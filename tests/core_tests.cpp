@@ -1429,6 +1429,40 @@ void test_mmi_pcpyld() {
         "PAND and PNOR combine all 128 bits with alias-safe sources");
 }
 
+void test_mmi_pextuw_and_transpose() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  for (unsigned destination : {13u, 9u, 8u, 0u}) {
+    cpu.reset(0x1000u);
+    cpu.state().gpr[9] = 0x2222222211111111ull;
+    cpu.state().gpr[8] = 0x6666666655555555ull;
+    cpu.state().gpr_hi[9] = 0x8888888877777777ull;
+    cpu.state().gpr_hi[8] = 0x4444444433333333ull;
+    memory.write32(0x1000u, 0x712804A8u | (destination << 11));
+    check(cpu.step() == ps2vita::StopReason::None &&
+          cpu.state().gpr[destination] == (destination ? 0x7777777733333333ull : 0u) &&
+          cpu.state().gpr_hi[destination] == (destination ? 0x8888888844444444ull : 0u),
+          "PEXTUW interleaves upper words with alias-safe source snapshots");
+  }
+  cpu.reset(0x1000u);
+  for (unsigned row = 0; row < 4u; ++row) {
+    const std::uint64_t first = row * 4u + 1u;
+    cpu.state().gpr[8u + row] = first | ((first + 1u) << 32);
+    cpu.state().gpr_hi[8u + row] = (first + 2u) | ((first + 3u) << 32);
+  }
+  constexpr std::array<std::uint32_t, 8> code{{0x71286488u, 0x71286CA8u,
+      0x716A7488u, 0x716A7CA8u, 0x71CC4389u, 0x718E4BA9u, 0x71ED5389u, 0x71AF5BA9u}};
+  for (unsigned i = 0; i < code.size(); ++i) memory.write32(0x1000u + i * 4u, code[i]);
+  check(cpu.run(code.size()) == ps2vita::StopReason::StepLimit,
+        "Captured BIOS packed matrix transpose sequence executes");
+  for (unsigned column = 0; column < 4u; ++column) {
+    const std::uint64_t first = column + 1u;
+    check(cpu.state().gpr[8u + column] == (first | ((first + 4u) << 32)) &&
+          cpu.state().gpr_hi[8u + column] == ((first + 8u) | ((first + 12u) << 32)),
+          "Captured packed sequence transposes all four matrix columns");
+  }
+}
+
 void test_mmi_pextlw() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -2968,6 +3002,7 @@ int main() {
   test_mmi_packed_accumulator_moves();
   test_mmi_pcpyld();
   test_mmi_pextlw();
+  test_mmi_pextuw_and_transpose();
   test_r5900_shift_amount_moves();
   test_r5900_three_operand_multiply();
   test_scalar_fpu();

@@ -853,6 +853,13 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
       const auto b = static_cast<std::uint32_t>(rtv);
       state_.lo1 = b ? sx32(a / b) : std::numeric_limits<std::uint64_t>::max();
       state_.hi1 = sx32(b ? a % b : a);
+    } else if (fn == 0x28 && sub == 0x12) { // PEXTUW
+      const auto source_s = state_.gpr_hi[rs];
+      const auto source_t = state_.gpr_hi[rt];
+      if (rd != 0u) {
+        state_.gpr[rd] = (source_t & 0xFFFFFFFFull) | (source_s << 32);
+        state_.gpr_hi[rd] = (source_t >> 32) | (source_s & 0xFFFFFFFF00000000ull);
+      }
     } else if (fn == 0x08 && sub == 0x12) { // PEXTLW
       if (rd != 0) {
         const auto low = (rtv & 0xFFFFFFFFu) | (rsv << 32);
