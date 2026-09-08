@@ -88,6 +88,30 @@ void test_vif_packet_capture() {
         "VIF reset clears diagnostic capture");
 }
 
+void test_vif_unsupported_location() {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  const std::array<std::uint32_t, 3> packet{{0u, 0x01000404u, 0xAE13000Cu}};
+  const auto* bytes = reinterpret_cast<const std::uint8_t*>(packet.data());
+  check(vif.submit(bytes, 4u), "VIF location fixture starts with valid packet");
+  check(!vif.submit(bytes, sizeof(packet)) &&
+        vif.first_unsupported_code() == 0xAE13000Cu &&
+        vif.first_unsupported_packet() == 2u &&
+        vif.first_unsupported_offset() == 8u &&
+        vif.first_unsupported_size() == sizeof(packet),
+        "VIF records first unsupported command's packet and byte offset");
+  vif.submit(bytes + 8u, 4u);
+  check(vif.first_unsupported_packet() == 2u && vif.first_unsupported_offset() == 8u,
+        "VIF preserves original failure location after later rejections");
+  vif.reset();
+  check(vif.first_unsupported_packet() == 0u && vif.first_unsupported_offset() == 0u &&
+        vif.first_unsupported_size() == 0u && vif.first_unsupported_code() == 0u,
+        "VIF reset clears failure location");
+  vif.submit(bytes, 1u); // A truncated stream is not an unsupported command.
+  check(vif.packets_rejected() == 1u && vif.first_unsupported_packet() == 0u,
+        "VIF truncation does not fabricate unsupported-command provenance");
+}
+
 void test_gif_shading_modes() {
   for (unsigned primitive : {1u, 2u, 3u, 4u, 5u}) {
     for (bool gouraud : {false, true}) {
@@ -1740,6 +1764,46 @@ void test_vu0_move() {
   }
 }
 
+void test_ee_madd() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  struct Case { std::uint32_t a, b; std::uint64_t initial, signed_result, unsigned_result; };
+  const std::array<Case, 5> cases{{
+      {3u, 4u, 5u, 17u, 17u},
+      {0xFFFFFFFFu, 2u, 0u, 0xFFFFFFFFFFFFFFFEull, 0x1FFFFFFFEull},
+      {1u, 1u, 0xFFFFFFFFFFFFFFFFull, 0u, 0u},
+      {0x80000000u, 0xFFFFFFFFu, 0u, 0x80000000ull, 0x7FFFFFFF80000000ull},
+      {1u, 1u, 0x7FFFFFFFFFFFFFFFull, 0x8000000000000000ull, 0x8000000000000000ull}}};
+  const auto extend = [](std::uint32_t word) {
+    return word & 0x80000000u ? 0xFFFFFFFF00000000ull | word : std::uint64_t(word);
+  };
+  for (unsigned fn : {0u, 1u, 0x20u, 0x21u}) {
+    for (unsigned destination : {16u, 20u, 22u, 0u}) {
+      for (const auto& c : cases) {
+        cpu.reset(0x1000u);
+        cpu.state().gpr[20] = 0x1234567800000000ull | c.a;
+        cpu.state().gpr[22] = 0x8765432100000000ull | c.b;
+        cpu.state().gpr_hi[destination] = destination ? 0x12345678u : 0u;
+        auto& low = fn & 0x20u ? cpu.state().lo1 : cpu.state().lo;
+        auto& high = fn & 0x20u ? cpu.state().hi1 : cpu.state().hi;
+        low = 0xAAAAAAAA00000000ull | static_cast<std::uint32_t>(c.initial);
+        high = 0xBBBBBBBB00000000ull | (c.initial >> 32);
+        memory.write32(0x1000u, 0x72960000u | (destination << 11) | fn);
+        const auto result = fn & 1u ? c.unsigned_result : c.signed_result;
+        check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+              low == extend(static_cast<std::uint32_t>(result)) &&
+              high == extend(static_cast<std::uint32_t>(result >> 32)) &&
+              cpu.state().gpr[destination] == (destination ? low : 0u) &&
+              cpu.state().gpr_hi[destination] == (destination ? 0x12345678u : 0u),
+              "MADD variants handle signedness, wraparound, aliases and upper-half preservation");
+        check((fn & 0x20u ? cpu.state().lo : cpu.state().lo1) == 0u &&
+              (fn & 0x20u ? cpu.state().hi : cpu.state().hi1) == 0u,
+              "MADD leaves other accumulator unchanged");
+      }
+    }
+  }
+}
+
 void test_vu0_matrix_accumulator() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -3149,6 +3213,7 @@ int main() {
   test_vu0_captured_normalization();
   test_vu0_outer_product();
   test_vu0_move();
+  test_ee_madd();
   test_vu0_matrix_accumulator();
   test_quarter_scale_gs();
   test_gif_normal_dma_completion();
@@ -3185,6 +3250,7 @@ int main() {
   test_framebuffer_dump();
   test_triangle_trace();
   test_vif_packet_capture();
+  test_vif_unsupported_location();
   test_gif_shading_modes();
   test_gif_primitive_scissor();
   test_degenerate_triangle();

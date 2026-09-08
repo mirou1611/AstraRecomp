@@ -839,7 +839,23 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
   }
   case 0x1C: { // MMI multimedia instruction groups.
     const unsigned sub = (ins >> 6) & 31u;
-    if (fn == 0x04) { // PLZCW
+    if (fn == 0x00u || fn == 0x01u || fn == 0x20u || fn == 0x21u) {
+      // MADD/MADDU and accumulator-1 variants. Accumulate modulo 2^64
+      // without signed overflow; HI/LO each receive sign-extended words.
+      auto& low = (fn & 0x20u) ? state_.lo1 : state_.lo;
+      auto& high = (fn & 0x20u) ? state_.hi1 : state_.hi;
+      const auto accumulator = static_cast<std::uint64_t>(static_cast<std::uint32_t>(low)) |
+          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(high)) << 32);
+      const auto product = (fn & 1u) ?
+          static_cast<std::uint64_t>(static_cast<std::uint32_t>(rsv)) *
+              static_cast<std::uint32_t>(rtv) :
+          static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(rsv)) *
+              static_cast<std::int32_t>(rtv));
+      const auto result = accumulator + product;
+      low = sx32(static_cast<std::uint32_t>(result));
+      high = sx32(static_cast<std::uint32_t>(result >> 32));
+      set_reg(rd, low);
+    } else if (fn == 0x04) { // PLZCW
       if (rd != 0) {
         const auto count_after_sign = [](std::uint32_t word) {
           const bool sign = (word & 0x80000000u) != 0u;

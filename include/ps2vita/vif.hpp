@@ -29,6 +29,9 @@ public:
   std::uint32_t first_unsupported_code() const {
     return first_unsupported_code_;
   }
+  std::uint64_t first_unsupported_packet() const { return first_unsupported_packet_; }
+  std::size_t first_unsupported_offset() const { return first_unsupported_offset_; }
+  std::size_t first_unsupported_size() const { return first_unsupported_size_; }
   std::uint16_t cycle() const { return cycle_; }
   std::uint16_t top() const { return top_; }
   Vu1& vu1() { return vu1_; }
@@ -42,6 +45,9 @@ private:
   std::uint64_t micro_instructions_loaded_ = 0;
   std::uint64_t vectors_unpacked_ = 0;
   std::uint32_t first_unsupported_code_ = 0;
+  std::uint64_t first_unsupported_packet_ = 0;
+  std::size_t first_unsupported_offset_ = 0;
+  std::size_t first_unsupported_size_ = 0;
   std::uint16_t cycle_ = 0;
   std::uint16_t base_ = 0;
   std::uint16_t offset_ = 0;

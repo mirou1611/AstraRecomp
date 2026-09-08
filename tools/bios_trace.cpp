@@ -939,6 +939,10 @@ int main(int argc, char** argv) {
           emulator.vif1().micro_instructions_loaded()),
       static_cast<unsigned long long>(emulator.vif1().vectors_unpacked()),
       emulator.vif1().first_unsupported_code());
+  std::printf("vif1_first_unsupported_packet=%llu stream_offset=%zu packet_bytes=%zu\n",
+      static_cast<unsigned long long>(emulator.vif1().first_unsupported_packet()),
+      emulator.vif1().first_unsupported_offset(),
+      emulator.vif1().first_unsupported_size());
   std::printf("vu1_pairs=%llu running=%u pc=%04X unsupported_lower=%08X "
               "unsupported_upper=%08X kick_address=%04X kick_tag=%016llX "
               "path1_tags=%llu/%llu\n",

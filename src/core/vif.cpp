@@ -26,6 +26,9 @@ void Vif1::reset() {
   micro_instructions_loaded_ = 0;
   vectors_unpacked_ = 0;
   first_unsupported_code_ = 0;
+  first_unsupported_packet_ = 0;
+  first_unsupported_offset_ = 0;
+  first_unsupported_size_ = 0;
   cycle_ = 0;
   base_ = 0;
   offset_ = 0;
@@ -42,6 +45,13 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
   }
   ++packets_submitted_;
   std::size_t cursor = 0;
+  const auto record_unsupported = [&](std::uint32_t code) {
+    if (first_unsupported_packet_ != 0u) return;
+    first_unsupported_code_ = code;
+    first_unsupported_packet_ = packets_submitted_;
+    first_unsupported_offset_ = cursor - 4u;
+    first_unsupported_size_ = size;
+  };
   while (cursor + 4u <= size) {
     const auto code = load32(data + cursor);
     cursor += 4u;
@@ -85,7 +95,7 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       vu1_.run(kVu1ExecutionBudget);
       if (vu1_.running() || vu1_.first_unsupported_lower() != 0u ||
           vu1_.first_unsupported_upper() != 0u) {
-        if (first_unsupported_code_ == 0u) first_unsupported_code_ = code;
+        record_unsupported(code);
         ++packets_rejected_;
         return false;
       }
@@ -101,7 +111,7 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       vu1_.run(kVu1ExecutionBudget);
       if (vu1_.running() || vu1_.first_unsupported_lower() != 0u ||
           vu1_.first_unsupported_upper() != 0u) {
-        if (first_unsupported_code_ == 0u) first_unsupported_code_ = code;
+        record_unsupported(code);
         ++packets_rejected_;
         return false;
       }
@@ -133,7 +143,7 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       const auto cl = static_cast<unsigned>(cycle_ & 0xFFu);
       const auto wl = static_cast<unsigned>(cycle_ >> 8);
       if ((cl != 0u || wl != 0u) && cl != wl) {
-        if (first_unsupported_code_ == 0u) first_unsupported_code_ = code;
+        record_unsupported(code);
         ++packets_rejected_;
         return false;
       }
@@ -153,7 +163,7 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       continue;
     }
 
-    if (first_unsupported_code_ == 0u) first_unsupported_code_ = code;
+    record_unsupported(code);
     ++packets_rejected_;
     return false;
   }
