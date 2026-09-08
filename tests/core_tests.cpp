@@ -1839,6 +1839,64 @@ void test_vu0_move() {
   }
 }
 
+void test_vu0_abs() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  const std::array<std::uint32_t, 4> source{{0x80000000u, 0xBF800000u, 0xFFFFFFFFu, 0x7F800001u}};
+  for (unsigned destination : {5u, 4u, 0u}) {
+    for (unsigned mask : {0u, 5u, 15u}) {
+      cpu.reset(0x1000u);
+      cpu.state().vu0_vf[4] = source[0] | (std::uint64_t(source[1]) << 32);
+      cpu.state().vu0_vf_hi[4] = source[2] | (std::uint64_t(source[3]) << 32);
+      const auto old_low = cpu.state().vu0_vf[destination];
+      const auto old_high = cpu.state().vu0_vf_hi[destination];
+      cpu.state().vu0_vi[16] = 0x123u;
+      memory.write32(0x1000u, 0x4A0021FDu | (mask << 21) | (destination << 16));
+      check(cpu.run(1) == ps2vita::StopReason::StepLimit && cpu.state().vu0_vi[16] == 0x123u,
+            "VABS executes without altering STATUS");
+      for (unsigned lane = 0; lane < 4u; ++lane) {
+        const auto half = lane < 2u ? cpu.state().vu0_vf[destination] : cpu.state().vu0_vf_hi[destination];
+        const auto old = lane < 2u ? old_low : old_high;
+        const auto expected = destination != 0u && (mask & (8u >> lane)) ?
+            source[lane] & 0x7FFFFFFFu : static_cast<std::uint32_t>(old >> ((lane & 1u) * 32u));
+        check(static_cast<std::uint32_t>(half >> ((lane & 1u) * 32u)) == expected,
+              "VABS clears only sign bits and preserves masks, aliases, special bits and VF0");
+      }
+    }
+  }
+}
+
+void test_vu0_ftoi() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  constexpr unsigned shifts[] = {0u, 4u, 12u, 15u};
+  for (unsigned variant = 0; variant < 4u; ++variant) {
+    for (unsigned destination : {5u, 4u, 0u}) {
+      cpu.reset(0x1000u);
+      cpu.state().vu0_vf[4] = 0xBFE000003FE00000ull; // +1.75,-1.75
+      cpu.state().vu0_vf_hi[4] = 0xFF8000007F800000ull; // overflow both signs
+      memory.write32(0x1000u, 0x4BE0217Cu | (destination << 16) | variant);
+      check(cpu.run(1) == ps2vita::StopReason::StepLimit, "VFTOI variant executes");
+      const auto positive = static_cast<std::uint32_t>(1.75f * float(1u << shifts[variant]));
+      check(destination == 0u ? cpu.state().vu0_vf[0] == 0u &&
+          cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull :
+          cpu.state().vu0_vf[destination] == (positive | (std::uint64_t(0u - positive) << 32)) &&
+          cpu.state().vu0_vf_hi[destination] == 0x800000007FFFFFFFull,
+          "VFTOI scales, truncates, saturates and preserves aliases/VF0");
+    }
+  }
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[4] = 0x4EFFFFFF80000000ull; // -0, largest float below 2^31.
+  cpu.state().vu0_vf_hi[4] = 0xFFFFFFFF7FFFFFFFull; // exceptional bit patterns.
+  cpu.state().vu0_vf[5] = 0x1234567812345678ull;
+  cpu.state().vu0_vf_hi[5] = 0x1234567812345678ull;
+  memory.write32(0x1000u, 0x4BC5217Cu); // VFTOI0.xyz, W preserved.
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_vf[5] == 0x7FFFFF8000000000ull &&
+        cpu.state().vu0_vf_hi[5] == 0x123456787FFFFFFFull,
+        "VFTOI handles signed zero, finite boundary, saturation and masked W");
+}
+
 void test_ee_madd() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -3339,6 +3397,8 @@ int main() {
   test_vu0_captured_normalization();
   test_vu0_outer_product();
   test_vu0_move();
+  test_vu0_abs();
+  test_vu0_ftoi();
   test_ee_madd();
   test_vu0_matrix_accumulator();
   test_quarter_scale_gs();

@@ -793,6 +793,27 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
                             value);
           }
         }
+      } else if (fn >= 0x3Cu && special2 >= 0x14u && special2 <= 0x17u) {
+        // VFTOI0/4/12/15: scale, truncate toward zero, saturate before casting.
+        constexpr unsigned shifts[] = {0u, 4u, 12u, 15u};
+        const float scale = static_cast<float>(1u << shifts[special2 & 3u]);
+        if (rt != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane) {
+            if ((ins & (1u << (24u - lane))) == 0u) continue;
+            const float value = as_float(vu_lane(state_, rd, lane)) * scale;
+            const auto bits = as_bits(value);
+            const auto result = (bits & 0x7F800000u) >= 0x4F000000u ?
+                ((bits & 0x80000000u) ? 0x80000000u : 0x7FFFFFFFu) :
+                static_cast<std::uint32_t>(static_cast<std::int32_t>(value));
+            set_vu_lane(state_, rt, lane, result);
+          }
+        }
+      } else if (fn >= 0x3Cu && special2 == 0x1Du) { // VABS
+        if (rt != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane)
+            if (ins & (1u << (24u - lane)))
+              set_vu_lane(state_, rt, lane, vu_lane(state_, rd, lane) & 0x7FFFFFFFu);
+        }
       } else if (fn >= 0x3Cu && special2 == 0x30u) { // VMOVE
         if (rt != 0u) {
           for (unsigned lane = 0; lane < 4u; ++lane)
