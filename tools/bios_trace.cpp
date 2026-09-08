@@ -356,7 +356,8 @@ int main(int argc, char** argv) {
       ? std::strtoull(argv[8], nullptr, 0) : 0u;
   const std::uint64_t timer5_probe_step = argc >= 10
       ? std::strtoull(argv[9], nullptr, 0) : 0u;
-  const char* census_path = argc >= 11 ? argv[10] : nullptr;
+  // '-' skips the optional census when requesting a framebuffer capture.
+  const char* census_path = argc >= 11 && std::string(argv[10]) != "-" ? argv[10] : nullptr;
   const char* framebuffer_path = argc >= 12 ? argv[11] : nullptr;
   const char* vif_path = argc >= 13 ? argv[12] : nullptr;
 
@@ -951,10 +952,10 @@ int main(int argc, char** argv) {
           emulator.vif1().micro_instructions_loaded()),
       static_cast<unsigned long long>(emulator.vif1().vectors_unpacked()),
       emulator.vif1().first_unsupported_code());
-  std::printf("vif1_first_unsupported_packet=%llu stream_offset=%zu packet_bytes=%zu\n",
+  std::printf("vif1_first_unsupported_packet=%llu stream_offset=%zu packet_bytes=%zu pending_direct_bytes=%zu\n",
       static_cast<unsigned long long>(emulator.vif1().first_unsupported_packet()),
       emulator.vif1().first_unsupported_offset(),
-      emulator.vif1().first_unsupported_size());
+      emulator.vif1().first_unsupported_size(), emulator.vif1().pending_direct_bytes());
   std::printf("vu1_pairs=%llu running=%u pc=%04X unsupported_lower=%08X "
               "unsupported_upper=%08X kick_address=%04X kick_tag=%016llX "
               "path1_tags=%llu/%llu\n",

@@ -25,12 +25,13 @@ int main(int argc, char** argv) {
   const bool accepted = vif.submit(data.data(), data.size());
   std::vector<std::uint8_t> packet;
   bool gif_ok = true;
-  while (vif.vu1().pop_path1_packet(packet))
+  while (vif.pop_gif_packet(packet))
     gif_ok = gif.submit(packet.data(), packet.size()) && gif_ok;
   const auto& vu = vif.vu1();
-  std::printf("accepted=%u vif_rejected=%llu vu_pairs=%llu path1=%llu/%llu "
+  std::printf("accepted=%u pending_direct_bytes=%zu vif_rejected=%llu vu_pairs=%llu path1=%llu/%llu "
               "reject_pc=%04X kick=%04X bad=%04X tag=%016llX triangles=%llu\n",
-      static_cast<unsigned>(accepted), static_cast<unsigned long long>(vif.packets_rejected()),
+      static_cast<unsigned>(accepted), vif.pending_direct_bytes(),
+      static_cast<unsigned long long>(vif.packets_rejected()),
       static_cast<unsigned long long>(vu.pairs_executed()),
       static_cast<unsigned long long>(vu.path1_tags_queued()),
       static_cast<unsigned long long>(vu.path1_tags_rejected()),
@@ -43,5 +44,6 @@ int main(int argc, char** argv) {
   if (!written || !image) return 2;
   // Isolated replay starts with reset GS state, not prior BIOS path-3 uploads.
   // Its image is diagnostic, not a replacement for a full-BIOS framebuffer.
-  return accepted && gif_ok && vu.path1_tags_rejected() == 0u ? 0 : 1;
+  return accepted && gif_ok && vif.pending_direct_bytes() == 0u &&
+      vu.path1_tags_rejected() == 0u ? 0 : 1;
 }

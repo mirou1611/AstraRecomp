@@ -1,6 +1,7 @@
 #include "ps2vita/vif.hpp"
 
 #include <cstring>
+#include <algorithm>
 
 namespace ps2vita {
 namespace {
@@ -18,6 +19,9 @@ std::uint32_t load32(const std::uint8_t* data) {
 } // namespace
 
 void Vif1::reset() {
+  direct_remaining_ = 0;
+  direct_packet_.clear();
+  gif_packets_.clear();
   captured_packet_.clear();
   capture_overflow_ = false;
   vu1_.reset();
@@ -52,11 +56,33 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
     first_unsupported_offset_ = cursor - 4u;
     first_unsupported_size_ = size;
   };
-  while (cursor + 4u <= size) {
+  while (cursor < size) {
+    if (direct_remaining_ != 0u) {
+      const auto count = std::min(direct_remaining_, size - cursor);
+      direct_packet_.insert(direct_packet_.end(), data + cursor, data + cursor + count);
+      direct_remaining_ -= count;
+      cursor += count;
+      if (direct_remaining_ == 0u) {
+        gif_packets_.push_back(std::move(direct_packet_));
+        direct_packet_.clear();
+      }
+      continue;
+    }
+    if (size - cursor < 4u) break;
     const auto code = load32(data + cursor);
     cursor += 4u;
     const auto command = static_cast<std::uint8_t>(code >> 24);
     const auto opcode = command & 0x7Fu;
+    if (opcode == 0x50u) { // DIRECT, immediate is QWC; zero means 65536.
+      // Preserve functional command order with previously emitted PATH1.
+      // GIF arbitration/backpressure and DIRECTHL priority remain unmodeled.
+      std::vector<std::uint8_t> packet;
+      while (vu1_.pop_path1_packet(packet)) gif_packets_.push_back(std::move(packet));
+      const auto qwc = code & 0xFFFFu;
+      direct_remaining_ = static_cast<std::size_t>(qwc ? qwc : 65536u) * 16u;
+      direct_packet_.clear();
+      continue;
+    }
     if (command == 0x00u) continue; // NOP
     if (opcode == 0x01u) { // STCYCL
       cycle_ = static_cast<std::uint16_t>(code);
@@ -168,6 +194,13 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
     return false;
   }
   if (cursor != size) { ++packets_rejected_; return false; }
+  return true;
+}
+
+bool Vif1::pop_gif_packet(std::vector<std::uint8_t>& packet) {
+  if (gif_packets_.empty()) return vu1_.pop_path1_packet(packet);
+  packet = std::move(gif_packets_.front());
+  gif_packets_.pop_front();
   return true;
 }
 

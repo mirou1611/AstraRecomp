@@ -112,6 +112,73 @@ void test_vif_unsupported_location() {
         "VIF truncation does not fabricate unsupported-command provenance");
 }
 
+void test_vif_direct() {
+  // Two captured-size DIRECT commands: RGBAQ followed by XYZ2 point.
+  std::array<std::uint32_t, 20> stream{};
+  stream[1] = 0x50000002u;
+  stream[11] = 0x50000002u;
+  const std::array<std::uint64_t, 4> color{{0x1000000000008001ull, 0xEull,
+      0xFF123456u, 1u}};
+  const std::array<std::uint64_t, 4> point{{0x1000000000008001ull, 0xEull, 0u, 5u}};
+  std::memcpy(stream.data() + 2u, color.data(), sizeof(color));
+  std::memcpy(stream.data() + 12u, point.data(), sizeof(point));
+  const auto* bytes = reinterpret_cast<const std::uint8_t*>(stream.data());
+  for (std::size_t split : {8u, 9u, 23u, 39u, 40u, 80u}) {
+    ps2vita::Memory memory;
+    ps2vita::Vif1 vif(memory);
+    ps2vita::Gs gs;
+    ps2vita::Gif gif(gs);
+    check(vif.submit(bytes, split), "DIRECT accepts partial payload without rejecting it");
+    std::vector<std::uint8_t> packet;
+    if (split < 40u)
+      check(!vif.pop_gif_packet(packet) && vif.pending_direct_bytes() == 40u - split,
+            "Incomplete DIRECT is retained and not forwarded prematurely");
+    check(vif.submit(bytes + split, sizeof(stream) - split), "DIRECT resumes across submissions");
+    unsigned count = 0;
+    while (vif.pop_gif_packet(packet)) {
+      ++count;
+      check(gif.submit(packet.data(), packet.size()), "DIRECT payload accepted by GIF");
+    }
+    check(count == 2u && gif.points_emitted() == 1u && gs.pixels()[0] == 0xFF123456u &&
+          vif.pending_direct_bytes() == 0u,
+          "DIRECT preserves command order and changes rendered pixel through GIF");
+    const std::uint32_t zero = 0x50000000u;
+    vif.submit(reinterpret_cast<const std::uint8_t*>(&zero), sizeof(zero));
+    check(vif.pending_direct_bytes() == 1048576u, "DIRECT zero immediate means 65536 qwords");
+    vif.reset();
+    check(vif.pending_direct_bytes() == 0u && !vif.pop_gif_packet(packet),
+          "VIF reset discards pending DIRECT and queued output");
+  }
+  ps2vita::Memory ordered_memory;
+  ps2vita::Vif1 ordered_vif(ordered_memory);
+  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800016FCu);
+  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  for (unsigned i = 0; i < color.size(); ++i)
+    ordered_memory.write64(ps2vita::Memory::kVu1DataBase + 64u + i * 8u, color[i]);
+  ordered_vif.vu1().state().vi[2] = 4u;
+  ordered_vif.vu1().start(0u);
+  ordered_vif.vu1().run(1u);
+  check(ordered_vif.submit(bytes + 44u, 36u), "DIRECT accepts payload after earlier PATH1");
+  ps2vita::Gs ordered_gs;
+  ps2vita::Gif ordered_gif(ordered_gs);
+  std::vector<std::uint8_t> ordered_packet;
+  while (ordered_vif.pop_gif_packet(ordered_packet))
+    ordered_gif.submit(ordered_packet.data(), ordered_packet.size());
+  check(ordered_gif.points_emitted() == 1u && ordered_gs.pixels()[0] == 0xFF123456u,
+        "Earlier PATH1 color reaches GIF before later DIRECT vertex");
+  ps2vita::Emulator emulator;
+  emulator.memory().write64(0x2000u, 0x70000005u);
+  for (unsigned i = 0; i < stream.size(); ++i)
+    emulator.memory().write32(0x2010u + i * 4u, stream[i]);
+  emulator.memory().write32(0x10009030u, 0x2000u);
+  emulator.memory().write32(0x10009000u, 0x105u);
+  emulator.memory().advance(1u);
+  emulator.memory().advance(40u);
+  emulator.service_graphics();
+  check(emulator.gif().points_emitted() == 1u && emulator.gs().pixels()[0] == 0xFF123456u,
+        "Emulator routes VIF DMA DIRECT commands to GIF and GS");
+}
+
 void test_gif_shading_modes() {
   for (unsigned primitive : {1u, 2u, 3u, 4u, 5u}) {
     for (bool gouraud : {false, true}) {
@@ -3311,6 +3378,7 @@ int main() {
   test_triangle_trace();
   test_vif_packet_capture();
   test_vif_unsupported_location();
+  test_vif_direct();
   test_gif_shading_modes();
   test_gif_primitive_scissor();
   test_degenerate_triangle();
