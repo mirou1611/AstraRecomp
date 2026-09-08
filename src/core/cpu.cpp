@@ -658,6 +658,21 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
           state_.vu0_vi[destination] =
               (state_.vu0_vi[destination] & 0xFFFF0000u) | result;
         }
+      } else if ((fn >= 0x08u && fn <= 0x0Bu) ||
+                 (fn >= 0x3Cu && ((special2 >= 0x08u && special2 <= 0x0Bu) ||
+                                      (special2 >= 0x18u && special2 <= 0x1Bu)))) {
+        // VMADDbc / VMADDAbc / VMULAbc, functional accumulator arithmetic.
+        const bool to_acc = fn >= 0x3Cu;
+        const bool multiply_only = to_acc && special2 >= 0x18u;
+        const auto scalar = as_float(vu_lane(state_, rt, ins & 3u));
+        for (unsigned lane = 0; lane < 4u; ++lane) {
+          if ((ins & (1u << (24u - lane))) == 0u) continue;
+          const float product = as_float(vu_lane(state_, rd, lane)) * scalar;
+          const auto result = as_bits(multiply_only ? product :
+              as_float(state_.vu0_acc[lane]) + product);
+          if (to_acc) state_.vu0_acc[lane] = result;
+          else if (sa != 0u) set_vu_lane(state_, sa, lane, result);
+        }
       } else if ((fn >= 0x3Cu && special2 == 0x2Eu) || fn == 0x2Eu) {
         // VOPMULA / VOPMSUB: XYZ outer-product terms, W unchanged.
         // Snapshot all results before writes because FD may alias FS or FT.
@@ -776,6 +791,12 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
             memory_.write32(Memory::kVu0DataBase + qword * 16u + lane * 4u,
                             value);
           }
+        }
+      } else if (fn >= 0x3Cu && special2 == 0x30u) { // VMOVE
+        if (rt != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane)
+            if (ins & (1u << (24u - lane)))
+              set_vu_lane(state_, rt, lane, vu_lane(state_, rd, lane));
         }
       } else if (fn >= 0x3Cu && special2 == 0x31u) { // VMR32
         const unsigned destination = rt;

@@ -1714,6 +1714,96 @@ void test_vu0_outer_product() {
         "FBRST VU0 reset clears accumulator state");
 }
 
+void test_vu0_move() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  for (unsigned destination : {5u, 4u, 0u}) {
+    for (unsigned mask : {0u, 5u, 15u}) {
+      cpu.reset(0x1000u);
+      cpu.state().vu0_vf[4] = 0x2222222211111111ull;
+      cpu.state().vu0_vf_hi[4] = 0x4444444433333333ull;
+      memory.write32(0x1000u, 0x4A00233Cu | (mask << 21) | (destination << 16));
+      const auto old_low = cpu.state().vu0_vf[destination];
+      const auto old_high = cpu.state().vu0_vf_hi[destination];
+      check(cpu.run(1) == ps2vita::StopReason::StepLimit, "VMOVE executes");
+      for (unsigned lane = 0; lane < 4u; ++lane) {
+        const auto actual_half = lane < 2u ? cpu.state().vu0_vf[destination] :
+            cpu.state().vu0_vf_hi[destination];
+        const auto prior_half = lane < 2u ? old_low : old_high;
+        const auto expected = destination != 0u && (mask & (8u >> lane)) ?
+            0x11111111u * (lane + 1u) :
+            static_cast<std::uint32_t>(prior_half >> ((lane & 1u) * 32u));
+        check(static_cast<std::uint32_t>(actual_half >> ((lane & 1u) * 32u)) == expected,
+              "VMOVE preserves bits, masked lanes, self aliases and VF0");
+      }
+    }
+  }
+}
+
+void test_vu0_matrix_accumulator() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  // Captured four-column transform at 0x27396C..0x273978.
+  constexpr std::array<std::uint32_t, 4> code{{
+      0x4BE821BCu, 0x4BE828BDu, 0x4BE830BEu, 0x4BE83A4Bu}};
+  const auto bits = [](float value) {
+    std::uint32_t result;
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
+  };
+  for (unsigned destination : {9u, 8u, 7u, 0u}) {
+    cpu.reset(0x1000u);
+    for (unsigned reg = 4; reg <= 8u; ++reg) {
+      const float base = reg == 8u ? 1.0f : float((reg - 4u) * 4u + 1u);
+      cpu.state().vu0_vf[reg] = bits(base) | (std::uint64_t(bits(base + 1)) << 32);
+      cpu.state().vu0_vf_hi[reg] = bits(base + 2) | (std::uint64_t(bits(base + 3)) << 32);
+    }
+    for (unsigned i = 0; i < code.size(); ++i)
+      memory.write32(0x1000u + i * 4u, i == 3u ?
+          (code[i] & ~(31u << 6)) | (destination << 6) : code[i]);
+    check(cpu.run(4) == ps2vita::StopReason::StepLimit,
+          "Captured VU0 matrix accumulator sequence executes");
+    check(cpu.state().vu0_acc == std::array<std::uint32_t, 4>{{
+        bits(38), bits(44), bits(50), bits(56)}},
+        "VMULAx and VMADDAy/z accumulate the first three columns");
+    check(destination == 0u ? cpu.state().vu0_vf[0] == 0u &&
+        cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull :
+        cpu.state().vu0_vf[destination] == (bits(90) | (std::uint64_t(bits(100)) << 32)) &&
+        cpu.state().vu0_vf_hi[destination] == (bits(110) | (std::uint64_t(bits(120)) << 32)),
+        "VMADDw returns matrix product without changing ACC, including aliases/VF0");
+  }
+  for (unsigned mode = 0; mode < 3u; ++mode) {
+    for (unsigned bc = 0; bc < 4u; ++bc) {
+      for (unsigned mask : {0u, 5u, 15u}) {
+        cpu.reset(0x1000u);
+        cpu.state().vu0_vf[4] = bits(1) | (std::uint64_t(bits(2)) << 32);
+        cpu.state().vu0_vf_hi[4] = bits(3) | (std::uint64_t(bits(4)) << 32);
+        cpu.state().vu0_vf[5] = bits(2) | (std::uint64_t(bits(3)) << 32);
+        cpu.state().vu0_vf_hi[5] = bits(4) | (std::uint64_t(bits(5)) << 32);
+        for (unsigned lane = 0; lane < 4u; ++lane)
+          cpu.state().vu0_acc[lane] = bits(float(10u + lane));
+        const unsigned encoding = mode == 0u ? 0x1BCu : mode == 1u ? 0xBCu :
+            (5u << 6) | 8u;
+        memory.write32(0x1000u, 0x4A052000u | (mask << 21) | encoding | bc);
+        check(cpu.run(1) == ps2vita::StopReason::StepLimit,
+              "VU0 accumulator broadcast variant executes");
+        for (unsigned lane = 0; lane < 4u; ++lane) {
+          const float product = float(lane + 1u) * float(bc + 2u);
+          const bool enabled = (mask & (8u >> lane)) != 0;
+          const auto expected_acc = bits(enabled && mode != 2u ?
+              product + (mode == 0u ? 0.0f : float(10u + lane)) : float(10u + lane));
+          const auto half = lane < 2u ? cpu.state().vu0_vf[5] : cpu.state().vu0_vf_hi[5];
+          const auto expected_vf = bits(enabled && mode == 2u ?
+              float(10u + lane) + product : float(lane + 2u));
+          check(cpu.state().vu0_acc[lane] == expected_acc &&
+                static_cast<std::uint32_t>(half >> ((lane & 1u) * 32u)) == expected_vf,
+                "Accumulator variants honor all broadcasts/masks and FT aliasing");
+        }
+      }
+    }
+  }
+}
+
 void test_vu0_cop2_transfers() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -3058,6 +3148,8 @@ int main() {
   test_vu0_broadcast_multiply();
   test_vu0_captured_normalization();
   test_vu0_outer_product();
+  test_vu0_move();
+  test_vu0_matrix_accumulator();
   test_quarter_scale_gs();
   test_gif_normal_dma_completion();
   test_vif1_source_chain_completion();
