@@ -711,14 +711,16 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
         }
       } else if (fn >= 0x3Cu && special2 == 0x2Fu) { // VNOP
       } else if (fn >= 0x3Cu && special2 == 0x3Bu) { // VWAITQ, functional Q ready.
-      } else if (fn <= 0x03u || fn == 0x20u) { // VADDx/y/z/w / VADDq
+      } else if (fn <= 0x07u || fn == 0x20u) { // VADD/VSUB broadcast / VADDq
+        const bool subtract = fn >= 0x04u && fn <= 0x07u;
         const auto scalar = as_float(fn == 0x20u ? state_.vu0_vi[22] :
             vu_lane(state_, rt, fn & 3u));
         if (sa != 0u) {
           for (unsigned lane = 0; lane < 4u; ++lane)
             if ((ins & (1u << (24u - lane))) != 0u)
               set_vu_lane(state_, sa, lane,
-                  as_bits(as_float(vu_lane(state_, rd, lane)) + scalar));
+                  as_bits(subtract ? as_float(vu_lane(state_, rd, lane)) - scalar :
+                      as_float(vu_lane(state_, rd, lane)) + scalar));
         }
       } else if ((fn >= 0x18u && fn <= 0x1Cu) || fn == 0x2Au) { // VMUL[x/y/z/w/q]
         // Capture the broadcast scalar before writing any destination lane;

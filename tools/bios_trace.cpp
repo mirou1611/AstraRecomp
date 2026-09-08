@@ -441,6 +441,8 @@ int main(int argc, char** argv) {
   bool ee_interrupt_was_pending = false;
   bool iop_interrupt_was_pending = false;
   bool vif_failure_reported = false;
+  std::array<std::uint64_t, 2> spu_keyon_writes{};
+  std::array<std::uint32_t, 2> spu_keyon_masks{};
   for (; steps < max_steps; ++steps) {
     if (sbus_probe_step != 0u && steps == sbus_probe_step) {
       std::fprintf(stderr,
@@ -728,6 +730,17 @@ int main(int argc, char** argv) {
         const unsigned source = (iop_instruction >> 16) & 31u;
         const auto offset = static_cast<std::int16_t>(iop_instruction);
         const auto address = (iop.gpr[base] + offset) & 0x1FFFFFFFu;
+        if (!iop_takes_interrupt && address >= 0x1F900000u && address < 0x1F900800u &&
+            (iop_opcode == 0x28u || iop_opcode == 0x29u || iop_opcode == 0x2Bu)) {
+          const auto reg = address & 0x3FFu;
+          if (reg >= 0x1A0u && reg <= 0x1A2u) {
+            const unsigned core = (address >> 10) & 1u;
+            const auto value = iop.gpr[source] & (iop_opcode == 0x28u ? 0xFFu :
+                iop_opcode == 0x29u ? 0xFFFFu : 0xFFFFFFFFu);
+            const auto mask = (value << ((reg - 0x1A0u) * 8u)) & 0xFFFFFFu;
+            if (mask != 0u) { ++spu_keyon_writes[core]; spu_keyon_masks[core] |= mask; }
+          }
+        }
         if (address < 0x2000u) {
           iop_low_store_trace[iop_low_store_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
@@ -1486,6 +1499,9 @@ int main(int argc, char** argv) {
                   static_cast<unsigned long long>(item.value_lo));
     }
   }
+  for (unsigned core = 0; core < 2u; ++core)
+    std::printf("spu2_core%u keyon_store_attempts=%llu requested_voice_mask=%06X\n", core,
+        static_cast<unsigned long long>(spu_keyon_writes[core]), spu_keyon_masks[core]);
   if (iop_spu_cursor != 0) {
     std::puts("recent IOP SPU2/DMA register accesses:");
     const auto spu_count = std::min(iop_spu_cursor, kTraceSize);

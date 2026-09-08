@@ -6,6 +6,7 @@
 #include "ps2vita/framebuffer_dump.hpp"
 #include "ps2vita/vif.hpp"
 #include "ps2vita/vu.hpp"
+#include "ps2vita/spu2_adpcm.hpp"
 
 #include <array>
 #include <cstdint>
@@ -40,6 +41,87 @@ void test_framebuffer_dump() {
   std::ostringstream failed;
   failed.setstate(std::ios::badbit);
   check(!ps2vita::write_framebuffer_ppm(failed, gs), "Framebuffer PPM reports failure");
+}
+
+void test_spu2_adpcm() {
+  std::array<std::uint8_t, 16> encoded{};
+  encoded[1] = 7u;
+  encoded[2] = 0x87u; // Low nibble first: +7, -8.
+  ps2vita::Spu2AdpcmHistory history;
+  ps2vita::Spu2AdpcmBlock output;
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) &&
+        output.samples[0] == 28672 && output.samples[1] == -32768 && output.flags == 7u,
+        "SPU2 ADPCM decodes low nibble first, signed values and loop flags");
+  constexpr std::int16_t first[] = {0, 938, 2203, 1961, 2375};
+  constexpr std::int16_t second[] = {0, 879, 3146, 2143, 3590};
+  for (unsigned predictor = 0; predictor < 5u; ++predictor) {
+    encoded.fill(0);
+    encoded[0] = static_cast<std::uint8_t>(predictor << 4);
+    history = {1000, -500};
+    check(ps2vita::decode_spu2_adpcm(encoded, history, output) &&
+          output.samples[0] == first[predictor] && output.samples[1] == second[predictor] &&
+          history.previous == output.samples[27] && history.previous2 == output.samples[26],
+          "SPU2 ADPCM predictor golden samples and retained history");
+  }
+  for (unsigned shift = 0; shift < 16u; ++shift) {
+    encoded.fill(0xFFu);
+    encoded[0] = static_cast<std::uint8_t>(shift);
+    history = {};
+    const auto expected = shift <= 12u ? -static_cast<int>(4096u >> shift) : -1;
+    check(ps2vita::decode_spu2_adpcm(encoded, history, output) && output.samples[0] == expected,
+          "SPU2 ADPCM negative sample shifts round down for every shift encoding");
+  }
+  encoded.fill(0x77u);
+  encoded[0] = 0x40u;
+  history = {32767, -32768};
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) && output.samples[0] == 32767,
+        "SPU2 ADPCM clips positive overflow");
+  encoded.fill(0x88u);
+  encoded[0] = 0x40u;
+  history = {-32768, 32767};
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) && output.samples[0] == -32768,
+        "SPU2 ADPCM clips negative overflow");
+  const auto old = output;
+  const auto old_history = history;
+  encoded[0] = 0xF0u;
+  check(!ps2vita::decode_spu2_adpcm(encoded, history, output) && output.samples == old.samples &&
+        output.flags == old.flags && history.previous == old_history.previous &&
+        history.previous2 == old_history.previous2,
+        "Unsupported SPU2 predictor fails without changing decoder state");
+  encoded.fill(0x11u);
+  encoded[0] = 8u;
+  history = {};
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) && history.previous == 16,
+        "SPU2 ADPCM first block seeds voice history");
+  encoded.fill(0u);
+  encoded[0] = 0x10u;
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) &&
+        output.samples[0] == 15 && output.samples[1] == 14,
+        "SPU2 ADPCM carries predictor history across consecutive blocks");
+}
+
+void test_vu0_broadcast_subtract() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[7] = 0x3F000000u; // X=0.5
+  memory.write32(0x1000u, 0x4A2701C4u); // Captured VSUBx.w vf7,vf0,vf7.
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_vf[7] == 0x3F000000u &&
+        cpu.state().vu0_vf_hi[7] == 0x3F00000000000000ull,
+        "Captured VSUBx preserves masked lanes and snapshots aliased scalar");
+  for (unsigned bc = 0; bc < 4u; ++bc) {
+    cpu.reset(0x1000u);
+    cpu.state().vu0_vf[4] = 0x4080000040800000ull;
+    cpu.state().vu0_vf_hi[4] = 0x4080000040800000ull;
+    cpu.state().vu0_vf[5] = 0x3F8000003F800000ull;
+    cpu.state().vu0_vf_hi[5] = 0x3F8000003F800000ull;
+    memory.write32(0x1000u, 0x4BE52144u | bc); // FD=FT
+    check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+          cpu.state().vu0_vf[5] == 0x4040000040400000ull &&
+          cpu.state().vu0_vf_hi[5] == 0x4040000040400000ull,
+          "VSUB broadcast variants preserve scalar under destination aliasing");
+  }
 }
 
 void test_triangle_trace() {
@@ -3435,6 +3517,8 @@ int main() {
   test_gif_xyzf_depth_and_adc();
   test_gif_depth_state();
   test_framebuffer_dump();
+  test_spu2_adpcm();
+  test_vu0_broadcast_subtract();
   test_triangle_trace();
   test_vif_packet_capture();
   test_vif_unsupported_location();

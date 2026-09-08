@@ -98,6 +98,7 @@ add_library(ps2core
   src/core/gs.cpp
   src/core/iop_cpu.cpp
   src/core/memory.cpp
+  src/core/spu2_adpcm.cpp
   src/core/vif.cpp
   src/core/vu.cpp
 )
