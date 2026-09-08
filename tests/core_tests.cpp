@@ -1741,6 +1741,14 @@ void test_vu0_outer_product() {
 void test_vu0_move() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
+  cpu.reset(0x1000u);
+  cpu.state().vu0_acc = {{1u, 2u, 3u, 4u}};
+  cpu.state().vu0_vi[16] = 0x123u;
+  memory.write32(0x1000u, 0x4A0002FFu);
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_acc == std::array<std::uint32_t, 4>{{1u, 2u, 3u, 4u}} &&
+        cpu.state().vu0_vi[16] == 0x123u && cpu.state().pc == 0x1004u,
+        "Captured VNOP advances PC without changing accumulator or flags");
   for (unsigned destination : {5u, 4u, 0u}) {
     for (unsigned mask : {0u, 5u, 15u}) {
       cpu.reset(0x1000u);

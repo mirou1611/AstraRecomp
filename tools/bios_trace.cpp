@@ -439,6 +439,7 @@ int main(int argc, char** argv) {
   ps2vita::EventCensus event_census;
   bool ee_interrupt_was_pending = false;
   bool iop_interrupt_was_pending = false;
+  bool vif_failure_reported = false;
   for (; steps < max_steps; ++steps) {
     if (sbus_probe_step != 0u && steps == sbus_probe_step) {
       std::fprintf(stderr,
@@ -647,6 +648,17 @@ int main(int argc, char** argv) {
     if (stop_pc != 0u && state.pc == stop_pc && ++hits >= stop_hit) break;
     reason = emulator.cpu().step();
     emulator.service_graphics();
+    if (!vif_failure_reported && emulator.vif1().first_unsupported_packet() != 0u) {
+      vif_failure_reported = true;
+      std::printf("first_vif_failure step=%llu next_ee_pc=%08X tadr=%08X madr=%08X\n",
+          static_cast<unsigned long long>(steps), emulator.cpu().state().pc,
+          emulator.memory().read32(0x10009030u), emulator.memory().read32(0x10009010u));
+      // These spans describe the latest completed DMA, not arbitrary queued
+      // submissions. Label them explicitly rather than asserting provenance.
+      for (const auto& span : emulator.memory().vif_dma_spans())
+        std::printf("first_vif_failure_latest_dma source=%08X offset=%zu bytes=%zu\n",
+            span.source, span.stream_offset, span.bytes);
+    }
     if (reason != ps2vita::StopReason::None) break;
     if ((steps % iop_divisor) == iop_divisor - 1u) {
       const auto& iop = emulator.iop().state();

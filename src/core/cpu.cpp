@@ -709,6 +709,7 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
                                 0x7F7FFFFFu;
           } else state_.vu0_vi[22] = as_bits(numerator / denominator);
         }
+      } else if (fn >= 0x3Cu && special2 == 0x2Fu) { // VNOP
       } else if (fn >= 0x3Cu && special2 == 0x3Bu) { // VWAITQ, functional Q ready.
       } else if (fn <= 0x03u || fn == 0x20u) { // VADDx/y/z/w / VADDq
         const auto scalar = as_float(fn == 0x20u ? state_.vu0_vi[22] :
