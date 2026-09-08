@@ -535,7 +535,16 @@ bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
                               std::uint32_t& final_madr,
                               std::uint32_t& total_qwc,
                               std::vector<VifDmaSpan>* spans) const {
-  auto tadr = read32(0x10009030u) & 0x0FFFFFF0u;
+  // DMA bit 31 selects scratchpad; it is not a CPU KSEG address bit.
+  // Keep encoded addresses for channel writeback and chain control flow.
+  auto tadr = read32(0x10009030u) & 0xFFFFFFF0u;
+  const auto dma_address = [](std::uint32_t address) {
+    return (address & 0x80000000u) != 0u ?
+        kScratchBase + (address & (kScratchSize - 1u)) : address & 0x1FFFFFFFu;
+  };
+  const auto dma_valid = [&](std::uint32_t address, std::size_t bytes) {
+    return (address & 0x80000000u) != 0u || valid(dma_address(address), bytes);
+  };
   const auto chcr = read32(0x10009000u);
   std::array<std::uint32_t, 2> return_stack{};
   unsigned return_depth = 0;
@@ -545,22 +554,33 @@ bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
   const auto append = [&](std::uint32_t source, std::size_t bytes) {
     if (packet == nullptr) return;
     const auto old_size = packet->size();
-    if (spans && bytes != 0u) spans->push_back({source, old_size, bytes});
+    if (spans) {
+      std::size_t offset = 0;
+      while (offset < bytes) {
+        const auto encoded = source + static_cast<std::uint32_t>(offset);
+        const auto address = dma_address(encoded);
+        const auto chunk = (encoded & 0x80000000u) != 0u ?
+            std::min(bytes - offset, static_cast<std::size_t>(kScratchSize -
+                (encoded & (kScratchSize - 1u)))) : bytes - offset;
+        spans->push_back({address, old_size + offset, chunk});
+        offset += chunk;
+      }
+    }
     packet->resize(old_size + bytes);
     for (std::size_t byte = 0; byte < bytes; ++byte)
-      (*packet)[old_size + byte] = read8(source + static_cast<std::uint32_t>(byte));
+      (*packet)[old_size + byte] = read8(dma_address(source + static_cast<std::uint32_t>(byte)));
   };
 
   for (unsigned tag_index = 0; tag_index < 256u; ++tag_index) {
-    if (!valid(tadr, 16u)) return false;
-    const auto tag = read64(tadr);
+    if (!dma_valid(tadr, 16u)) return false;
+    const auto tag = read64(dma_address(tadr));
     const auto qwc = static_cast<std::uint32_t>(tag & 0xFFFFu);
     const auto id = static_cast<unsigned>((tag >> 28) & 7u);
-    const auto address = static_cast<std::uint32_t>(tag >> 32) & 0x7FFFFFF0u;
+    const auto address = static_cast<std::uint32_t>(tag >> 32) & 0xFFFFFFF0u;
     const bool inline_data = id == 1u || id == 2u || id >= 5u;
     const auto source = inline_data ? tadr + 16u : address;
     const auto bytes = static_cast<std::size_t>(qwc) * 16u;
-    if (!valid(source, bytes) || total_qwc > UINT32_MAX - qwc) return false;
+    if (!dma_valid(source, bytes) || total_qwc > UINT32_MAX - qwc) return false;
     if ((chcr & 0x40u) != 0u) append(tadr + 8u, 8u); // TTE tag payload.
     append(source, bytes);
     total_qwc += qwc;

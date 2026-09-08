@@ -2231,6 +2231,57 @@ void test_vu1_xgkick_packet() {
         "VU reset clears rejection provenance");
 }
 
+void test_vif1_scratchpad_dma() {
+  for (unsigned mode = 0; mode < 3u; ++mode) {
+    ps2vita::Memory memory;
+    const auto scratch = ps2vita::Memory::kScratchBase;
+    const auto tag = mode == 0u ? scratch + 0x100u :
+        mode == 2u ? scratch + 0x3FF0u : 0x2000u;
+    const auto payload = mode == 0u ? scratch + 0x110u : scratch;
+    memory.write64(tag, mode == 1u ? (0x80000000ull << 32) | 1u : 0x70000001u);
+    memory.write64(payload, 0x1122334455667788ull);
+    memory.write64(payload + 8u, 0x99AABBCCDDEEFF00ull);
+    memory.write32(0x10009030u, mode == 0u ? 0x80000100u :
+        mode == 2u ? 0x80003FF0u : 0x2000u);
+    memory.write32(0x10009000u, 0x105u);
+    memory.advance(1u);
+    memory.advance(8u);
+    std::vector<std::uint8_t> packet;
+    std::uint64_t first = 0;
+    std::uint64_t second = 0;
+    if (memory.pop_vif1_packet(packet) && packet.size() == 16u) {
+      std::memcpy(&first, packet.data(), sizeof(first));
+      std::memcpy(&second, packet.data() + 8u, sizeof(second));
+    }
+    check(first == 0x1122334455667788ull && second == 0x99AABBCCDDEEFF00ull,
+          "VIF DMA SPR selects scratchpad for tags, references and wrapped inline data");
+    check(!memory.vif_dma_spans().empty() && memory.vif_dma_spans()[0].source == payload,
+          "VIF scratchpad source spans report CPU-visible scratchpad addresses");
+    check((memory.read32(0x10009010u) & 0x80000000u) != 0u &&
+          (memory.read32(0x10009000u) & 0x100u) == 0u,
+          "VIF scratchpad completion preserves MADR SPR bit and clears STR");
+  }
+  ps2vita::Memory memory;
+  const auto scratch = ps2vita::Memory::kScratchBase;
+  memory.write64(0x2000u, (0x80003FF0ull << 32) | 0x20000000u); // NEXT to SPR.
+  memory.write64(scratch + 0x3FF0u, 0x70000001u); // END, wrapped inline qword.
+  memory.write64(0x2008u, 0x1111111111111111ull);
+  memory.write64(scratch + 0x3FF8u, 0x2222222222222222ull);
+  memory.write64(scratch, 0x3333333333333333ull);
+  memory.write64(scratch + 8u, 0x4444444444444444ull);
+  memory.write32(0x10009030u, 0x2000u);
+  memory.write32(0x10009000u, 0x145u); // TTE.
+  memory.advance(1u);
+  memory.advance(8u);
+  std::vector<std::uint8_t> packet;
+  std::array<std::uint64_t, 4> actual{};
+  if (memory.pop_vif1_packet(packet) && packet.size() == sizeof(actual))
+    std::memcpy(actual.data(), packet.data(), sizeof(actual));
+  check(actual == std::array<std::uint64_t, 4>{{0x1111111111111111ull,
+        0x2222222222222222ull, 0x3333333333333333ull, 0x4444444444444444ull}},
+        "VIF NEXT preserves SPR target and interleaves RAM/scratchpad TTE data");
+}
+
 void test_vu1_end_and_resume() {
   ps2vita::Memory memory;
   for (unsigned pair = 0; pair < 3u; ++pair) {
@@ -3227,6 +3278,7 @@ int main() {
   test_gif_normal_dma_completion();
   test_vif1_source_chain_completion();
   test_vif1_mpg_upload();
+  test_vif1_scratchpad_dma();
   test_vif1_v4_32_unpack();
   test_vu1_captured_prologue();
   test_vu1_captured_matrix_pair();
