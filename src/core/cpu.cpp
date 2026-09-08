@@ -625,6 +625,7 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
           state_.vu0_vf = {};
           state_.vu0_vf_hi = {};
           state_.vu0_vi = {};
+          state_.vu0_acc = {};
           state_.vu0_vf_hi[0] = 0x3F80000000000000ull;
         }
       } else if (rd == kCmsar1) {
@@ -656,6 +657,24 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
         if (destination != 0) {
           state_.vu0_vi[destination] =
               (state_.vu0_vi[destination] & 0xFFFF0000u) | result;
+        }
+      } else if ((fn >= 0x3Cu && special2 == 0x2Eu) || fn == 0x2Eu) {
+        // VOPMULA / VOPMSUB: XYZ outer-product terms, W unchanged.
+        // Snapshot all results before writes because FD may alias FS or FT.
+        // Functional arithmetic only; MAC flags and pipeline timing remain TODO.
+        const bool accumulate = fn >= 0x3Cu;
+        std::array<std::uint32_t, 3> result{};
+        for (unsigned lane = 0; lane < 3u; ++lane) {
+          const unsigned left = (lane + 1u) % 3u;
+          const unsigned right = (lane + 2u) % 3u;
+          const float product = as_float(vu_lane(state_, rd, left)) *
+                                as_float(vu_lane(state_, rt, right));
+          result[lane] = as_bits(accumulate ? product :
+              as_float(state_.vu0_acc[lane]) - product);
+        }
+        for (unsigned lane = 0; lane < 3u; ++lane) {
+          if (accumulate) state_.vu0_acc[lane] = result[lane];
+          else if (sa != 0u) set_vu_lane(state_, sa, lane, result[lane]);
         }
       } else if (fn >= 0x3Cu && (special2 == 0x38u || special2 == 0x39u)) {
         // Functional VDIV / VSQRT. Q is immediately visible in this subset;

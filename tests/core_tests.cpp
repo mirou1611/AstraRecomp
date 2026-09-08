@@ -1668,6 +1668,52 @@ void test_vu0_captured_normalization() {
         "VDIV by negative zero saturates with the correct sign");
 }
 
+void test_vu0_outer_product() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  for (unsigned destination : {6u, 4u, 5u, 0u}) {
+    cpu.reset(0x1000u);
+    cpu.state().vu0_vf[4] = 0x400000003F800000ull; // 1,2,3
+    cpu.state().vu0_vf_hi[4] = 0x42C6000040400000ull;
+    cpu.state().vu0_vf[5] = 0x40A0000040800000ull; // 4,5,6
+    cpu.state().vu0_vf_hi[5] = 0x42C6000040C00000ull;
+    cpu.state().vu0_vf_hi[6] = 0x42C6000000000000ull;
+    cpu.state().vu0_acc[3] = 0x12345678u;
+    memory.write32(0x1000u, 0x4BC522FEu); // captured VOPMULA
+    // Captured VOPMSUB reverses FS/FT to subtract the other cyclic terms.
+    memory.write32(0x1004u, 0x4BC4282Eu | (destination << 6));
+    check(cpu.run(2) == ps2vita::StopReason::StepLimit,
+          "VU0 outer product pair executes");
+    check(cpu.state().vu0_acc == std::array<std::uint32_t, 4>{{
+              0x41400000u, 0x41400000u, 0x40A00000u, 0x12345678u}},
+          "VOPMULA writes cyclic XYZ products and preserves ACC W");
+    check(destination == 0u ?
+          cpu.state().vu0_vf[0] == 0u &&
+              cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull :
+          cpu.state().vu0_vf[destination] == 0x40C00000C0400000ull &&
+              cpu.state().vu0_vf_hi[destination] == 0x42C60000C0400000ull,
+          "VOPMSUB produces cross product with aliases and preserves W/VF0");
+  }
+  cpu.reset(0x1000u);
+  check(cpu.state().vu0_acc == std::array<std::uint32_t, 4>{},
+        "CPU reset clears VU0 accumulator");
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x40400000u;
+  cpu.state().vu0_vf[5] = 0x40A0000040800000ull;
+  cpu.state().vu0_vf_hi[5] = 0x40C00000u;
+  memory.write32(0x1000u, 0x4BC522FEu);
+  memory.write32(0x1004u, 0x4BC521AEu); // Same FS/FT, hence zero XYZ.
+  check(cpu.run(2) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_vf[6] == 0u && cpu.state().vu0_vf_hi[6] == 0u,
+        "VOPMSUB uses the same cyclic product order as VOPMULA");
+  cpu.state().vu0_acc[3] = 0x12345678u;
+  cpu.state().gpr[8] = 2u; // FBRST VU0 reset.
+  memory.write32(0x1008u, (0x12u << 26) | (6u << 21) | (8u << 16) | (28u << 11));
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_acc == std::array<std::uint32_t, 4>{},
+        "FBRST VU0 reset clears accumulator state");
+}
+
 void test_vu0_cop2_transfers() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -3011,6 +3057,7 @@ int main() {
   test_vu0_cop2_transfers();
   test_vu0_broadcast_multiply();
   test_vu0_captured_normalization();
+  test_vu0_outer_product();
   test_quarter_scale_gs();
   test_gif_normal_dma_completion();
   test_vif1_source_chain_completion();

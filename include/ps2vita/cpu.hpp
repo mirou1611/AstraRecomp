@@ -32,6 +32,7 @@ struct CpuState {
   std::array<std::uint64_t, 32> vu0_vf{};
   std::array<std::uint64_t, 32> vu0_vf_hi{};
   std::array<std::uint32_t, 32> vu0_vi{};
+  std::array<std::uint32_t, 4> vu0_acc{};
   std::uint64_t hi = 0;
   std::uint64_t lo = 0;
   std::uint64_t hi1 = 0;
