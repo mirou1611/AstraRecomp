@@ -115,6 +115,13 @@ void Gs::triangle(GsVertex a, GsVertex b, GsVertex c) {
   // A collapsed triangle has no coverage; it is not a line primitive.
   if (area == 0) return;
   if (area < 0) { std::swap(b, c); area = -area; }
+  // With positive edge() area and screen Y increasing downwards, include
+  // left/downward and top/leftward edges; exclude their opposite partners.
+  const auto inclusive = [](const GsVertex& from, const GsVertex& to) {
+    return to.y > from.y || (to.y == from.y && to.x < from.x);
+  };
+  const bool include_a = inclusive(b, c), include_b = inclusive(c, a),
+             include_c = inclusive(a, b);
   const int min_x = std::max(0, std::min({a.x, b.x, c.x}));
   const int max_x = std::min(kWidth - 1, std::max({a.x, b.x, c.x}));
   const int min_y = std::max(0, std::min({a.y, b.y, c.y}));
@@ -125,6 +132,8 @@ void Gs::triangle(GsVertex a, GsVertex b, GsVertex c) {
       const auto wb = edge(c, a, x, y);
       const auto wc = edge(a, b, x, y);
       if (wa < 0 || wb < 0 || wc < 0) continue;
+      if ((wa == 0 && !include_a) || (wb == 0 && !include_b) ||
+          (wc == 0 && !include_c)) continue;
       const auto z = static_cast<std::uint32_t>((
           static_cast<std::uint64_t>(a.z) * wa +
           static_cast<std::uint64_t>(b.z) * wb +

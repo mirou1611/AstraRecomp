@@ -25,6 +25,29 @@ void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
 }
 
+void test_gs_shared_edges() {
+  for (bool reverse : {false, true}) {
+    for (bool other_diagonal : {false, true}) {
+      ps2vita::Gs gs;
+      gs.set_depth_state(ps2vita::Gs::DepthTest::Always, false);
+      gs.set_blend_state(true, 0x44u, false, true);
+      const ps2vita::GsVertex a{2, 2, 0, 0x40808080u}, b{6, 2, 0, 0x40808080u},
+                              c{6, 6, 0, 0x40808080u}, d{2, 6, 0, 0x40808080u};
+      const auto draw = [&](auto x, auto y, auto z) {
+        if (reverse) gs.triangle(z, y, x); else gs.triangle(x, y, z);
+      };
+      if (other_diagonal) { draw(a, b, d); draw(b, c, d); }
+      else { draw(a, b, c); draw(a, c, d); }
+      bool correct = true;
+      for (int y = 0; y < 9; ++y)
+        for (int x = 0; x < 9; ++x)
+          correct = correct && gs.pixel(x, y) ==
+              (x >= 2 && x < 6 && y >= 2 && y < 6 ? 0x40404040u : 0u);
+      check(correct, "GS shared edges cover rectangle exactly once for either winding/diagonal");
+    }
+  }
+}
+
 void test_spu2_fixed_volume() {
   std::int32_t output = 123;
   check(ps2vita::spu2_fixed_volume(32767, 0, output) && output == 0, "SPU2 zero voice volume mutes");
@@ -755,7 +778,9 @@ void test_captured_bios_triangles() {
   for (int y = 0; y < ps2vita::Gs::kHeight; ++y)
     for (int x = 0; x < ps2vita::Gs::kWidth; ++x)
       visible += (gs.pixel(x, y) & 0xFFFFFFu) != 0u;
-  check(visible == 122u, "Captured nondegenerate triangles explain 122 RGB pixels");
+  // Independently counted with scanlines y in [minY,maxY), x in
+  // [ceil(left intersection),ceil(right intersection)): 106 covered pixels.
+  check(visible == 106u, "Captured triangles have 106 pixels with half-open edge coverage");
 }
 
 constexpr std::uint32_t i_type(unsigned op, unsigned rs, unsigned rt, std::uint16_t imm) {
@@ -3813,6 +3838,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_gs_shared_edges();
   test_spu2_fixed_volume();
   test_spu2_shadow_scheduling();
   test_spu2_shadow_bank();
