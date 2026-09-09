@@ -23,6 +23,36 @@ void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
 }
 
+void test_gs_alpha_test() {
+  ps2vita::Gs gs;
+  for (unsigned mode = 0; mode < 8; ++mode) {
+    for (unsigned alpha : {0u, 63u, 64u, 65u, 255u}) {
+      const bool expected[] = {false, true, alpha < 64u, alpha <= 64u,
+                              alpha == 64u, alpha >= 64u, alpha > 64u, alpha != 64u};
+      gs.clear(0x12345678u);
+      gs.set_alpha_test(1u | (mode << 1) | (64u << 4));
+      gs.point({0, 0, 10, (alpha << 24) | 0xABCDEFu});
+      check(gs.pixel(0, 0) == (expected[mode] ? (alpha << 24) | 0xABCDEFu : 0x12345678u),
+            "GS alpha comparison matrix with KEEP");
+    }
+  }
+  for (unsigned action = 0; action < 4; ++action) {
+    gs.clear(0x12345678u, 100u);
+    gs.set_alpha_test(1u | (action << 12)); // NEVER, selected failure action.
+    gs.point({0, 0, 10u, 0x80ABCDEFu});
+    const std::uint32_t expected[] = {0x12345678u, 0x80ABCDEFu, 0x12345678u, 0x12ABCDEFu};
+    check(gs.pixel(0, 0) == expected[action], "GS alpha failure color/alpha write masks");
+    gs.set_alpha_test(0);
+    gs.point({0, 0, 50u, 0xFF010203u});
+    check(gs.pixel(0, 0) == (action == 2u ? expected[action] : 0xFF010203u),
+          "GS alpha failure depth write mask");
+  }
+  gs.clear(0x12345678u, 5u);
+  gs.set_alpha_test(1u | (1u << 12));
+  gs.point({0, 0, 10u, 0x80ABCDEFu});
+  check(gs.pixel(0, 0) == 0x12345678u, "GS FB_ONLY still respects depth rejection");
+}
+
 void test_gs_blending() {
   ps2vita::Gs gs;
   const auto draw = [&](std::uint32_t src, std::uint32_t dst,
@@ -78,6 +108,12 @@ void test_gif_blend_registers() {
   check(gs.pixel(0, 0) == 0x40101010u, "GIF routes disabled COLCLAMP");
   reg(0x49, 1); gs.clear(0x00202020u); reg(0x05, 0);
   check(gs.pixel(0, 0) == 0x40F0F0F0u, "GIF routes PABE");
+  reg(0x47, 1); // Context 1 NEVER / KEEP.
+  reg(0x48, 3); // Context 2 ALWAYS.
+  gs.clear(0x00202020u); reg(0x00, 0); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x00202020u, "GIF routes alpha test context 1");
+  reg(0x00, 0x200); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40F0F0F0u, "GIF routes alpha test context 2");
 }
 
 void test_framebuffer_dump() {
@@ -3530,6 +3566,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_gs_alpha_test();
   test_gs_blending();
   test_gif_blend_registers();
   test_execution_census_blocks_and_edges();

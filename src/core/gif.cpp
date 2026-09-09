@@ -295,6 +295,7 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   const auto primitive = static_cast<unsigned>(prim_ & 7u);
   const auto context = static_cast<unsigned>((prim_ >> 9) & 1u);
   gs_.set_blend_state((prim_ & (1u << 6)) != 0u, alpha_[context], pabe_, colclamp_);
+  gs_.set_alpha_test(test_[context]);
   const auto clip = scissor_[context];
   gs_.set_scissor(static_cast<int>((clip & 0x7FFu) / 4u),
                   static_cast<int>(((clip >> 32) & 0x7FFu) / 4u),

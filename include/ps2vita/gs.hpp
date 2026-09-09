@@ -31,6 +31,7 @@ public:
     blend_enabled_ = enabled; blend_equation_ = equation;
     blend_pabe_ = pabe; color_clamp_ = clamp;
   }
+  void set_alpha_test(std::uint64_t test) { alpha_test_ = test; }
   void clear(std::uint32_t color, std::uint32_t depth = 0xFFFFFFFFu);
   void point(const GsVertex& vertex);
   void line(GsVertex a, GsVertex b);
@@ -47,6 +48,7 @@ private:
   bool depth_write_ = true;
   bool blend_enabled_ = false, blend_pabe_ = false, color_clamp_ = true;
   std::uint64_t blend_equation_ = 0;
+  std::uint64_t alpha_test_ = 0;
   int scissor_left_ = 0, scissor_top_ = 0;
   int scissor_right_ = kWidth - 1, scissor_bottom_ = kHeight - 1;
 };

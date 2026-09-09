@@ -36,12 +36,29 @@ void Gs::write(int x, int y, std::uint32_t z, std::uint32_t color) {
   if (x < scissor_left_ || x > scissor_right_ ||
       y < scissor_top_ || y > scissor_bottom_) return;
   const auto index = static_cast<std::size_t>(y * kWidth + x);
+  bool write_color = true, write_depth = depth_write_, preserve_alpha = false;
+  if ((alpha_test_ & 1u) != 0u) {
+    const unsigned alpha = color >> 24;
+    const unsigned reference = (alpha_test_ >> 4) & 0xFFu;
+    const bool results[] = {false, true, alpha < reference, alpha <= reference,
+                            alpha == reference, alpha >= reference,
+                            alpha > reference, alpha != reference};
+    if (!results[(alpha_test_ >> 1) & 7u]) {
+      switch ((alpha_test_ >> 12) & 3u) {
+      case 0: return; // KEEP: neither buffer is updated.
+      case 1: write_depth = false; break; // FB_ONLY
+      case 2: write_color = false; break; // ZB_ONLY
+      case 3: write_depth = false; preserve_alpha = true; break; // RGB_ONLY
+      }
+    }
+  }
   const bool pass = depth_test_ == DepthTest::Always ||
       (depth_test_ == DepthTest::GreaterEqual && z >= depth_[index]) ||
       (depth_test_ == DepthTest::Greater && z > depth_[index]) ||
       (depth_test_ == DepthTest::LessEqual && z <= depth_[index]);
   if (pass) {
-    if (depth_write_) depth_[index] = z;
+    if (write_depth) depth_[index] = z;
+    if (!write_color) return;
     if (blend_enabled_ && (!blend_pabe_ || (color & 0x80000000u) != 0u)) {
       const auto destination = color_[index];
       const auto source = color;
@@ -66,6 +83,7 @@ void Gs::write(int x, int y, std::uint32_t z, std::uint32_t color) {
         }
       }
     }
+    if (preserve_alpha) color = (color & 0x00FFFFFFu) | (color_[index] & 0xFF000000u);
     color_[index] = color;
   }
 }
