@@ -124,6 +124,50 @@ void test_vu0_broadcast_subtract() {
   }
 }
 
+void test_vu0_broadcast_minmax() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  struct Pair { std::uint32_t left, right, low, high; };
+  const std::array<Pair, 5> pairs{{
+      {0xBF800000u, 0xC0000000u, 0xC0000000u, 0xBF800000u},
+      {0x80000000u, 0u, 0x80000000u, 0u},
+      {1u, 0u, 0u, 1u},
+      {0x7FFFFFFFu, 0x7F800000u, 0x7F800000u, 0x7FFFFFFFu},
+      {0xFFFFFFFFu, 0xFF800000u, 0xFFFFFFFFu, 0xFF800000u}}};
+  for (unsigned fn = 0x10u; fn <= 0x17u; ++fn) {
+    for (const auto& p : pairs) {
+      cpu.reset(0x1000u);
+      cpu.state().vu0_vf[6] = p.left | (std::uint64_t(p.left) << 32);
+      cpu.state().vu0_vf_hi[6] = cpu.state().vu0_vf[6];
+      cpu.state().vu0_vf[4] = p.right | (std::uint64_t(p.right) << 32);
+      cpu.state().vu0_vf_hi[4] = cpu.state().vu0_vf[4];
+      memory.write32(0x1000u, 0x4BE43100u | fn); // FD=FT tests broadcast snapshot.
+      const auto expected = fn < 0x14u ? p.high : p.low;
+      check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+            cpu.state().vu0_vf[4] == (expected | (std::uint64_t(expected) << 32)) &&
+            cpu.state().vu0_vf_hi[4] == cpu.state().vu0_vf[4],
+            "VU min/max broadcasts preserve bit ordering and aliased scalar");
+    }
+  }
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[6] = 0xC0000000BF800000ull;
+  memory.write32(0x1000u, 0x4BE43190u); // Captured VMAXx vf6,vf6,vf4 (VF4=0).
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit && cpu.state().vu0_vf[6] == 0u,
+        "Captured VMAXx clamps negative values to zero");
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[6] = 0xBF800000BF800000ull;
+  cpu.state().vu0_vf_hi[6] = 0xBF800000BF800000ull;
+  cpu.state().vu0_vi[16] = 0x123u;
+  memory.write32(0x1000u, 0x4A243190u); // W-only VMAXx, FD=FS.
+  memory.write32(0x1004u, 0x4BE43010u); // VF0 destination.
+  check(cpu.run(2) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_vf[6] == 0xBF800000BF800000ull &&
+        cpu.state().vu0_vf_hi[6] == 0x00000000BF800000ull &&
+        cpu.state().vu0_vf[0] == 0u && cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull &&
+        cpu.state().vu0_vi[16] == 0x123u,
+        "VU min/max preserves masked lanes, VF0 and STATUS");
+}
+
 void test_triangle_trace() {
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
@@ -3519,6 +3563,7 @@ int main() {
   test_framebuffer_dump();
   test_spu2_adpcm();
   test_vu0_broadcast_subtract();
+  test_vu0_broadcast_minmax();
   test_triangle_trace();
   test_vif_packet_capture();
   test_vif_unsupported_location();

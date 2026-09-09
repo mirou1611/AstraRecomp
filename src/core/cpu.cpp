@@ -722,6 +722,19 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
                   as_bits(subtract ? as_float(vu_lane(state_, rd, lane)) - scalar :
                       as_float(vu_lane(state_, rd, lane)) + scalar));
         }
+      } else if (fn >= 0x10u && fn <= 0x17u) { // VMAX/VMINI broadcast
+        const auto scalar = vu_lane(state_, rt, fn & 3u);
+        const auto ordered = [](std::uint32_t bits) {
+          return (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+        };
+        if (sa != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane) {
+            if ((ins & (1u << (24u - lane))) == 0u) continue;
+            const auto value = vu_lane(state_, rd, lane);
+            const bool less = ordered(value) < ordered(scalar);
+            set_vu_lane(state_, sa, lane, (fn < 0x14u ? less : !less) ? scalar : value);
+          }
+        }
       } else if ((fn >= 0x18u && fn <= 0x1Cu) || fn == 0x2Au) { // VMUL[x/y/z/w/q]
         // Capture the broadcast scalar before writing any destination lane;
         // FD may alias FT. Timing/MAC/status follow the current functional

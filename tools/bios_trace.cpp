@@ -1,6 +1,7 @@
 #include "ps2vita/emulator.hpp"
 #include "ps2vita/execution_census.hpp"
 #include "ps2vita/framebuffer_dump.hpp"
+#include "ps2vita/spu2_adpcm.hpp"
 
 #include <algorithm>
 #include <array>
@@ -738,7 +739,34 @@ int main(int argc, char** argv) {
             const auto value = iop.gpr[source] & (iop_opcode == 0x28u ? 0xFFu :
                 iop_opcode == 0x29u ? 0xFFFFu : 0xFFFFFFFFu);
             const auto mask = (value << ((reg - 0x1A0u) * 8u)) & 0xFFFFFFu;
-            if (mask != 0u) { ++spu_keyon_writes[core]; spu_keyon_masks[core] |= mask; }
+            if (mask != 0u) {
+              ++spu_keyon_writes[core]; spu_keyon_masks[core] |= mask;
+              if (spu_keyon_writes[core] <= 4u) {
+                for (unsigned voice = 0; voice < 24u; ++voice) {
+                  if ((mask & (1u << voice)) == 0u) continue;
+                  const auto base_address = 0x1F900000u + core * 0x400u;
+                  const auto ssa_register = base_address + 0x1C0u + voice * 12u;
+                  const auto ssa = ((std::uint32_t(emulator.memory().iop_read16(ssa_register)) << 16) |
+                      emulator.memory().iop_read16(ssa_register + 2u)) & 0xFFFF8u;
+                  std::array<std::uint8_t, 16> encoded{};
+                  for (unsigned byte = 0; byte < encoded.size(); ++byte)
+                    encoded[byte] = emulator.memory().spu2_ram_read8(ssa * 2u + byte);
+                  ps2vita::Spu2AdpcmHistory history;
+                  ps2vita::Spu2AdpcmBlock decoded;
+                  const bool decoded_ok = ps2vita::decode_spu2_adpcm(encoded, history, decoded);
+                  int peak = 0;
+                  for (const auto sample : decoded.samples)
+                    peak = std::max(peak, sample < 0 ? -int(sample) : int(sample));
+                  std::printf("spu2_keyon_probe step=%llu iop_pc=%08X core=%u voice=%u ssa=%05X "
+                      "pitch=%04X adsr=%04X/%04X header=%02X flags=%02X decoded=%u raw_peak=%d\n",
+                      static_cast<unsigned long long>(steps), iop.pc, core, voice, ssa,
+                      emulator.memory().iop_read16(base_address + voice * 16u + 4u),
+                      emulator.memory().iop_read16(base_address + voice * 16u + 6u),
+                      emulator.memory().iop_read16(base_address + voice * 16u + 8u),
+                      encoded[0], encoded[1], unsigned(decoded_ok), peak);
+                }
+              }
+            }
           }
         }
         if (address < 0x2000u) {
