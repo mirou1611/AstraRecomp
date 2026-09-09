@@ -63,6 +63,7 @@ private:
 
   Memory& memory_;
   Vu1State state_{};
+  std::array<std::array<std::uint32_t, 4>, 32> lower_vf_snapshot_{};
   bool running_ = false;
   bool branch_pending_ = false;
   bool end_pending_ = false;

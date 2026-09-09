@@ -116,6 +116,7 @@ bool Vu1::step() {
   branch_pending_ = false;
   end_pending_ = (upper & 0x40000000u) != 0u;
 
+  lower_vf_snapshot_ = state_.vf;
   if (!execute_upper(upper)) {
     first_unsupported_upper_ = upper;
     running_ = false;
@@ -123,10 +124,22 @@ bool Vu1::step() {
   }
   // When I is set, the lower word is the immediate register payload.
   if ((upper & 0x80000000u) != 0u) state_.i = lower;
-  else if (!execute_lower(lower)) {
-    first_unsupported_lower_ = lower;
-    running_ = false;
-    return false;
+  else {
+    // The implemented upper writers use FD, except FTOI's FT. NOP and
+    // accumulator-only operations do not write VF. Resolve same-pair write
+    // conflicts by discarding the lower instruction, including its side effects.
+    const unsigned fn = upper & 63u, fd = (upper >> 6) & 31u;
+    unsigned upper_dest = fn < 0x3Cu ? fd : fd == 5u ? (upper >> 16) & 31u : 0u;
+    if ((upper & 0x1E00000u) == 0u) upper_dest = 0u;
+    const unsigned group = lower >> 25, lfn = lower & 63u, lfd = (lower >> 6) & 31u;
+    const bool lower_load = group == 0u || (group == 0x40u &&
+        ((lfn == 0x3Cu && lfd == 0x0Du) || (lfn == 0x3Du && lfd == 0x0Fu)));
+    const unsigned lower_dest = lower_load ? (lower >> 16) & 31u : 0u;
+    if ((upper_dest == 0u || upper_dest != lower_dest) && !execute_lower(lower)) {
+      first_unsupported_lower_ = lower;
+      running_ = false;
+      return false;
+    }
   }
 
   mac_pipeline_[mac_pipeline_slot_] = state_.mac;
@@ -151,7 +164,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
     for (unsigned lane = 0; lane < 4u; ++lane) {
       if ((code & (1u << (24u - lane))) == 0u) continue;
       const auto address = Memory::kVu1DataBase + qword * 16u + lane * 4u;
-      if (store) memory_.write32(address, state_.vf[vector_reg][lane]);
+      if (store) memory_.write32(address, lower_vf_snapshot_[vector_reg][lane]);
       else if (vector_reg != 0u) state_.vf[vector_reg][lane] = memory_.read32(address);
     }
     return true;
@@ -248,13 +261,13 @@ bool Vu1::execute_lower(std::uint32_t code) {
   if (function == 0x3Cu && fd == 0x0Eu) { // DIV
     const auto fs = static_cast<unsigned>((code >> 11) & 0x1Fu);
     const auto ft = static_cast<unsigned>((code >> 16) & 0x1Fu);
-    state_.q = as_bits(as_float(state_.vf[fs][(code >> 21) & 3u]) /
-                       as_float(state_.vf[ft][(code >> 23) & 3u]));
+    state_.q = as_bits(as_float(lower_vf_snapshot_[fs][(code >> 21) & 3u]) /
+                       as_float(lower_vf_snapshot_[ft][(code >> 23) & 3u]));
     return true;
   }
   if (function == 0x3Cu && fd == 0x0Fu) { // MTIR
     if (it != 0u) state_.vi[it] = static_cast<std::uint16_t>(
-        state_.vf[(code >> 11) & 0x1Fu][(code >> 21) & 3u]);
+        lower_vf_snapshot_[(code >> 11) & 0x1Fu][(code >> 21) & 3u]);
     return true;
   }
   if (function == 0x3Cu && fd == 0x1Au) { // XTOP
@@ -271,7 +284,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
       const auto mask = 1u << (24u - lane);
       if ((code & mask) != 0u)
         memory_.write32(Memory::kVu1DataBase + qword * 16u + lane * 4u,
-                        state_.vf[fs][lane]);
+                        lower_vf_snapshot_[fs][lane]);
     }
     if (address_reg != 0u) ++state_.vi[address_reg];
     return true;

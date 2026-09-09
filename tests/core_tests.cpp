@@ -2809,6 +2809,31 @@ void test_vu1_captured_matrix_pair() {
         "VU1 executes the captured MULAx/MADDAy/MADDAz/MADDw dot product");
 }
 
+void test_vu1_pair_dependencies() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  const auto data = ps2vita::Memory::kVu1DataBase + 7u * 16u;
+  vu.state().vi[3] = 7;
+  vu.state().vf[12] = {{0x3F800000u, 0x40000000u, 0x40400000u, 0x40800000u}};
+  vu.state().vf[1].fill(0x3F800000u);
+  memory.write32(micro, 0x81E3637Du); // SQI VF12,(VI3++)
+  memory.write32(micro + 4, 0x01E00000u | (1u << 16) | (12u << 11) | (12u << 6) | 0x28u);
+  vu.start(0); vu.run(1);
+  check(memory.read32(data) == 0x3F800000u && memory.read32(data + 12) == 0x40800000u &&
+        vu.state().vf[12][0] == 0x40000000u && vu.state().vf[12][3] == 0x40A00000u &&
+        vu.state().vi[3] == 8, "VU1 lower store reads pre-pair VF while upper result commits");
+  vu.state().vi[3] = 7;
+  memory.write32(micro, 0x81E00000u | (12u << 16) | (3u << 11) | (0xDu << 6) | 0x3Cu);
+  vu.start(0); vu.run(1);
+  check(vu.state().vf[12][0] == 0x40400000u && vu.state().vi[3] == 7,
+        "VU1 upper VF write discards conflicting LQI including address increment");
+  memory.write32(micro, 0x81E00000u | (13u << 16) | (3u << 11) | (0xDu << 6) | 0x3Cu);
+  vu.start(0); vu.run(1);
+  check(vu.state().vf[12][0] == 0x40800000u && vu.state().vf[13][0] == 0x3F800000u &&
+        vu.state().vi[3] == 8, "VU1 disjoint upper/lower VF writes both commit");
+}
+
 void test_vu1_sqi() {
   ps2vita::Memory memory;
   memory.write32(ps2vita::Memory::kVu1MicroBase, 0x81E3637Du);
@@ -3864,6 +3889,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_vu1_pair_dependencies();
   test_gif_repeated_prim();
   test_gs_shared_edges();
   test_spu2_fixed_volume();
