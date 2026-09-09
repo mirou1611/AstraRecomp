@@ -2809,6 +2809,29 @@ void test_vu1_captured_matrix_pair() {
         "VU1 executes the captured MULAx/MADDAy/MADDAz/MADDw dot product");
 }
 
+void test_vu1_vector_scoreboard() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  memory.write32(micro, 0x8000033Cu); memory.write32(micro + 8, 0x8000033Cu);
+  memory.write32(micro + 4, (8u << 21) | (1u << 6) | 0x28u); // ADD.x VF1,VF0,VF0
+  memory.write32(micro + 12, (4u << 21) | (1u << 11) | (2u << 6) | 0x28u);
+  vu.start(0); vu.run(2);
+  check(vu.cycles_executed() == 2 && vu.vf_stall_cycles() == 0,
+        "VU1 scoreboard does not stall disjoint vector lanes");
+  vu.reset();
+  memory.write32(micro + 12, (8u << 21) | (1u << 11) | (2u << 6) | 0x28u);
+  vu.start(0); vu.run(2);
+  check(vu.cycles_executed() == 5 && vu.vf_stall_cycles() == 3 && vu.pairs_executed() == 2,
+        "VU1 dependent vector read waits four-cycle result latency");
+  vu.reset();
+  memory.write32(micro + 8, (1u << 25) | (8u << 21) | (1u << 11)); // SQ.x VF1,0(VI0)
+  memory.write32(micro + 12, 0x2FF);
+  vu.start(0); vu.run(2);
+  check(vu.cycles_executed() == 5 && vu.vf_stall_cycles() == 3,
+        "VU1 lower stores participate in vector dependency stalls");
+}
+
 void test_vu1_pair_dependencies() {
   ps2vita::Memory memory;
   ps2vita::Vu1 vu(memory);
@@ -3902,6 +3925,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_vu1_vector_scoreboard();
   test_vu1_pair_dependencies();
   test_gif_repeated_prim();
   test_gs_shared_edges();

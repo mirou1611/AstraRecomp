@@ -20,6 +20,7 @@ struct Vu1State {
 };
 struct Vu1StoreRecord {
   std::uint64_t pair = 0;
+  std::uint64_t cycle = 0;
   std::uint16_t pc = 0, address = 0;
   std::uint32_t value = 0;
 };
@@ -39,6 +40,8 @@ public:
   const std::vector<Vu1StoreRecord>& store_records() const { return store_records_; }
   std::uint64_t dropped_store_records() const { return dropped_store_records_; }
   std::uint64_t first_rejected_pair() const { return first_rejected_pair_; }
+  std::uint64_t cycles_executed() const { return cycles_; }
+  std::uint64_t vf_stall_cycles() const { return vf_stall_cycles_; }
 
   Vu1State& state() { return state_; }
   const Vu1State& state() const { return state_; }
@@ -73,6 +76,8 @@ private:
 
   Memory& memory_;
   Vu1State state_{};
+  std::array<std::array<std::uint64_t, 4>, 32> vf_ready_{};
+  std::uint64_t cycles_ = 0, vf_stall_cycles_ = 0;
   bool trace_stores_ = false;
   std::vector<Vu1StoreRecord> store_records_;
   std::uint64_t dropped_store_records_ = 0, first_rejected_pair_ = 0;
@@ -97,8 +102,8 @@ private:
   std::array<std::uint32_t, 32> first_rejected_data_{};
   std::uint16_t top_ = 0;
   std::uint16_t lower_mac_snapshot_ = 0;
-  // Four issue slots for FMAC flag visibility. Dependency stalls are not yet
-  // modeled, so this is the unstalled pipeline, not a complete cycle model.
+  // Four cycle slots for MAC visibility, advanced during modeled VF stalls.
+  // Other pipelines and external synchronization are not a complete cycle model.
   std::array<std::uint16_t, 4> mac_pipeline_{};
   unsigned mac_pipeline_slot_ = 0;
   std::deque<std::vector<std::uint8_t>> path1_packets_;

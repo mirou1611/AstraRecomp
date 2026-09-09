@@ -40,6 +40,9 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(vu.first_rejected_tag()),
       static_cast<unsigned long long>(gif.triangles_emitted()));
   std::ofstream image(argv[2], std::ios::binary | std::ios::trunc);
+  std::printf("vu_timing cycles=%llu vf_stalls=%llu\n",
+      static_cast<unsigned long long>(vu.cycles_executed()),
+      static_cast<unsigned long long>(vu.vf_stall_cycles()));
   std::printf("store_trace records=%zu dropped=%llu reject_pair=%llu\n",
       vu.store_records().size(), static_cast<unsigned long long>(vu.dropped_store_records()),
       static_cast<unsigned long long>(vu.first_rejected_pair()));
@@ -47,8 +50,8 @@ int main(int argc, char** argv) {
     const unsigned span = ((vu.first_rejected_address() - vu.first_rejected_kick_start()) & 0x3FFFu) + 16u;
     for (const auto& record : vu.store_records()) {
       if (((record.address - vu.first_rejected_kick_start()) & 0x3FFFu) >= span) continue;
-      std::printf("packet_store pair=%llu pc=%04X address=%04X value=%08X relation=%s\n",
-          static_cast<unsigned long long>(record.pair), record.pc, record.address, record.value,
+      std::printf("packet_store pair=%llu cycle=%llu pc=%04X address=%04X value=%08X relation=%s\n",
+          static_cast<unsigned long long>(record.pair), static_cast<unsigned long long>(record.cycle), record.pc, record.address, record.value,
           record.pair < vu.first_rejected_pair() ? "before" : "after_or_same");
     }
   }

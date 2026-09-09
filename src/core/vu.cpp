@@ -1,11 +1,51 @@
 #include "ps2vita/vu.hpp"
 
 #include <cmath>
+#include <algorithm>
 #include <cstring>
 #include <limits>
 
 namespace ps2vita {
 namespace {
+struct VectorAccess {
+  std::array<unsigned, 32> reads{};
+  unsigned destination = 0, mask = 0;
+};
+
+VectorAccess vector_access(std::uint32_t code, bool upper) {
+  VectorAccess access;
+  const unsigned mask = (code >> 21) & 15u, fs = (code >> 11) & 31u,
+      ft = (code >> 16) & 31u, fd = (code >> 6) & 31u, fn = code & 63u;
+  if (upper) {
+    const bool broadcast = fn <= 0x0Bu || (fn >= 0x10u && fn <= 0x13u);
+    const bool vector = fn == 0x28u || fn == 0x2Au || fn == 0x2Bu || fn == 0x2Cu;
+    if (broadcast || vector || fn == 0x1Cu) {
+      access.reads[fs] |= mask;
+      if (broadcast && mask) access.reads[ft] |= 8u >> (fn & 3u);
+      else if (vector) access.reads[ft] |= mask;
+      access.destination = fd; access.mask = mask;
+    } else if (fn >= 0x3Cu && (fd == 2u || fd == 6u || fd == 5u)) {
+      access.reads[fs] |= mask;
+      if (fd == 5u) { access.destination = ft; access.mask = mask; }
+      else if (mask) access.reads[ft] |= 8u >> (fn & 3u);
+    }
+  } else {
+    const unsigned group = code >> 25;
+    if (group == 0u || (group == 0x40u &&
+        ((fn == 0x3Cu && fd == 0xDu) || (fn == 0x3Du && fd == 0xFu)))) {
+      access.destination = ft; access.mask = mask;
+    } else if (group == 1u || (group == 0x40u && fn == 0x3Du && fd == 0xDu)) {
+      access.reads[fs] |= mask;
+    } else if (group == 0x40u && fn == 0x3Cu && fd == 0xEu) {
+      access.reads[fs] |= 8u >> ((code >> 21) & 3u);
+      access.reads[ft] |= 8u >> ((code >> 23) & 3u);
+    } else if (group == 0x40u && fn == 0x3Cu && fd == 0xFu) {
+      access.reads[fs] |= 8u >> ((code >> 21) & 3u);
+    }
+  }
+  access.reads[0] = 0;
+  return access;
+}
 
 std::int32_t sign_extend(std::uint32_t value, unsigned bits) {
   const auto shift = 32u - bits;
@@ -58,6 +98,7 @@ std::uint32_t float_to_int(std::uint32_t bits, unsigned scale) {
 } // namespace
 
 void Vu1::reset() {
+  vf_ready_ = {}; cycles_ = vf_stall_cycles_ = 0;
   store_records_.clear(); dropped_store_records_ = 0; first_rejected_pair_ = 0;
   state_ = {};
   state_.vf[0][3] = 0x3F800000u;
@@ -113,6 +154,18 @@ bool Vu1::step() {
   const bool apply_branch = branch_pending_;
   const auto pending_target = branch_target_;
   const bool apply_end = end_pending_;
+  const auto upper_access = vector_access(upper, true);
+  const auto lower_access = (upper & 0x80000000u) ? VectorAccess{} : vector_access(lower, false);
+  auto ready = cycles_;
+  for (unsigned reg = 1; reg < 32; ++reg)
+    for (unsigned lane = 0; lane < 4; ++lane)
+      if (((upper_access.reads[reg] | lower_access.reads[reg]) & (8u >> lane)) != 0u)
+        ready = std::max(ready, vf_ready_[reg][lane]);
+  while (cycles_ < ready) {
+    mac_pipeline_[mac_pipeline_slot_] = state_.mac;
+    mac_pipeline_slot_ = (mac_pipeline_slot_ + 1u) & 3u;
+    ++cycles_; ++vf_stall_cycles_;
+  }
   lower_mac_snapshot_ = mac_pipeline_[mac_pipeline_slot_];
   branch_pending_ = false;
   end_pending_ = (upper & 0x40000000u) != 0u;
@@ -146,6 +199,17 @@ bool Vu1::step() {
   mac_pipeline_[mac_pipeline_slot_] = state_.mac;
   mac_pipeline_slot_ = (mac_pipeline_slot_ + 1u) & 3u;
   ++pairs_executed_;
+  const auto mark_ready = [&](const VectorAccess& access) {
+    if (access.destination == 0u) return;
+    for (unsigned lane = 0; lane < 4; ++lane)
+      if ((access.mask & (8u >> lane)) != 0u)
+        vf_ready_[access.destination][lane] = cycles_ + 4u;
+  };
+  mark_ready(upper_access);
+  if (upper_access.destination == 0u || upper_access.mask == 0u ||
+      upper_access.destination != lower_access.destination)
+    mark_ready(lower_access);
+  ++cycles_;
   state_.pc = apply_branch ? pending_target : sequential_pc;
   if (apply_end) running_ = false;
   return true;
@@ -155,7 +219,7 @@ void Vu1::store_data(std::uint32_t address, std::uint32_t value) {
   memory_.write32(address, value);
   if (!trace_stores_) return;
   if (store_records_.size() < 4096u)
-    store_records_.push_back({pairs_executed_, state_.pc,
+    store_records_.push_back({pairs_executed_, cycles_, state_.pc,
         static_cast<std::uint16_t>((address - Memory::kVu1DataBase) & 0x3FFFu), value});
   else ++dropped_store_records_;
 }
