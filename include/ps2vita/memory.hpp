@@ -86,9 +86,14 @@ public:
     spu2_shadow_enabled_ = enabled;
     spu2_shadow_ = {}; spu2_shadow_delay_ = {};
     spu2_shadow_cycles_ = 0; spu2_shadow_ticks_ = 0; spu2_shadow_peak_ = 0;
+    spu2_shadow_dry_ = {}; spu2_shadow_sweeps_ = 0;
   }
   std::uint64_t spu2_shadow_ticks() const { return spu2_shadow_ticks_; }
   unsigned spu2_shadow_peak() const { return spu2_shadow_peak_; }
+  std::int32_t spu2_shadow_dry(unsigned core, unsigned channel) const {
+    return spu2_shadow_dry_.at(core).at(channel);
+  }
+  std::uint64_t spu2_shadow_sweeps() const { return spu2_shadow_sweeps_; }
   const Spu2Voice& spu2_shadow_voice(unsigned core, unsigned voice) const {
     return spu2_shadow_.at(core * 24u + voice);
   }
@@ -136,6 +141,8 @@ private:
   std::array<unsigned, 48> spu2_shadow_delay_{};
   unsigned spu2_shadow_cycles_ = 0, spu2_shadow_peak_ = 0;
   std::uint64_t spu2_shadow_ticks_ = 0;
+  std::array<std::array<std::int32_t, 2>, 2> spu2_shadow_dry_{};
+  std::uint64_t spu2_shadow_sweeps_ = 0; // Sticky voice mask, either channel.
   void spu2_shadow_write(unsigned offset, std::uint8_t value);
   void advance_spu2_shadow(std::uint32_t cycles);
   std::vector<std::uint8_t> spu2_ram_;

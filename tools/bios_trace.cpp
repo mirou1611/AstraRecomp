@@ -1555,6 +1555,10 @@ int main(int argc, char** argv) {
   std::printf("spu2_shadow ticks=%llu pre_mix_peak=%u active=%u decode_errors=%u\n",
       static_cast<unsigned long long>(emulator.memory().spu2_shadow_ticks()),
       emulator.memory().spu2_shadow_peak(), shadow_active, shadow_errors);
+  std::printf("spu2_shadow_dry core0=%d/%d core1=%d/%d unsupported_sweep_mask=%012llX\n",
+      emulator.memory().spu2_shadow_dry(0, 0), emulator.memory().spu2_shadow_dry(0, 1),
+      emulator.memory().spu2_shadow_dry(1, 0), emulator.memory().spu2_shadow_dry(1, 1),
+      static_cast<unsigned long long>(emulator.memory().spu2_shadow_sweeps()));
   if (iop_spu_cursor != 0) {
     std::puts("recent IOP SPU2/DMA register accesses:");
     const auto spu_count = std::min(iop_spu_cursor, kTraceSize);

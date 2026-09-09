@@ -25,6 +25,18 @@ void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
 }
 
+void test_spu2_fixed_volume() {
+  std::int32_t output = 123;
+  check(ps2vita::spu2_fixed_volume(32767, 0, output) && output == 0, "SPU2 zero voice volume mutes");
+  check(ps2vita::spu2_fixed_volume(16, 0x2000, output) && output == 8, "SPU2 half voice volume");
+  check(ps2vita::spu2_fixed_volume(16, 0x4000, output) && output == -16, "SPU2 signed voice volume inverts");
+  check(ps2vita::spu2_fixed_volume(-1, 0x2000, output) && output == -1, "SPU2 volume rounds negative products down");
+  check(ps2vita::spu2_fixed_volume(-32768, 0x4000, output) && output == 32768,
+        "SPU2 voice volume retains wide positive endpoint for accumulation");
+  check(!ps2vita::spu2_fixed_volume(100, 0x8000, output) && output == 32768,
+        "SPU2 volume sweep is explicitly unsupported");
+}
+
 void test_spu2_voice() {
   ps2vita::Memory memory;
   for (unsigned byte = 0; byte < 16; ++byte) memory.iop_write8(0x2000u + byte, 0x11);
@@ -59,10 +71,22 @@ void test_spu2_voice() {
   memory.iop_write16(0x1F900004, 4096);
   memory.iop_write16(0x1F900006, 15);
   memory.iop_write16(0x1F9001C2, 0x100);
+  memory.iop_write16(0x1F900000, 0x3FFF);
+  memory.iop_write16(0x1F900002, 0x4000);
+  memory.iop_write32(0x1F900188, 1);
+  memory.iop_write32(0x1F900190, 1);
   memory.iop_write16(0x1F9001A0, 1);
   memory.advance(12288);
   check(memory.spu2_shadow_peak() == 7 && memory.spu2_shadow_voice(0, 0).samples_consumed() == 1,
         "SPU2 guest KON drives DMA-backed shadow voice after delay");
+  check(memory.spu2_shadow_dry(0, 0) == 6 && memory.spu2_shadow_dry(0, 1) == -7 &&
+        memory.spu2_shadow_dry(1, 0) == 0, "SPU2 shadow routes signed stereo volumes per core");
+  memory.iop_write32(0x1F900190, 0); memory.advance(6144);
+  check(memory.spu2_shadow_dry(0, 1) == 0 && memory.spu2_shadow_dry(0, 0) > 0,
+        "SPU2 VMIXR disables right channel independently");
+  memory.iop_write16(0x1F900000, 0x8000); memory.advance(6144);
+  check(memory.spu2_shadow_dry(0, 0) == 0 && memory.spu2_shadow_sweeps() == 1,
+        "SPU2 shadow flags unsupported sweep without fixed-gain substitution");
   memory.enable_spu2_shadow(false);
   memory.iop_write8(0x2000, 0x50); // Unsupported predictor.
   memory.iop_write16(0x1F9001AA, 0x100);
@@ -3789,6 +3813,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_spu2_fixed_volume();
   test_spu2_shadow_scheduling();
   test_spu2_shadow_bank();
   test_spu2_voice();

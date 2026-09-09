@@ -3,6 +3,8 @@
 #include "ps2vita/spu2_envelope.hpp"
 
 namespace ps2vita {
+// Fixed signed 15-bit voice volume. Sweep mode returns false without changing output.
+bool spu2_fixed_volume(std::int16_t sample, std::uint16_t volume, std::int32_t& output);
 // Functional mono voice for integration tests. tick() is one output sample.
 // Sample holding is NOT hardware Gaussian interpolation. No KON delay, NAX/
 // ENDX timing, register binding, IRQ, volume sweep, routing or reverb yet.

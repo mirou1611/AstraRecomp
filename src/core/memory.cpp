@@ -638,6 +638,7 @@ void Memory::advance_spu2_shadow(std::uint32_t cycles) {
   spu2_shadow_cycles_ = total % 6144u; // 768 IOP clocks, eight EE clocks each.
   for (std::uint64_t tick = 0; tick < total / 6144u; ++tick) {
     ++spu2_shadow_ticks_;
+    spu2_shadow_dry_ = {};
     for (unsigned index = 0; index < 48u; ++index) {
       auto& voice = spu2_shadow_[index];
       if (!voice.active() && spu2_shadow_delay_[index] == 0) continue;
@@ -651,6 +652,15 @@ void Memory::advance_spu2_shadow(std::uint32_t cycles) {
       }
       const int sample = voice.tick(*this);
       spu2_shadow_peak_ = std::max(spu2_shadow_peak_, unsigned(sample < 0 ? -sample : sample));
+      for (unsigned channel = 0; channel < 2u; ++channel) {
+        const auto mask = iop_read32(base + (channel == 0u ? 0x188u : 0x190u));
+        if ((mask & (1u << (index % 24u))) == 0u) continue;
+        std::int32_t scaled = 0;
+        if (spu2_fixed_volume(static_cast<std::int16_t>(sample),
+                             iop_read16(base + offset + channel * 2u), scaled))
+          spu2_shadow_dry_[index / 24u][channel] += scaled;
+        else spu2_shadow_sweeps_ |= 1ull << index;
+      }
     }
   }
 }
