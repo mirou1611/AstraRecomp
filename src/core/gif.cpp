@@ -31,6 +31,8 @@ void Gif::reset() {
   tex0_[0] = tex0_[1] = 0;
   test_[0] = test_[1] = 0;
   zbuf_[0] = zbuf_[1] = 0;
+  alpha_[0] = alpha_[1] = 0;
+  pabe_ = colclamp_ = false;
   uv_ = 0;
   xyoffset_[0] = xyoffset_[1] = 0;
   scissor_[0] = scissor_[1] = 0x07FF000007FF0000ull;
@@ -273,6 +275,10 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   case 0x19: xyoffset_[1] = value; break;
   case 0x40: scissor_[0] = value; break;
   case 0x41: scissor_[1] = value; break;
+  case 0x42: alpha_[0] = value; break;
+  case 0x43: alpha_[1] = value; break;
+  case 0x46: colclamp_ = (value & 1u) != 0u; break;
+  case 0x49: pabe_ = (value & 1u) != 0u; break;
   case 0x47: test_[0] = value; break;
   case 0x48: test_[1] = value; break;
   case 0x4E: zbuf_[0] = value; break;
@@ -288,6 +294,7 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
 void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   const auto primitive = static_cast<unsigned>(prim_ & 7u);
   const auto context = static_cast<unsigned>((prim_ >> 9) & 1u);
+  gs_.set_blend_state((prim_ & (1u << 6)) != 0u, alpha_[context], pabe_, colclamp_);
   const auto clip = scissor_[context];
   gs_.set_scissor(static_cast<int>((clip & 0x7FFu) / 4u),
                   static_cast<int>(((clip >> 32) & 0x7FFu) / 4u),

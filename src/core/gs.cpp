@@ -42,6 +42,30 @@ void Gs::write(int x, int y, std::uint32_t z, std::uint32_t color) {
       (depth_test_ == DepthTest::LessEqual && z <= depth_[index]);
   if (pass) {
     if (depth_write_) depth_[index] = z;
+    if (blend_enabled_ && (!blend_pabe_ || (color & 0x80000000u) != 0u)) {
+      const auto destination = color_[index];
+      const auto source = color;
+      const unsigned a = blend_equation_ & 3u;
+      const unsigned b = (blend_equation_ >> 2) & 3u;
+      const unsigned c = (blend_equation_ >> 4) & 3u;
+      const unsigned d = (blend_equation_ >> 6) & 3u;
+      // Selectors 3 are reserved; only the defined equation subset is modeled.
+      if (a < 3u && b < 3u && c < 3u && d < 3u) {
+        const int alpha = c == 0u ? source >> 24 : c == 1u ? destination >> 24 :
+            (blend_equation_ >> 32) & 0xFFu;
+        color &= 0xFF000000u; // Blending modifies RGB, not source alpha.
+        for (unsigned shift = 0; shift < 24u; shift += 8u) {
+          const int components[] = {int((source >> shift) & 0xFFu),
+                                    int((destination >> shift) & 0xFFu), 0};
+          const int product = (components[a] - components[b]) * alpha;
+          const int scaled = product >= 0 ? product / 128 : -((-product + 127) / 128);
+          const int value = scaled + components[d];
+          const auto channel = color_clamp_ ? unsigned(std::clamp(value, 0, 255)) :
+              static_cast<unsigned>(value) & 0xFFu;
+          color |= channel << shift;
+        }
+      }
+    }
     color_[index] = color;
   }
 }

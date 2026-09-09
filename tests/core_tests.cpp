@@ -23,6 +23,63 @@ void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
 }
 
+void test_gs_blending() {
+  ps2vita::Gs gs;
+  const auto draw = [&](std::uint32_t src, std::uint32_t dst,
+                        std::uint64_t equation, bool pabe = false,
+                        bool clamp = true, bool enabled = true) {
+    gs.clear(dst);
+    gs.set_blend_state(enabled, equation, pabe, clamp);
+    gs.point({0, 0, 0, src});
+    return gs.pixel(0, 0);
+  };
+  // (source - destination) * source alpha / 128 + destination.
+  constexpr std::uint64_t standard = 0x44u;
+  check(draw(0x80402010u, 0x10204080u, standard) == 0x80402010u,
+        "GS blend alpha 128 is unity and preserves source alpha");
+  check(draw(0x40402010u, 0x10204080u, standard) == 0x40303048u,
+        "GS blend alpha 64 averages RGB");
+  check(draw(0x00000000u, 0x80010101u, 0x54u) == 0u,
+        "GS blend selects destination alpha");
+  check(draw(0x40000000u, 0x00010101u, standard) == 0x40000000u,
+        "GS negative blend product rounds down");
+  check(draw(0x40402010u, 0x10204080u, standard, true) == 0x40402010u,
+        "GS PABE bypasses blending below source alpha 128");
+  check(draw(0x80402010u, 0x10204080u, 0x64u | (64ull << 32), true) == 0x80303048u,
+        "GS PABE permits blending with alpha high bit and selects FIX");
+  const auto additive = 0x68u | (128ull << 32);
+  check(draw(0x80F0F0F0u, 0x00202020u, additive) == 0x80FFFFFFu,
+        "GS COLCLAMP saturates overflow");
+  check(draw(0x80F0F0F0u, 0x00202020u, additive, false, false) == 0x80101010u,
+        "GS disabled COLCLAMP wraps overflow");
+  check(draw(0x40402010u, 0x10204080u, standard, false, true, false) == 0x40402010u,
+        "GS disabled ABE copies source");
+}
+
+void test_gif_blend_registers() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  const auto reg = [&](std::uint64_t address, std::uint64_t value) {
+    const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull, 0xEull, value, address}};
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet)),
+          "GIF accepts blend register packet");
+  };
+  reg(0x42, 0x44); // Context 1: source-alpha interpolation.
+  reg(0x43, 0x68 | (128ull << 32)); // Context 2: additive FIX.
+  reg(0x46, 1);
+  reg(0x01, 0x40F0F0F0u);
+  gs.clear(0x00202020u);
+  reg(0x00, 0x40); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40888888u, "GIF routes ALPHA context 1");
+  gs.clear(0x00202020u);
+  reg(0x00, 0x240); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40FFFFFFu, "GIF routes ALPHA context 2 and COLCLAMP");
+  reg(0x46, 0); gs.clear(0x00202020u); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40101010u, "GIF routes disabled COLCLAMP");
+  reg(0x49, 1); gs.clear(0x00202020u); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40F0F0F0u, "GIF routes PABE");
+}
+
 void test_framebuffer_dump() {
   ps2vita::Gs gs;
   gs.clear(0xFF000000u);
@@ -3473,6 +3530,8 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_gs_blending();
+  test_gif_blend_registers();
   test_execution_census_blocks_and_edges();
   test_memory_aliases();
   test_bios_mapping_and_boot();

@@ -76,6 +76,8 @@ private:
   std::uint64_t tex0_[2]{};
   std::uint64_t test_[2]{};
   std::uint64_t zbuf_[2]{};
+  std::uint64_t alpha_[2]{};
+  bool pabe_ = false, colclamp_ = false;
   std::uint64_t uv_ = 0;
   std::uint64_t xyoffset_[2]{};
   std::uint64_t scissor_[2]{0x07FF000007FF0000ull,
