@@ -4,6 +4,7 @@
 #include <cstdint>
 
 namespace ps2vita {
+class Memory;
 
 struct Spu2AdpcmHistory {
   std::int16_t previous = 0;
@@ -37,6 +38,7 @@ public:
   }
   bool decode_next(const std::array<std::uint8_t, 16>& encoded,
                    Spu2AdpcmBlock& output);
+  bool decode_next(const Memory& memory, Spu2AdpcmBlock& output);
   std::uint32_t next_word_address() const { return next_; }
   std::uint32_t loop_word_address() const { return loop_; }
   bool active() const { return active_; }

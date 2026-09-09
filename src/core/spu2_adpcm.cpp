@@ -1,4 +1,5 @@
 #include "ps2vita/spu2_adpcm.hpp"
+#include "ps2vita/memory.hpp"
 
 #include <algorithm>
 
@@ -38,6 +39,14 @@ bool decode_spu2_adpcm(const std::array<std::uint8_t, 16>& encoded,
   output = decoded;
   return true;
 }
+bool Spu2AdpcmStream::decode_next(const Memory& memory, Spu2AdpcmBlock& output) {
+  if (!active_) return false;
+  std::array<std::uint8_t, 16> encoded{};
+  for (unsigned byte = 0; byte < encoded.size(); ++byte)
+    encoded[byte] = memory.spu2_ram_read8(next_ * 2u + byte);
+  return decode_next(encoded, output);
+}
+
 bool Spu2AdpcmStream::decode_next(const std::array<std::uint8_t, 16>& encoded,
                                 Spu2AdpcmBlock& output) {
   if (!active_ || !decode_spu2_adpcm(encoded, history_, output)) return false;

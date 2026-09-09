@@ -23,6 +23,35 @@ void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
 }
 
+void test_spu2_dma_stream() {
+  for (unsigned core = 0; core < 2; ++core) {
+    ps2vita::Memory memory;
+    const auto regs = 0x1F900000u + core * 0x400u;
+    const auto dma = core == 0 ? 0x1F8010C0u : 0x1F801500u;
+    // Two blocks straddle the end of 2 MiB sample RAM.
+    for (unsigned byte = 0; byte < 32; ++byte)
+      memory.iop_write8(0x2000u + byte, byte < 16 ? 0x11 : 0);
+    memory.iop_write8(0x2000u, 8); memory.iop_write8(0x2001u, 0);
+    memory.iop_write8(0x2010u, 0x10); memory.iop_write8(0x2011u, 1);
+    memory.iop_write16(regs + 0x19Au, 0x20);
+    memory.iop_write16(regs + 0x1A8u, 0xF);
+    memory.iop_write16(regs + 0x1AAu, 0xFFF8);
+    memory.iop_write32(dma, 0x2000);
+    memory.iop_write32(dma + 4, 0x10008);
+    memory.iop_write32(dma + 8, 0x01000201);
+    memory.advance(10000);
+    ps2vita::Spu2AdpcmStream stream;
+    ps2vita::Spu2AdpcmBlock output;
+    stream.start(0xFFFF8);
+    check(stream.decode_next(memory, output) && output.samples[0] == 16 &&
+          output.samples[27] == 16 && stream.next_word_address() == 0,
+          "SPU2 DMA channel delivers first stream block across RAM boundary");
+    check(stream.decode_next(memory, output) && output.samples[0] == 15 &&
+          output.samples[1] == 14 && stream.encountered_end() && !stream.active(),
+          "SPU2 DMA RAM stream preserves history and ends on wrapped block");
+  }
+}
+
 void test_spu2_adpcm_stream() {
   ps2vita::Spu2AdpcmStream stream;
   ps2vita::Spu2AdpcmBlock output;
@@ -3602,6 +3631,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_spu2_dma_stream();
   test_spu2_adpcm_stream();
   test_gs_alpha_test();
   test_gs_blending();

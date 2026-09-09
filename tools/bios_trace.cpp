@@ -764,6 +764,21 @@ int main(int argc, char** argv) {
                       emulator.memory().iop_read16(base_address + voice * 16u + 6u),
                       emulator.memory().iop_read16(base_address + voice * 16u + 8u),
                       encoded[0], encoded[1], unsigned(decoded_ok), peak);
+                  // Bounded functional lookahead into current RAM, not timed
+                  // playback: later DMA, envelopes and key-off are not applied.
+                  ps2vita::Spu2AdpcmStream stream;
+                  stream.start(ssa);
+                  unsigned blocks = 0;
+                  int stream_peak = 0;
+                  while (blocks < 8u && stream.decode_next(emulator.memory(), decoded)) {
+                    ++blocks;
+                    for (const auto sample : decoded.samples)
+                      stream_peak = std::max(stream_peak, sample < 0 ? -int(sample) : int(sample));
+                  }
+                  std::printf("spu2_stream_probe core=%u voice=%u blocks=%u raw_peak=%d "
+                      "next_word=%05X end=%u active=%u\n", core, voice, blocks, stream_peak,
+                      stream.next_word_address(), unsigned(stream.encountered_end()),
+                      unsigned(stream.active()));
                 }
               }
             }
