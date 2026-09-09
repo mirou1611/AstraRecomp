@@ -99,6 +99,7 @@ std::uint32_t float_to_int(std::uint32_t bits, unsigned scale) {
 
 void Vu1::reset() {
   vf_ready_ = {}; cycles_ = vf_stall_cycles_ = 0;
+  q_ready_ = q_stall_cycles_ = 0; pending_q_ = 0; q_pending_ = false;
   store_records_.clear(); dropped_store_records_ = 0; first_rejected_pair_ = 0;
   state_ = {};
   state_.vf[0][3] = 0x3F800000u;
@@ -165,6 +166,19 @@ bool Vu1::step() {
     mac_pipeline_[mac_pipeline_slot_] = state_.mac;
     mac_pipeline_slot_ = (mac_pipeline_slot_ + 1u) & 3u;
     ++cycles_; ++vf_stall_cycles_;
+  }
+  const bool lower_div = (lower >> 25) == 0x40u && (lower & 0x7FFu) == 0x3BCu;
+  const bool lower_waitq = (lower >> 25) == 0x40u && (lower & 0x7FFu) == 0x3BFu;
+  if ((upper & 0x80000000u) == 0u && (lower_div || lower_waitq) && q_pending_) {
+    while (cycles_ < q_ready_) {
+      mac_pipeline_[mac_pipeline_slot_] = state_.mac;
+      mac_pipeline_slot_ = (mac_pipeline_slot_ + 1u) & 3u;
+      ++cycles_; ++q_stall_cycles_;
+    }
+  }
+  if (q_pending_ && cycles_ >= q_ready_) {
+    state_.q = pending_q_;
+    q_pending_ = false;
   }
   lower_mac_snapshot_ = mac_pipeline_[mac_pipeline_slot_];
   branch_pending_ = false;
@@ -335,8 +349,10 @@ bool Vu1::execute_lower(std::uint32_t code) {
   if (function == 0x3Cu && fd == 0x0Eu) { // DIV
     const auto fs = static_cast<unsigned>((code >> 11) & 0x1Fu);
     const auto ft = static_cast<unsigned>((code >> 16) & 0x1Fu);
-    state_.q = as_bits(as_float(lower_vf_snapshot_[fs][(code >> 21) & 3u]) /
+    pending_q_ = as_bits(as_float(lower_vf_snapshot_[fs][(code >> 21) & 3u]) /
                        as_float(lower_vf_snapshot_[ft][(code >> 23) & 3u]));
+    q_ready_ = cycles_ + 7u;
+    q_pending_ = true;
     return true;
   }
   if (function == 0x3Cu && fd == 0x0Fu) { // MTIR

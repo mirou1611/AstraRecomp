@@ -3054,6 +3054,36 @@ void test_vu1_lq_sq() {
         "VU1 captured LQ/SQ pair copies all selected lanes between qwords");
 }
 
+void test_vu1_q_latency() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  memory.write32(micro, 0x81F803BCu); memory.write32(micro + 4, 0x2FFu);
+  memory.write32(micro + 8, 0x8000033Cu);
+  memory.write32(micro + 12, (8u << 21) | (24u << 11) | (25u << 6) | 0x1Cu);
+  memory.write32(micro + 16, 0x800003BFu);
+  memory.write32(micro + 20, (8u << 21) | (24u << 11) | (26u << 6) | 0x1Cu);
+  vu.state().q = 0x3F800000u;
+  vu.state().vf[24] = {{0x40800000u, 0, 0, 0x40000000u}};
+  vu.start(0); vu.run(1);
+  check(vu.state().q == 0x3F800000u && vu.cycles_executed() == 1,
+        "VU1 DIV does not immediately overwrite Q");
+  vu.run(1);
+  check(vu.state().vf[25][0] == 0x40800000u && vu.q_stall_cycles() == 0,
+        "VU1 early MULq reads old Q without implicit wait");
+  vu.run(1);
+  check(vu.state().vf[26][0] == 0x40000000u && vu.state().q == 0x3F000000u &&
+        vu.cycles_executed() == 8 && vu.q_stall_cycles() == 5,
+        "VU1 WAITQ stalls pair until seven-cycle DIV result is visible");
+  vu.reset();
+  check(vu.q_stall_cycles() == 0 && vu.state().q == 0, "VU1 reset clears pending Q timing");
+  vu.state().vf[24][3] = 0x40000000u;
+  memory.write32(micro + 8, 0x81F803BCu); memory.write32(micro + 12, 0x2FFu);
+  vu.start(0); vu.run(2);
+  check(vu.cycles_executed() == 8 && vu.q_stall_cycles() == 6 && vu.state().q == 0x3F000000u,
+        "VU1 consecutive DIV waits for previous division before issuing");
+}
+
 void test_vu1_div_mulq() {
   ps2vita::Memory memory;
   memory.write32(ps2vita::Memory::kVu1MicroBase, 0x81F803BCu);
@@ -3925,6 +3955,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_vu1_q_latency();
   test_vu1_vector_scoreboard();
   test_vu1_pair_dependencies();
   test_gif_repeated_prim();

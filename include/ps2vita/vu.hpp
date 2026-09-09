@@ -42,6 +42,7 @@ public:
   std::uint64_t first_rejected_pair() const { return first_rejected_pair_; }
   std::uint64_t cycles_executed() const { return cycles_; }
   std::uint64_t vf_stall_cycles() const { return vf_stall_cycles_; }
+  std::uint64_t q_stall_cycles() const { return q_stall_cycles_; }
 
   Vu1State& state() { return state_; }
   const Vu1State& state() const { return state_; }
@@ -78,6 +79,9 @@ private:
   Vu1State state_{};
   std::array<std::array<std::uint64_t, 4>, 32> vf_ready_{};
   std::uint64_t cycles_ = 0, vf_stall_cycles_ = 0;
+  std::uint64_t q_ready_ = 0, q_stall_cycles_ = 0;
+  std::uint32_t pending_q_ = 0;
+  bool q_pending_ = false;
   bool trace_stores_ = false;
   std::vector<Vu1StoreRecord> store_records_;
   std::uint64_t dropped_store_records_ = 0, first_rejected_pair_ = 0;
