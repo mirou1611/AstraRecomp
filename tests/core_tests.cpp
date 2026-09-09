@@ -25,6 +25,32 @@ void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
 }
 
+void test_gif_repeated_prim() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  const auto reg = [&](std::uint64_t address, std::uint64_t value) {
+    const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull, 0xEull, value, address}};
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet)),
+          "GIF repeated PRIM fixture accepted");
+  };
+  reg(0, 4); // Triangle strip.
+  reg(5, 0); reg(5, 256); reg(5, 256ull << 16);
+  check(gif.triangles_emitted() == 1, "GIF first strip emits one triangle");
+  reg(0, 4); reg(5, 512);
+  check(gif.triangles_emitted() == 1, "GIF identical PRIM discards strip history");
+  reg(5, 768); reg(5, (256ull << 16) | 512);
+  check(gif.triangles_emitted() == 2, "GIF second independent strip has no connecting triangles");
+  // PRE on a packed tag must take the same reset path.
+  const std::array<std::uint64_t, 4> pre{{0x1000000000008001ull | (1ull << 46) | (4ull << 47),
+                                        0x5ull, 0, 0}};
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(pre.data()), sizeof(pre)) &&
+        gif.triangles_emitted() == 2, "GIF tag PRE restarts identical strip mode");
+  reg(0, 6); reg(5, 0); reg(0, 6); reg(5, (256ull << 16) | 256);
+  check(gif.sprites_emitted() == 0, "GIF identical PRIM discards incomplete sprite");
+  reg(5, (512ull << 16) | 512);
+  check(gif.sprites_emitted() == 1, "GIF sprite assembles after explicit restart");
+}
+
 void test_gs_shared_edges() {
   for (bool reverse : {false, true}) {
     for (bool other_diagonal : {false, true}) {
@@ -3838,6 +3864,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_gif_repeated_prim();
   test_gs_shared_edges();
   test_spu2_fixed_volume();
   test_spu2_shadow_scheduling();

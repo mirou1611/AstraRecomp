@@ -253,10 +253,10 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
 }
 
 void Gif::set_prim(std::uint64_t value) {
-  if (prim_ != value) {
-    vertex_count_ = 0;
-    have_first_xyz2_ = false;
-  }
+  // A PRIM write restarts assembly even if the mode bits are unchanged.
+  // Otherwise independent strips/sprites can inherit vertices from a prior draw.
+  vertex_count_ = 0;
+  have_first_xyz2_ = false;
   prim_ = value;
 }
 
