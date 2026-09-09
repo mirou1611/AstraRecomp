@@ -5,6 +5,7 @@
 #include <array>
 #include <deque>
 #include <vector>
+#include "ps2vita/spu2_voice.hpp"
 
 namespace ps2vita {
 
@@ -80,6 +81,17 @@ public:
   std::uint8_t spu2_ram_read8(std::uint32_t address) const {
     return spu2_ram_[address % spu2_ram_.size()];
   }
+  // Opt-in shadow execution only: never changes guest-visible SPU2 state.
+  void enable_spu2_shadow(bool enabled) {
+    spu2_shadow_enabled_ = enabled;
+    spu2_shadow_ = {}; spu2_shadow_delay_ = {};
+    spu2_shadow_cycles_ = 0; spu2_shadow_ticks_ = 0; spu2_shadow_peak_ = 0;
+  }
+  std::uint64_t spu2_shadow_ticks() const { return spu2_shadow_ticks_; }
+  unsigned spu2_shadow_peak() const { return spu2_shadow_peak_; }
+  const Spu2Voice& spu2_shadow_voice(unsigned core, unsigned voice) const {
+    return spu2_shadow_.at(core * 24u + voice);
+  }
   bool copy_in(std::uint32_t address, const void* source, std::size_t size);
   bool zero(std::uint32_t address, std::size_t size);
   bool load_bios(const void* source, std::size_t size);
@@ -119,6 +131,13 @@ private:
   std::vector<std::uint8_t> vu_mem_;
   std::vector<std::uint8_t> iop_ram_;
   std::array<std::uint8_t, 0x800> spu2_hw_{};
+  bool spu2_shadow_enabled_ = false;
+  std::array<Spu2Voice, 48> spu2_shadow_{};
+  std::array<unsigned, 48> spu2_shadow_delay_{};
+  unsigned spu2_shadow_cycles_ = 0, spu2_shadow_peak_ = 0;
+  std::uint64_t spu2_shadow_ticks_ = 0;
+  void spu2_shadow_write(unsigned offset, std::uint8_t value);
+  void advance_spu2_shadow(std::uint32_t cycles);
   std::vector<std::uint8_t> spu2_ram_;
   std::array<std::uint8_t, 4096> iop_scratch_{};
   mutable std::vector<std::uint8_t> iop_hw_;

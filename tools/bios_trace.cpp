@@ -371,6 +371,7 @@ int main(int argc, char** argv) {
   }
 
   constexpr std::size_t kTraceSize = 256;
+  emulator.memory().enable_spu2_shadow(true);
   std::array<TraceEntry, kTraceSize> trace{};
   std::array<IopTraceEntry, kTraceSize> iop_trace{};
   std::array<CacheEntry, kTraceSize> cache_trace{};
@@ -1545,6 +1546,15 @@ int main(int argc, char** argv) {
   for (unsigned core = 0; core < 2u; ++core)
     std::printf("spu2_core%u keyon_store_attempts=%llu requested_voice_mask=%06X\n", core,
         static_cast<unsigned long long>(spu_keyon_writes[core]), spu_keyon_masks[core]);
+  unsigned shadow_active = 0, shadow_errors = 0;
+  for (unsigned core = 0; core < 2u; ++core)
+    for (unsigned voice = 0; voice < 24u; ++voice) {
+      const auto& state = emulator.memory().spu2_shadow_voice(core, voice);
+      shadow_active += state.active(); shadow_errors += state.decode_error();
+    }
+  std::printf("spu2_shadow ticks=%llu pre_mix_peak=%u active=%u decode_errors=%u\n",
+      static_cast<unsigned long long>(emulator.memory().spu2_shadow_ticks()),
+      emulator.memory().spu2_shadow_peak(), shadow_active, shadow_errors);
   if (iop_spu_cursor != 0) {
     std::puts("recent IOP SPU2/DMA register accesses:");
     const auto spu_count = std::min(iop_spu_cursor, kTraceSize);

@@ -55,6 +55,15 @@ void test_spu2_voice() {
   voice.configure(0, 15, 0); voice.key_on(0x100);
   for (unsigned i = 0; i < 50; ++i) voice.tick(memory);
   check(voice.samples_consumed() == 1 && voice.active(), "SPU2 zero pitch retains first sample");
+  memory.enable_spu2_shadow(true);
+  memory.iop_write16(0x1F900004, 4096);
+  memory.iop_write16(0x1F900006, 15);
+  memory.iop_write16(0x1F9001C2, 0x100);
+  memory.iop_write16(0x1F9001A0, 1);
+  memory.advance(12288);
+  check(memory.spu2_shadow_peak() == 7 && memory.spu2_shadow_voice(0, 0).samples_consumed() == 1,
+        "SPU2 guest KON drives DMA-backed shadow voice after delay");
+  memory.enable_spu2_shadow(false);
   memory.iop_write8(0x2000, 0x50); // Unsupported predictor.
   memory.iop_write16(0x1F9001AA, 0x100);
   memory.iop_write32(0x1F8010C0, 0x2000);
@@ -64,6 +73,39 @@ void test_spu2_voice() {
   voice.key_on(0x100);
   check(voice.tick(memory) == 0 && !voice.active() && voice.decode_error() &&
         voice.samples_consumed() == 0, "SPU2 malformed voice data fails silent with diagnostic");
+}
+
+void test_spu2_shadow_bank() {
+  ps2vita::Memory memory;
+  memory.enable_spu2_shadow(true);
+  // Silent RAM is intentional: scheduling must not invent samples.
+  for (unsigned core = 0; core < 2; ++core) {
+    const auto base = 0x1F900000u + core * 0x400u;
+    for (unsigned voice : {0u, 23u}) {
+      memory.iop_write16(base + voice * 16u + 4u, 4096);
+      memory.iop_write16(base + voice * 16u + 6u, 15);
+    }
+    memory.iop_write32(base + 0x1A0u, 0xFF800001u); // Padding byte must be ignored.
+  }
+  memory.advance(6143);
+  check(memory.spu2_shadow_ticks() == 0, "SPU2 shadow waits for sample boundary");
+  memory.advance(1);
+  check(memory.spu2_shadow_ticks() == 1 && !memory.spu2_shadow_voice(0, 0).active(),
+        "SPU2 shadow key on waits two ticks");
+  memory.advance(6144);
+  for (unsigned core = 0; core < 2; ++core) {
+    check(memory.spu2_shadow_voice(core, 0).samples_consumed() == 1 &&
+          memory.spu2_shadow_voice(core, 23).samples_consumed() == 1 &&
+          !memory.spu2_shadow_voice(core, 1).active(), "SPU2 shadow routes KON masks on both cores");
+    check(memory.iop_read16(0x1F90000Au + core * 0x400u) == 0,
+          "SPU2 shadow does not overwrite guest ENVX");
+    memory.iop_write32(0x1F9001A4u + core * 0x400u, 0xFF800001u);
+  }
+  memory.advance(6144);
+  check(!memory.spu2_shadow_voice(0, 0).active() && !memory.spu2_shadow_voice(1, 23).active() &&
+        memory.spu2_shadow_peak() == 0, "SPU2 shadow KOFF releases silent voices");
+  memory.enable_spu2_shadow(false); memory.advance(12288);
+  check(memory.spu2_shadow_ticks() == 0, "SPU2 disabled shadow does not tick");
 }
 
 void test_spu2_envelope() {
@@ -3711,6 +3753,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_spu2_shadow_bank();
   test_spu2_voice();
   test_spu2_envelope();
   test_spu2_dma_stream();

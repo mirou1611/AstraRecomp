@@ -103,6 +103,7 @@ void Memory::clear() {
   std::fill(vu_mem_.begin(), vu_mem_.end(), 0);
   std::fill(iop_ram_.begin(), iop_ram_.end(), 0);
   spu2_hw_.fill(0);
+  enable_spu2_shadow(false);
   // Both SPU2 cores reset ready. STATX bit 7 is cleared while a DMA transfer
   // is active and restored when the transfer completes.
   spu2_hw_[0x0344u] = 0x80u;
@@ -611,6 +612,49 @@ bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
   return false;
 }
 
+void Memory::spu2_shadow_write(unsigned offset, std::uint8_t value) {
+  const unsigned core = offset / 0x400u;
+  const unsigned reg = offset & 0x3FFu;
+  if (reg >= 0x1A0u && reg <= 0x1A6u && reg != 0x1A3u) {
+    const bool on = reg < 0x1A4u;
+    const unsigned first = (reg - (on ? 0x1A0u : 0x1A4u)) * 8u;
+    for (unsigned bit = 0; bit < 8u; ++bit) {
+      if ((value & (1u << bit)) == 0u) continue;
+      const auto index = core * 24u + first + bit;
+      if (on) spu2_shadow_delay_[index] = 2;
+      else { spu2_shadow_delay_[index] = 0; spu2_shadow_[index].key_off(); }
+    }
+  } else if (reg >= 0x1C0u && reg < 0x2E0u && (reg - 0x1C0u) % 12u >= 4u &&
+             (reg - 0x1C0u) % 12u < 8u) {
+    const auto voice = (reg - 0x1C0u) / 12u;
+    const auto addr = 0x1F900000u + core * 0x400u + 0x1C4u + voice * 12u;
+    spu2_shadow_[core * 24u + voice].set_loop_address(
+        (std::uint32_t(iop_read16(addr)) << 16) | iop_read16(addr + 2u));
+  }
+}
+
+void Memory::advance_spu2_shadow(std::uint32_t cycles) {
+  const std::uint64_t total = std::uint64_t(spu2_shadow_cycles_) + cycles;
+  spu2_shadow_cycles_ = total % 6144u; // 768 IOP clocks, eight EE clocks each.
+  for (std::uint64_t tick = 0; tick < total / 6144u; ++tick) {
+    ++spu2_shadow_ticks_;
+    for (unsigned index = 0; index < 48u; ++index) {
+      auto& voice = spu2_shadow_[index];
+      if (!voice.active() && spu2_shadow_delay_[index] == 0) continue;
+      const auto base = 0x1F900000u + (index / 24u) * 0x400u;
+      const auto offset = (index % 24u) * 16u;
+      voice.configure(iop_read16(base + offset + 4u), iop_read16(base + offset + 6u),
+                      iop_read16(base + offset + 8u));
+      if (spu2_shadow_delay_[index] != 0 && --spu2_shadow_delay_[index] == 0) {
+        const auto ssa = base + 0x1C0u + (index % 24u) * 12u;
+        voice.key_on((std::uint32_t(iop_read16(ssa)) << 16) | iop_read16(ssa + 2u));
+      }
+      const int sample = voice.tick(*this);
+      spu2_shadow_peak_ = std::max(spu2_shadow_peak_, unsigned(sample < 0 ? -sample : sample));
+    }
+  }
+}
+
 void Memory::advance(std::uint32_t cycles) {
   const auto raw_ee = [&](std::size_t offset) {
     return static_cast<std::uint32_t>(hw_[offset]) |
@@ -1052,6 +1096,8 @@ void Memory::advance(std::uint32_t cycles) {
     }
   }
 
+  if (spu2_shadow_enabled_) advance_spu2_shadow(cycles);
+
   if (vif1_cycles_remaining_ == 0u) {
     const auto chcr = raw_ee(0x9000u);
     if ((chcr & 0x100u) != 0u && (chcr & 0xCu) == 0x4u) {
@@ -1291,6 +1337,7 @@ void Memory::iop_write8(std::uint32_t address, std::uint8_t value) {
     iop_scratch_[p - 0x1F800000u] = value;
   } else if (p >= 0x1F900000u && p < 0x1F900800u) {
     spu2_hw_[p - 0x1F900000u] = value;
+    if (spu2_shadow_enabled_) spu2_shadow_write(p - 0x1F900000u, value);
   } else if (p >= 0x1FFE0130u && p < 0x1FFE0134u) {
     const unsigned shift = (p & 3u) * 8u;
     iop_cache_control_ = (iop_cache_control_ & ~(0xFFu << shift)) |
