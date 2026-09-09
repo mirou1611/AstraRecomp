@@ -108,6 +108,42 @@ void test_spu2_shadow_bank() {
   check(memory.spu2_shadow_ticks() == 0, "SPU2 disabled shadow does not tick");
 }
 
+void test_spu2_shadow_scheduling() {
+  ps2vita::Memory batched, split;
+  for (auto* memory : {&batched, &split}) {
+    memory->enable_spu2_shadow(true);
+    memory->iop_write16(0x1F900004, 2048);
+    memory->iop_write16(0x1F900006, 15);
+    memory->iop_write8(0x1F9001A0, 1);
+  }
+  batched.advance(6144u * 12u + 17u);
+  for (unsigned i = 0; i < 12u; ++i) {
+    split.advance(6143); split.advance(1);
+  }
+  split.advance(17);
+  check(batched.spu2_shadow_ticks() == split.spu2_shadow_ticks() &&
+        batched.spu2_shadow_voice(0, 0).samples_consumed() ==
+            split.spu2_shadow_voice(0, 0).samples_consumed() &&
+        batched.spu2_shadow_voice(0, 0).envelope_level() ==
+            split.spu2_shadow_voice(0, 0).envelope_level(),
+        "SPU2 shadow sample clock is chunk invariant without intervening DMA or writes");
+  batched.advance(6127); split.advance(6127);
+  check(batched.spu2_shadow_ticks() == 13 && split.spu2_shadow_ticks() == 13,
+        "SPU2 shadow preserves fractional clock remainder");
+  split.enable_spu2_shadow(true);
+  split.iop_write16(0x1F9001A0, 1);
+  split.advance(6144);
+  split.iop_write16(0x1F9001A4, 1);
+  split.advance(6144);
+  check(!split.spu2_shadow_voice(0, 0).active() &&
+        split.spu2_shadow_voice(0, 0).samples_consumed() == 0,
+        "SPU2 shadow functional KOFF cancels queued start");
+  split.iop_write16(0x1F9001A0, 1);
+  split.clear(); split.advance(12288);
+  check(split.spu2_shadow_ticks() == 0 && !split.spu2_shadow_voice(0, 0).active(),
+        "SPU2 memory reset clears and disables shadow scheduling");
+}
+
 void test_spu2_envelope() {
   ps2vita::Spu2Envelope env;
   using Phase = ps2vita::Spu2Envelope::Phase;
@@ -3753,6 +3789,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_spu2_shadow_scheduling();
   test_spu2_shadow_bank();
   test_spu2_voice();
   test_spu2_envelope();
