@@ -8,6 +8,7 @@
 #include "ps2vita/vu.hpp"
 #include "ps2vita/spu2_adpcm.hpp"
 #include "ps2vita/spu2_envelope.hpp"
+#include "ps2vita/spu2_voice.hpp"
 
 #include <array>
 #include <cstdint>
@@ -22,6 +23,47 @@ int failures = 0;
 
 void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
+}
+
+void test_spu2_voice() {
+  ps2vita::Memory memory;
+  for (unsigned byte = 0; byte < 16; ++byte) memory.iop_write8(0x2000u + byte, 0x11);
+  memory.iop_write8(0x2000, 8); memory.iop_write8(0x2001, 1); // 28 samples +16, END.
+  memory.iop_write16(0x1F90019A, 0x20);
+  memory.iop_write16(0x1F9001AA, 0x100);
+  memory.iop_write32(0x1F8010C0, 0x2000);
+  memory.iop_write32(0x1F8010C4, 0x10004);
+  memory.iop_write32(0x1F8010C8, 0x01000201);
+  memory.advance(10000);
+  ps2vita::Spu2Voice voice;
+  check(voice.tick(memory) == 0 && !voice.active(), "SPU2 voice starts silent");
+  voice.configure(4096, 15, 0); voice.key_on(0x100);
+  check(voice.tick(memory) == 7 && voice.tick(memory) == 14 && voice.tick(memory) == 15,
+        "SPU2 voice applies attack gain to DMA-backed PCM");
+  for (unsigned i = 3; i < 28; ++i) voice.tick(memory);
+  check(voice.samples_consumed() == 28 && voice.active(), "SPU2 voice drains final block before stopping");
+  check(voice.tick(memory) == 0 && !voice.active() && !voice.decode_error(),
+        "SPU2 voice stops cleanly after terminal block");
+  voice.configure(2048, 15, 0); voice.key_on(0x100);
+  for (unsigned i = 0; i < 10; ++i) voice.tick(memory);
+  check(voice.samples_consumed() == 5, "SPU2 half pitch holds samples");
+  voice.configure(8192, 15, 0); voice.key_on(0x100);
+  for (unsigned i = 0; i < 10; ++i) voice.tick(memory);
+  check(voice.samples_consumed() == 19, "SPU2 double pitch advances source cursor twice");
+  voice.key_off(); voice.tick(memory); voice.tick(memory);
+  check(!voice.active(), "SPU2 voice key off releases envelope");
+  voice.configure(0, 15, 0); voice.key_on(0x100);
+  for (unsigned i = 0; i < 50; ++i) voice.tick(memory);
+  check(voice.samples_consumed() == 1 && voice.active(), "SPU2 zero pitch retains first sample");
+  memory.iop_write8(0x2000, 0x50); // Unsupported predictor.
+  memory.iop_write16(0x1F9001AA, 0x100);
+  memory.iop_write32(0x1F8010C0, 0x2000);
+  memory.iop_write32(0x1F8010C4, 0x10004);
+  memory.iop_write32(0x1F8010C8, 0x01000201);
+  memory.advance(10000);
+  voice.key_on(0x100);
+  check(voice.tick(memory) == 0 && !voice.active() && voice.decode_error() &&
+        voice.samples_consumed() == 0, "SPU2 malformed voice data fails silent with diagnostic");
 }
 
 void test_spu2_envelope() {
@@ -3669,6 +3711,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_spu2_voice();
   test_spu2_envelope();
   test_spu2_dma_stream();
   test_spu2_adpcm_stream();

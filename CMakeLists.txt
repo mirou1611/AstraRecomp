@@ -100,6 +100,7 @@ add_library(ps2core
   src/core/memory.cpp
   src/core/spu2_adpcm.cpp
   src/core/spu2_envelope.cpp
+  src/core/spu2_voice.cpp
   src/core/vif.cpp
   src/core/vu.cpp
 )
