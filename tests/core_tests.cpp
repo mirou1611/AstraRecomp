@@ -23,6 +23,42 @@ void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
 }
 
+void test_spu2_adpcm_stream() {
+  ps2vita::Spu2AdpcmStream stream;
+  ps2vita::Spu2AdpcmBlock output;
+  std::array<std::uint8_t, 16> block{};
+  check(!stream.decode_next(block, output), "SPU2 stream initially inactive");
+  stream.start(0x1FFFFFu);
+  check(stream.next_word_address() == 0xFFFF8u, "SPU2 stream masks and aligns word address");
+  block[0] = 8; // +16 on every sample, predictor zero.
+  for (unsigned i = 2; i < block.size(); ++i) block[i] = 0x11;
+  check(stream.decode_next(block, output) && output.samples[27] == 16 &&
+        stream.next_word_address() == 0, "SPU2 stream advances eight words and wraps RAM");
+  block.fill(0); block[0] = 0x10; block[1] = 4;
+  check(stream.decode_next(block, output) && output.samples[0] == 15 &&
+        output.samples[1] == 14 && stream.loop_word_address() == 0 &&
+        stream.next_word_address() == 8, "SPU2 stream carries predictor history and records loop start");
+  block[1] = 3;
+  check(stream.decode_next(block, output) && stream.active() && stream.encountered_end() &&
+        stream.next_word_address() == 0, "SPU2 stream loop-end repeats");
+  stream.set_loop_address(0x127u); block[1] = 7;
+  check(stream.decode_next(block, output) && stream.next_word_address() == 0x120u,
+        "SPU2 explicit loop address overrides encoded loop start");
+  block[1] = 1;
+  check(stream.decode_next(block, output) && !stream.active() && stream.encountered_end(),
+        "SPU2 nonrepeating end stops functional stream");
+  const auto saved = output.samples;
+  check(!stream.decode_next(block, output) && output.samples == saved,
+        "SPU2 stopped stream leaves output intact");
+  stream.start(0x80); block[0] = 0x50; block[1] = 7;
+  check(!stream.decode_next(block, output) && stream.next_word_address() == 0x80 &&
+        stream.loop_word_address() == 0x80 && !stream.encountered_end() && stream.active() &&
+        output.samples == saved, "SPU2 malformed block does not advance stream state");
+  block.fill(0); block[0] = 0x10; block[1] = 4;
+  check(stream.decode_next(block, output) && output.samples[0] == 0 &&
+        stream.loop_word_address() == 0x80, "SPU2 restart clears history and manual loop override");
+}
+
 void test_gs_alpha_test() {
   ps2vita::Gs gs;
   for (unsigned mode = 0; mode < 8; ++mode) {
@@ -3566,6 +3602,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_spu2_adpcm_stream();
   test_gs_alpha_test();
   test_gs_blending();
   test_gif_blend_registers();

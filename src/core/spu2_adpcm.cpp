@@ -38,4 +38,17 @@ bool decode_spu2_adpcm(const std::array<std::uint8_t, 16>& encoded,
   output = decoded;
   return true;
 }
+bool Spu2AdpcmStream::decode_next(const std::array<std::uint8_t, 16>& encoded,
+                                Spu2AdpcmBlock& output) {
+  if (!active_ || !decode_spu2_adpcm(encoded, history_, output)) return false;
+  if ((output.flags & 4u) != 0u && !manual_loop_) loop_ = next_;
+  if ((output.flags & 1u) != 0u) {
+    ended_ = true;
+    next_ = loop_;
+    active_ = (output.flags & 2u) != 0u;
+  } else {
+    next_ = (next_ + 8u) & 0xFFFF8u;
+  }
+  return true;
+}
 } // namespace ps2vita
