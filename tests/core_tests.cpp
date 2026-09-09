@@ -7,6 +7,7 @@
 #include "ps2vita/vif.hpp"
 #include "ps2vita/vu.hpp"
 #include "ps2vita/spu2_adpcm.hpp"
+#include "ps2vita/spu2_envelope.hpp"
 
 #include <array>
 #include <cstdint>
@@ -21,6 +22,43 @@ int failures = 0;
 
 void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
+}
+
+void test_spu2_envelope() {
+  ps2vita::Spu2Envelope env;
+  using Phase = ps2vita::Spu2Envelope::Phase;
+  env.key_off();
+  check(env.tick() == 0 && env.phase() == Phase::Stopped, "SPU2 inactive envelope is silent");
+  env.configure(0, 0); env.key_on();
+  check(env.tick() == 14336 && env.tick() == 28672 && env.tick() == 32767 &&
+        env.phase() == Phase::Decay, "SPU2 fastest linear attack clips and enters decay");
+  check(env.tick() == 16383 && env.tick() == 8191 && env.tick() == 4095 &&
+        env.tick() == 2047 && env.phase() == Phase::Sustain,
+        "SPU2 exponential decay reaches sustain target");
+  env.key_off();
+  check(env.tick() == 0 && env.phase() == Phase::Stopped, "SPU2 linear release terminates");
+  env.configure(12u << 10, 0); env.key_on();
+  check(env.tick() == 0 && env.tick() == 7 && env.tick() == 7 && env.tick() == 14,
+        "SPU2 slow attack updates at two-sample intervals");
+  env.configure(0x8000u, 0); env.key_on();
+  check(env.tick() == 14336 && env.tick() == 28672, "SPU2 exponential attack starts at linear rate");
+  check(env.tick() == 28672 && env.tick() == 28672 && env.tick() == 28672 &&
+        env.tick() == 32767, "SPU2 exponential attack slows above 6000");
+  env.configure(0, 0x20u); env.key_off();
+  check(env.tick() == 16383 && env.tick() == 8191, "SPU2 exponential release scales by level");
+  for (unsigned i = 0; i < 20; ++i) env.tick();
+  check(env.phase() == Phase::Stopped && env.level() == 0, "SPU2 exponential release reaches silence");
+  env.key_on();
+  check(env.level() == 0 && env.phase() == Phase::Attack, "SPU2 retrigger resets level and phase");
+  env.configure(15u, 0); env.key_on();
+  for (unsigned i = 0; i < 4; ++i) env.tick();
+  check(env.phase() == Phase::Sustain && env.level() == 16383 && env.tick() == 30719 &&
+        env.tick() == 32767 && env.phase() == Phase::Sustain,
+        "SPU2 increasing sustain saturates without leaving sustain");
+  env.configure(15u, 0x4000u); env.key_on();
+  for (unsigned i = 0; i < 4; ++i) env.tick();
+  check(env.tick() == 0 && env.phase() == Phase::Stopped,
+        "SPU2 decreasing sustain terminates at zero");
 }
 
 void test_spu2_dma_stream() {
@@ -3631,6 +3669,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_spu2_envelope();
   test_spu2_dma_stream();
   test_spu2_adpcm_stream();
   test_gs_alpha_test();
