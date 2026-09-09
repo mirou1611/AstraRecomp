@@ -2839,6 +2839,7 @@ void test_vu1_sqi() {
   memory.write32(ps2vita::Memory::kVu1MicroBase, 0x81E3637Du);
   memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
   ps2vita::Vu1 vu(memory);
+  vu.enable_store_trace(true);
   vu.state().vi[3] = 7u;
   vu.state().vf[12] = {{1u, 2u, 3u, 4u}};
   vu.start(0u);
@@ -2847,6 +2848,18 @@ void test_vu1_sqi() {
         memory.read32(ps2vita::Memory::kVu1DataBase + 7u * 16u) == 1u &&
         memory.read32(ps2vita::Memory::kVu1DataBase + 7u * 16u + 12u) == 4u,
         "VU1 SQI stores selected lanes and increments its address register");
+  check(vu.store_records().size() == 4 && vu.store_records()[0].pair == 0 &&
+        vu.store_records()[0].pc == 0 && vu.store_records()[0].address == 0x70 &&
+        vu.store_records()[0].value == 1 && vu.dropped_store_records() == 0,
+        "VU1 store trace records issue pair, PC, wrapped address and value");
+  vu.reset();
+  check(vu.store_records().empty() && vu.dropped_store_records() == 0,
+        "VU1 reset clears store provenance");
+  for (unsigned pair = 0; pair < 1025; ++pair) { vu.start(0); vu.run(1); }
+  check(vu.store_records().size() == 4096 && vu.dropped_store_records() == 4,
+        "VU1 store trace is bounded and reports truncation");
+  vu.enable_store_trace(false); vu.start(0); vu.run(1);
+  check(vu.dropped_store_records() == 4, "VU1 disabled store trace stays unchanged");
 }
 
 void test_vu1_xgkick_packet() {

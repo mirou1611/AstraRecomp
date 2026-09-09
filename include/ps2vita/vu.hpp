@@ -18,6 +18,11 @@ struct Vu1State {
   std::uint16_t mac = 0;
   std::uint16_t pc = 0;
 };
+struct Vu1StoreRecord {
+  std::uint64_t pair = 0;
+  std::uint16_t pc = 0, address = 0;
+  std::uint32_t value = 0;
+};
 
 // Functional VU1 micro-mode correctness oracle. Timing and pipeline hazards are
 // added as guest software exposes them; instruction pairs remain explicit.
@@ -30,6 +35,10 @@ public:
   void set_top(std::uint16_t top) { top_ = top & 0x3FFu; }
   void run(std::uint64_t max_pairs);
   bool pop_path1_packet(std::vector<std::uint8_t>& packet);
+  void enable_store_trace(bool enabled) { trace_stores_ = enabled; }
+  const std::vector<Vu1StoreRecord>& store_records() const { return store_records_; }
+  std::uint64_t dropped_store_records() const { return dropped_store_records_; }
+  std::uint64_t first_rejected_pair() const { return first_rejected_pair_; }
 
   Vu1State& state() { return state_; }
   const Vu1State& state() const { return state_; }
@@ -60,9 +69,13 @@ private:
   bool execute_lower(std::uint32_t code);
   bool execute_upper(std::uint32_t code);
   bool kick_gif(unsigned address_reg);
+  void store_data(std::uint32_t address, std::uint32_t value);
 
   Memory& memory_;
   Vu1State state_{};
+  bool trace_stores_ = false;
+  std::vector<Vu1StoreRecord> store_records_;
+  std::uint64_t dropped_store_records_ = 0, first_rejected_pair_ = 0;
   std::array<std::array<std::uint32_t, 4>, 32> lower_vf_snapshot_{};
   bool running_ = false;
   bool branch_pending_ = false;

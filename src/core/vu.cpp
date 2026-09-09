@@ -58,6 +58,7 @@ std::uint32_t float_to_int(std::uint32_t bits, unsigned scale) {
 } // namespace
 
 void Vu1::reset() {
+  store_records_.clear(); dropped_store_records_ = 0; first_rejected_pair_ = 0;
   state_ = {};
   state_.vf[0][3] = 0x3F800000u;
   running_ = false;
@@ -150,6 +151,15 @@ bool Vu1::step() {
   return true;
 }
 
+void Vu1::store_data(std::uint32_t address, std::uint32_t value) {
+  memory_.write32(address, value);
+  if (!trace_stores_) return;
+  if (store_records_.size() < 4096u)
+    store_records_.push_back({pairs_executed_, state_.pc,
+        static_cast<std::uint16_t>((address - Memory::kVu1DataBase) & 0x3FFFu), value});
+  else ++dropped_store_records_;
+}
+
 bool Vu1::execute_lower(std::uint32_t code) {
   const auto group = code >> 25;
   const auto it = static_cast<unsigned>((code >> 16) & 0xFu);
@@ -164,7 +174,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
     for (unsigned lane = 0; lane < 4u; ++lane) {
       if ((code & (1u << (24u - lane))) == 0u) continue;
       const auto address = Memory::kVu1DataBase + qword * 16u + lane * 4u;
-      if (store) memory_.write32(address, lower_vf_snapshot_[vector_reg][lane]);
+      if (store) store_data(address, lower_vf_snapshot_[vector_reg][lane]);
       else if (vector_reg != 0u) state_.vf[vector_reg][lane] = memory_.read32(address);
     }
     return true;
@@ -283,7 +293,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
     for (unsigned lane = 0; lane < 4u; ++lane) {
       const auto mask = 1u << (24u - lane);
       if ((code & mask) != 0u)
-        memory_.write32(Memory::kVu1DataBase + qword * 16u + lane * 4u,
+        store_data(Memory::kVu1DataBase + qword * 16u + lane * 4u,
                         lower_vf_snapshot_[fs][lane]);
     }
     if (address_reg != 0u) ++state_.vi[address_reg];
@@ -342,6 +352,7 @@ bool Vu1::kick_gif(unsigned address_reg) {
     else payload_size = std::uint64_t{loops} * 16u;
     if (payload_size > 0x3FF0u) {
       if (path1_tags_rejected_ == 0u) {
+        first_rejected_pair_ = pairs_executed_;
         first_rejected_tag_ = tag;
         first_rejected_address_ = static_cast<std::uint16_t>((offset - 16u) & 0x3FFFu);
         first_rejected_pc_ = state_.pc;

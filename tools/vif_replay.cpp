@@ -20,6 +20,7 @@ int main(int argc, char** argv) {
   if (!input.read(reinterpret_cast<char*>(data.data()), data.size())) return 2;
   ps2vita::Memory memory;
   ps2vita::Vif1 vif(memory);
+  vif.vu1().enable_store_trace(true);
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
   const bool accepted = vif.submit(data.data(), data.size());
@@ -39,6 +40,18 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(vu.first_rejected_tag()),
       static_cast<unsigned long long>(gif.triangles_emitted()));
   std::ofstream image(argv[2], std::ios::binary | std::ios::trunc);
+  std::printf("store_trace records=%zu dropped=%llu reject_pair=%llu\n",
+      vu.store_records().size(), static_cast<unsigned long long>(vu.dropped_store_records()),
+      static_cast<unsigned long long>(vu.first_rejected_pair()));
+  if (vu.path1_tags_rejected() != 0u) {
+    const unsigned span = ((vu.first_rejected_address() - vu.first_rejected_kick_start()) & 0x3FFFu) + 16u;
+    for (const auto& record : vu.store_records()) {
+      if (((record.address - vu.first_rejected_kick_start()) & 0x3FFFu) >= span) continue;
+      std::printf("packet_store pair=%llu pc=%04X address=%04X value=%08X relation=%s\n",
+          static_cast<unsigned long long>(record.pair), record.pc, record.address, record.value,
+          record.pair < vu.first_rejected_pair() ? "before" : "after_or_same");
+    }
+  }
   const bool written = ps2vita::write_framebuffer_ppm(image, gs);
   image.close();
   if (!written || !image) return 2;
