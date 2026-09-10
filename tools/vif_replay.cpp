@@ -40,10 +40,11 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(vu.first_rejected_tag()),
       static_cast<unsigned long long>(gif.triangles_emitted()));
   std::ofstream image(argv[2], std::ios::binary | std::ios::trunc);
-  std::printf("vu_timing cycles=%llu vf_stalls=%llu q_stalls=%llu\n",
+  std::printf("vu_timing cycles=%llu vf_stalls=%llu q_stalls=%llu xgkick_stalls=%llu\n",
       static_cast<unsigned long long>(vu.cycles_executed()),
       static_cast<unsigned long long>(vu.vf_stall_cycles()),
-      static_cast<unsigned long long>(vu.q_stall_cycles()));
+      static_cast<unsigned long long>(vu.q_stall_cycles()),
+      static_cast<unsigned long long>(vu.xgkick_stall_cycles()));
   std::printf("store_trace records=%zu dropped=%llu reject_pair=%llu\n",
       vu.store_records().size(), static_cast<unsigned long long>(vu.dropped_store_records()),
       static_cast<unsigned long long>(vu.first_rejected_pair()));

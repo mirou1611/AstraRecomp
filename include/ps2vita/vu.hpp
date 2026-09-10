@@ -43,6 +43,8 @@ public:
   std::uint64_t cycles_executed() const { return cycles_; }
   std::uint64_t vf_stall_cycles() const { return vf_stall_cycles_; }
   std::uint64_t q_stall_cycles() const { return q_stall_cycles_; }
+  std::uint64_t xgkick_stall_cycles() const { return xgkick_stall_cycles_; }
+  bool path1_active() const { return kick_active_; }
 
   Vu1State& state() { return state_; }
   const Vu1State& state() const { return state_; }
@@ -73,6 +75,7 @@ private:
   bool execute_lower(std::uint32_t code);
   bool execute_upper(std::uint32_t code);
   bool kick_gif(unsigned address_reg);
+  void transfer_path1(bool flush);
   void store_data(std::uint32_t address, std::uint32_t value);
 
   Memory& memory_;
@@ -111,6 +114,12 @@ private:
   std::array<std::uint16_t, 4> mac_pipeline_{};
   unsigned mac_pipeline_slot_ = 0;
   std::deque<std::vector<std::uint8_t>> path1_packets_;
+  bool kick_active_ = false, kick_eop_ = false;
+  std::uint16_t kick_offset_ = 0, kick_pc_ = 0;
+  unsigned kick_tag_index_ = 0, kick_remaining_ = 0;
+  std::uint64_t kick_next_cycle_ = 0, kick_previous_tag_ = 0;
+  std::uint64_t kick_tag_ = 0, xgkick_stall_cycles_ = 0;
+  std::vector<std::uint8_t> kick_packet_;
 };
 
 } // namespace ps2vita

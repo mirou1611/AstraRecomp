@@ -667,12 +667,14 @@ void test_vif_direct() {
   ps2vita::Memory ordered_memory;
   ps2vita::Vif1 ordered_vif(ordered_memory);
   ordered_memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800016FCu);
-  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x400002FFu);
+  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x2FFu);
   for (unsigned i = 0; i < color.size(); ++i)
     ordered_memory.write64(ps2vita::Memory::kVu1DataBase + 64u + i * 8u, color[i]);
   ordered_vif.vu1().state().vi[2] = 4u;
   ordered_vif.vu1().start(0u);
-  ordered_vif.vu1().run(1u);
+  ordered_vif.vu1().run(2u); // Finish microprogram and its outstanding transfer.
   check(ordered_vif.submit(bytes + 44u, 36u), "DIRECT accepts payload after earlier PATH1");
   ps2vita::Gs ordered_gs;
   ps2vita::Gif ordered_gif(ordered_gs);
@@ -2888,7 +2890,9 @@ void test_vu1_sqi() {
 void test_vu1_xgkick_packet() {
   ps2vita::Memory memory;
   memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800016FCu);
-  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x400002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x2FFu);
   const auto packet_address = ps2vita::Memory::kVu1DataBase + 4u * 16u;
   memory.write64(packet_address, (1ull << 60) | (1ull << 15) | 1ull);
   memory.write64(packet_address + 8u, 0xEull);
@@ -2900,16 +2904,19 @@ void test_vu1_xgkick_packet() {
   vu.start(0u);
   vu.run(1u);
   std::vector<std::uint8_t> packet;
+  check(vu.path1_active() && !vu.pop_path1_packet(packet),
+        "VU1 XGKICK does not snapshot the packet on issue");
+  vu.run(1u);
   std::uint64_t payload = 0;
   check(vu.pop_path1_packet(packet) && packet.size() == 32u,
-        "VU1 XGKICK snapshots one complete EOP GIF packet");
+        "VU1 program end drains one complete EOP GIF packet");
   if (packet.size() == 32u) std::memcpy(&payload, packet.data() + 16u, 8u);
   check(payload == 0x0123456789ABCDEFull,
         "VU1 XGKICK preserves path-1 GIF payload bytes");
   const auto oversized = (1ull << 60) | (1ull << 15) | 0x400ull;
   memory.write64(packet_address, oversized);
   vu.start(0u);
-  vu.run(1u);
+  vu.run(2u);
   check(vu.path1_tags_rejected() == 1u && vu.first_rejected_tag() == oversized &&
         vu.first_rejected_address() == 64u,
         "XGKICK records the exact tag and address exceeding its capture limit");
@@ -2917,10 +2924,12 @@ void test_vu1_xgkick_packet() {
   memory.write64(packet_address, 1ull << 60); // Empty non-EOP tag.
   memory.write64(packet_address + 16u, oversized);
   memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x800016FCu);
-  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x400002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 16u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 20u, 0x2FFu);
   vu.state().vi[2] = 4u;
   vu.start(8u);
-  vu.run(1u);
+  vu.run(2u);
   check(vu.first_rejected_address() == 80u && vu.first_rejected_kick_start() == 64u &&
         vu.first_rejected_tag_index() == 1u && vu.first_rejected_pc() == 8u &&
         vu.first_rejected_previous_tag() == (1ull << 60),
@@ -2932,6 +2941,92 @@ void test_vu1_xgkick_packet() {
   vu.reset();
   check(vu.first_rejected_kick_start() == 0u && vu.first_rejected_previous_tag() == 0u,
         "VU reset clears rejection provenance");
+
+  // Transfer a wrapped packet while its producer modifies unread RAM. The
+  // already-read header must remain immutable, but payload is sampled later.
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  const auto data = ps2vita::Memory::kVu1DataBase;
+  for (unsigned pair = 0; pair < 8; ++pair) {
+    memory.write32(micro + pair * 8, 0x8000033Cu);
+    memory.write32(micro + pair * 8 + 4, 0x2FFu);
+  }
+  memory.write32(micro, 0x800016FCu);
+  memory.write64(data + 0x3FF0, (1ull << 60) | 0x8001u);
+  memory.write64(data + 0x3FF8, 0xE);
+  memory.write64(data, 0x1111u);
+  vu.state().vi[2] = 0x3FF;
+  vu.start(0); vu.run(3);
+  check(vu.path1_active() && !vu.pop_path1_packet(packet),
+        "XGKICK two-cycle reads leave payload pending after header");
+  memory.write64(data + 0x3FF0, oversized);
+  memory.write64(data, 0x2222u);
+  vu.run(2);
+  check(!vu.path1_active() && vu.pop_path1_packet(packet) && packet.size() == 32,
+        "XGKICK wraps data RAM and completes without program termination");
+  payload = 0;
+  if (packet.size() == 32) std::memcpy(&payload, packet.data() + 16, 8);
+  check(payload == 0x2222u && packet.size() == 32 && packet[0] == 1 && vu.path1_tags_rejected() == 0,
+        "XGKICK samples late payload writes but retains consumed header");
+  vu.start(0); vu.run(1);
+  vu.reset(); vu.start(8); vu.run(6);
+  check(!vu.path1_active() && !vu.pop_path1_packet(packet),
+        "VU reset cancels pending XGKICK without leaking packets");
+
+  vu.reset();
+  memory.write32(micro + 8, 0x800016FCu); // A second kick drains the first.
+  memory.write64(data + 64, (1ull << 60) | 0x8001u);
+  memory.write64(data + 72, 0xE);
+  memory.write64(data + 80, 0x3333u);
+  vu.state().vi[2] = 4;
+  vu.start(0); vu.run(2);
+  check(vu.pop_path1_packet(packet) && vu.path1_active() && vu.xgkick_stall_cycles() == 3,
+        "Second XGKICK drains prior transfer before starting a new one");
+  memory.write64(data + 80, 0x4444u);
+  vu.run(4);
+  check(vu.pop_path1_packet(packet) && !vu.path1_active(),
+        "Second XGKICK completes its own transfer");
+  payload = 0;
+  if (packet.size() == 32) std::memcpy(&payload, packet.data() + 16, 8);
+  check(payload == 0x4444u, "Second XGKICK samples its own later payload");
+
+  vu.reset();
+  memory.write32(micro + 8, 0x8000033Cu);
+  memory.write64(data + 64, 1ull << 60); // Empty tag, next header not ready yet.
+  memory.write64(data + 80, oversized);
+  vu.state().vi[2] = 4;
+  vu.start(0); vu.run(3);
+  check(vu.pop_path1_packet(packet) && packet.size() == 16 && vu.path1_active(),
+        "XGKICK emits empty non-EOP tag without reading the next header early");
+  memory.write64(data + 80, 0x8000u); // Producer supplies an empty EOP header.
+  vu.run(2);
+  check(vu.pop_path1_packet(packet) && packet.size() == 16 &&
+        !vu.path1_active() && vu.path1_tags_rejected() == 0,
+        "XGKICK reads chained headers at transfer time");
+
+  vu.reset();
+  memory.write64(data + 64, (1ull << 60) | 0x8001u);
+  memory.write64(data + 80, 0);
+  memory.write32(micro + 16, 0x81E3637Du); // SQI vf12,(vi3++) after header read.
+  vu.state().vi[2] = 4;
+  vu.state().vi[3] = 5;
+  vu.state().vf[12] = {{0x1234u, 0, 0, 0}};
+  vu.start(0); vu.run(5);
+  check(vu.pop_path1_packet(packet) && packet.size() == 32,
+        "XGKICK completes concurrently with guest SQI producer");
+  payload = 0;
+  if (packet.size() == 32) std::memcpy(&payload, packet.data() + 16, 8);
+  check(payload == 0x1234u && vu.state().vi[3] == 6,
+        "XGKICK payload includes guest store issued after kick");
+
+  vu.reset();
+  memory.write32(micro + 4, 0x400002FFu);
+  memory.write32(micro + 8, 0x8000033Cu);
+  for (unsigned qword = 0; qword <= 256; ++qword)
+    memory.write64(data + qword * 16, 0); // Unterminated empty-tag chain.
+  vu.start(0); vu.run(2);
+  check(!vu.path1_active() && vu.path1_tags_queued() == 256 &&
+        vu.path1_tags_rejected() == 1 && vu.first_rejected_tag_index() == 256,
+        "Unterminated XGKICK remains bounded during end drain");
 }
 
 void test_vif1_scratchpad_dma() {

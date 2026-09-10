@@ -124,6 +124,11 @@ void Vu1::reset() {
   mac_pipeline_.fill(0u);
   mac_pipeline_slot_ = 0u;
   path1_packets_.clear();
+  kick_active_ = kick_eop_ = false;
+  kick_offset_ = kick_pc_ = 0;
+  kick_tag_index_ = kick_remaining_ = 0;
+  kick_next_cycle_ = kick_previous_tag_ = kick_tag_ = xgkick_stall_cycles_ = 0;
+  kick_packet_.clear();
 }
 
 void Vu1::start(std::uint16_t address) {
@@ -176,6 +181,7 @@ bool Vu1::step() {
       ++cycles_; ++q_stall_cycles_;
     }
   }
+  transfer_path1(false);
   if (q_pending_ && cycles_ >= q_ready_) {
     state_.q = pending_q_;
     q_pending_ = false;
@@ -237,6 +243,7 @@ bool Vu1::step() {
       state_.q = pending_q_;
       q_pending_ = false;
     }
+    transfer_path1(true);
     running_ = false;
   }
   return true;
@@ -419,57 +426,85 @@ bool Vu1::execute_lower(std::uint32_t code) {
 }
 
 bool Vu1::kick_gif(unsigned address_reg) {
-  auto offset = static_cast<std::uint32_t>(state_.vi[address_reg] & 0x3FFu) * 16u;
-  last_kick_address_ = static_cast<std::uint16_t>(offset);
+  transfer_path1(true);
+  kick_offset_ = static_cast<std::uint16_t>((state_.vi[address_reg] & 0x3FFu) * 16u);
+  last_kick_address_ = kick_offset_;
   last_kick_tag_ = 0;
-  std::uint64_t previous_tag = 0;
-  for (unsigned tag_index = 0; tag_index < 256u; ++tag_index) {
+  kick_pc_ = state_.pc;
+  kick_tag_index_ = kick_remaining_ = 0;
+  kick_previous_tag_ = 0;
+  kick_packet_.clear();
+  kick_active_ = true;
+  // One qword per two modeled cycles, with the issue pair counting as one.
+  // No GIF arbitration/backpressure is modeled here yet.
+  kick_next_cycle_ = cycles_ + 2u;
+  return true;
+}
+
+void Vu1::transfer_path1(bool flush) {
+  while (kick_active_ && (flush || cycles_ >= kick_next_cycle_)) {
+    if (cycles_ < kick_next_cycle_) {
+      const auto wait = kick_next_cycle_ - cycles_;
+      for (std::uint64_t n = 0; n < wait; ++n) {
+        mac_pipeline_[mac_pipeline_slot_] = state_.mac;
+        mac_pipeline_slot_ = (mac_pipeline_slot_ + 1u) & 3u;
+      }
+      cycles_ = kick_next_cycle_;
+      xgkick_stall_cycles_ += wait;
+    }
     std::array<std::uint8_t, 16> tag_bytes{};
     for (unsigned byte = 0; byte < tag_bytes.size(); ++byte)
       tag_bytes[byte] = memory_.read8(
-          Memory::kVu1DataBase + ((offset + byte) & 0x3FFFu));
-    std::uint64_t tag = 0;
-    std::memcpy(&tag, tag_bytes.data(), sizeof(tag));
-    if (tag_index == 0u) last_kick_tag_ = tag;
-    std::vector<std::uint8_t> packet(tag_bytes.begin(), tag_bytes.end());
-    offset = (offset + 16u) & 0x3FFFu;
+          Memory::kVu1DataBase + ((kick_offset_ + byte) & 0x3FFFu));
+    if (kick_packet_.empty()) {
+      std::uint64_t tag = 0;
+      std::memcpy(&tag, tag_bytes.data(), sizeof(tag));
+      if (kick_tag_index_ == 0u) last_kick_tag_ = tag;
 
-    const auto loops = static_cast<std::uint32_t>(tag & 0x7FFFu);
-    const auto format = static_cast<unsigned>((tag >> 58) & 3u);
-    auto registers = static_cast<std::uint32_t>((tag >> 60) & 0xFu);
-    if (registers == 0u) registers = 16u;
-    std::uint64_t payload_size = 0;
-    if (format == 0u) payload_size = std::uint64_t{loops} * registers * 16u;
-    else if (format == 1u)
-      payload_size = ((std::uint64_t{loops} * registers + 1u) / 2u) * 16u;
-    else payload_size = std::uint64_t{loops} * 16u;
-    if (payload_size > 0x3FF0u) {
-      if (path1_tags_rejected_ == 0u) {
-        first_rejected_pair_ = pairs_executed_;
-        first_rejected_tag_ = tag;
-        first_rejected_address_ = static_cast<std::uint16_t>((offset - 16u) & 0x3FFFu);
-        first_rejected_pc_ = state_.pc;
-        first_rejected_kick_start_ = last_kick_address_;
-        first_rejected_tag_index_ = tag_index;
-        first_rejected_previous_tag_ = previous_tag;
-        for (unsigned word = 0; word < first_rejected_data_.size(); ++word)
-          first_rejected_data_[word] = memory_.read32(Memory::kVu1DataBase +
-              ((last_kick_address_ + word * 4u) & 0x3FFFu));
+      const auto loops = static_cast<std::uint32_t>(tag & 0x7FFFu);
+      const auto format = static_cast<unsigned>((tag >> 58) & 3u);
+      auto registers = static_cast<std::uint32_t>((tag >> 60) & 0xFu);
+      if (registers == 0u) registers = 16u;
+      std::uint64_t payload_size = 0;
+      if (format == 0u) payload_size = std::uint64_t{loops} * registers * 16u;
+      else if (format == 1u)
+        payload_size = ((std::uint64_t{loops} * registers + 1u) / 2u) * 16u;
+      else payload_size = std::uint64_t{loops} * 16u;
+      if (payload_size > 0x3FF0u || kick_tag_index_ >= 256u) {
+        if (path1_tags_rejected_ == 0u) {
+          first_rejected_pair_ = pairs_executed_;
+          first_rejected_tag_ = tag;
+          first_rejected_address_ = kick_offset_;
+          first_rejected_pc_ = kick_pc_;
+          first_rejected_kick_start_ = last_kick_address_;
+          first_rejected_tag_index_ = kick_tag_index_;
+          first_rejected_previous_tag_ = kick_previous_tag_;
+          for (unsigned word = 0; word < first_rejected_data_.size(); ++word)
+            first_rejected_data_[word] = memory_.read32(Memory::kVu1DataBase +
+                ((last_kick_address_ + word * 4u) & 0x3FFFu));
+        }
+        ++path1_tags_rejected_;
+        kick_active_ = false;
+        return;
       }
-      ++path1_tags_rejected_;
-      return true;
+      kick_remaining_ = static_cast<unsigned>(payload_size / 16u);
+      kick_eop_ = (tag & (1ull << 15)) != 0u;
+      kick_tag_ = tag;
+    } else {
+      --kick_remaining_;
     }
-    for (std::uint64_t byte = 0; byte < payload_size; ++byte)
-      packet.push_back(memory_.read8(Memory::kVu1DataBase +
-          ((offset + static_cast<std::uint32_t>(byte)) & 0x3FFFu)));
-    offset = (offset + static_cast<std::uint32_t>(payload_size)) & 0x3FFFu;
-    path1_packets_.push_back(std::move(packet));
-    ++path1_tags_queued_;
-    previous_tag = tag;
-    if ((tag & (1ull << 15)) != 0u) return true;
+    kick_packet_.insert(kick_packet_.end(), tag_bytes.begin(), tag_bytes.end());
+    kick_offset_ = (kick_offset_ + 16u) & 0x3FFFu;
+    kick_next_cycle_ += 2u;
+    if (kick_remaining_ == 0u) {
+      path1_packets_.push_back(std::move(kick_packet_));
+      kick_packet_.clear();
+      ++path1_tags_queued_;
+      ++kick_tag_index_;
+      kick_previous_tag_ = kick_tag_;
+      if (kick_eop_) kick_active_ = false;
+    }
   }
-  ++path1_tags_rejected_;
-  return true;
 }
 
 bool Vu1::pop_path1_packet(std::vector<std::uint8_t>& packet) {
