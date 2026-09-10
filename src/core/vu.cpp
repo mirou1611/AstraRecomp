@@ -225,7 +225,20 @@ bool Vu1::step() {
     mark_ready(lower_access);
   ++cycles_;
   state_.pc = apply_branch ? pending_target : sequential_pc;
-  if (apply_end) running_ = false;
+  if (apply_end) {
+    // Retire a pending division after the E-bit delay pair, not when E is
+    // first encountered. A host run budget is not a microprogram termination.
+    if (q_pending_) {
+      while (cycles_ < q_ready_) {
+        mac_pipeline_[mac_pipeline_slot_] = state_.mac;
+        mac_pipeline_slot_ = (mac_pipeline_slot_ + 1u) & 3u;
+        ++cycles_; ++q_stall_cycles_;
+      }
+      state_.q = pending_q_;
+      q_pending_ = false;
+    }
+    running_ = false;
+  }
   return true;
 }
 

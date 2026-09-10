@@ -3082,6 +3082,28 @@ void test_vu1_q_latency() {
   vu.start(0); vu.run(2);
   check(vu.cycles_executed() == 8 && vu.q_stall_cycles() == 6 && vu.state().q == 0x3F000000u,
         "VU1 consecutive DIV waits for previous division before issuing");
+  for (unsigned div_pair = 0; div_pair < 2; ++div_pair) {
+    vu.reset();
+    vu.state().q = 0x3F800000u;
+    vu.state().vf[24][3] = 0x40000000u;
+    memory.write32(micro, div_pair == 0 ? 0x81F803BCu : 0x8000033Cu);
+    memory.write32(micro + 4, 0x400002FFu);
+    memory.write32(micro + 8, div_pair == 1 ? 0x81F803BCu : 0x8000033Cu);
+    memory.write32(micro + 12, 0x2FFu);
+    vu.start(0); vu.run(1);
+    check(vu.running() && vu.state().q == 0x3F800000u && vu.cycles_executed() == 1,
+          "VU1 E bit and host budget do not retire Q before delay pair");
+    vu.run(1);
+    check(!vu.running() && vu.state().q == 0x3F000000u &&
+          vu.pairs_executed() == 2 && vu.cycles_executed() == 7 + div_pair &&
+          vu.q_stall_cycles() == 5 + div_pair,
+          "VU1 program end retires DIV from E pair or its delay pair");
+    memory.write32(micro + 16, 0x800003BFu);
+    memory.write32(micro + 20, 0x2FFu);
+    vu.resume(); vu.run(1);
+    check(vu.cycles_executed() == 8 + div_pair && vu.q_stall_cycles() == 5 + div_pair,
+          "VU1 resume does not wait again for retired division");
+  }
 }
 
 void test_vu1_div_mulq() {
