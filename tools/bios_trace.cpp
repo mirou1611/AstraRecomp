@@ -379,6 +379,7 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> vif_parameter_store_trace{};
   std::size_t vif_parameter_store_cursor = 0;
   bool vif_parameter_writer_captured = false;
+  unsigned vif_copy_probes = 0;
   std::array<StoreEntry, kTraceSize> syscall_store_trace{};
   std::array<StoreEntry, kTraceSize> sbus_store_trace{};
   std::array<StoreEntry, kTraceSize> dma_store_trace{};
@@ -597,6 +598,20 @@ int main(int argc, char** argv) {
       if (physical >= 0x00274200u && physical < 0x00274240u) {
         vif_parameter_store_trace[vif_parameter_store_cursor++ % kTraceSize] = {
             state.pc, instruction, address, state.gpr[source], state.gpr_hi[source]};
+        if (vif_copy_probes < 64u &&
+            (state.pc == 0x00100BD0u || state.pc == 0x00100BECu)) {
+          // Both observed copy paths increment a1 between LBU and SB. Only
+          // inspect plain RAM, never an arbitrary pointer into MMIO.
+          const auto copy_source = ee_physical_address(
+              static_cast<std::uint32_t>(state.gpr[5] - 1u));
+          if (copy_source < ps2vita::Memory::kRamSize) {
+            ++vif_copy_probes;
+            std::printf("vif_copy_byte pc=%08X destination=%08X source=%08X memory=%02X operand=%02X remaining=%llu\n",
+                state.pc, physical, copy_source, emulator.memory().read8(copy_source),
+                static_cast<unsigned>(state.gpr[source] & 0xFFu),
+                static_cast<unsigned long long>(state.gpr[4]));
+          }
+        }
         // BIOS-specific diagnostic only: preserve the byte writer's caller and
         // operands before subsequent execution destroys their provenance.
         if (!vif_parameter_writer_captured && state.pc == 0x00100BD0u) {
@@ -608,6 +623,20 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(state.gpr[reg]));
           for (std::uint32_t pc = 0x00100B80u; pc < 0x00100C20u; pc += 4u)
             std::printf("vif_writer_code[%08X]=%08X\n", pc, emulator.memory().read32(pc));
+          const auto decoder = ee_physical_address(static_cast<std::uint32_t>(state.gpr[7]));
+          if (decoder <= ps2vita::Memory::kRamSize - 32u) {
+            for (unsigned offset = 0; offset < 32; offset += 4)
+              std::printf("vif_decoder[%08X]=%08X\n", decoder + offset,
+                  emulator.memory().read32(decoder + offset));
+            const auto input = ee_physical_address(emulator.memory().read32(decoder + 20u));
+            if (input <= ps2vita::Memory::kRamSize - 16u ||
+                (input >= ps2vita::Memory::kBiosBase &&
+                 input <= ps2vita::Memory::kBiosBase + ps2vita::Memory::kBiosSize - 16u)) {
+              for (unsigned offset = 0; offset < 16; ++offset)
+                std::printf("vif_decoder_input[%08X]=%02X\n", input + offset,
+                    emulator.memory().read8(input + offset));
+            }
+          }
         }
       }
       if (physical >= 0x1C0003C0u && physical < 0x1C000420u) {

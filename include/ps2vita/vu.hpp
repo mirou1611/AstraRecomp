@@ -24,6 +24,16 @@ struct Vu1StoreRecord {
   std::uint16_t pc = 0, address = 0;
   std::uint32_t value = 0;
 };
+struct VuCauseRecord {
+  enum class Kind { Upper, LowerInput, Store } kind = Kind::Upper;
+  std::uint64_t pair = 0, cycle = 0;
+  std::uint32_t instruction = 0, value = 0;
+  std::uint16_t pc = 0, address = 0;
+  unsigned reg = 0, lane = 0, mask = 0;
+  std::array<std::uint32_t, 3> parents{};
+  bool incomplete = false;
+  bool accumulator = false;
+};
 
 // Functional VU1 micro-mode correctness oracle. Timing and pipeline hazards are
 // added as guest software exposes them; instruction pairs remain explicit.
@@ -37,6 +47,11 @@ public:
   void run(std::uint64_t max_pairs);
   bool pop_path1_packet(std::vector<std::uint8_t>& packet);
   void enable_store_trace(bool enabled) { trace_stores_ = enabled; }
+  void enable_causal_trace(bool enabled);
+  void invalidate_data_cause(std::uint32_t address);
+  const std::vector<VuCauseRecord>& causes() const { return causes_; }
+  const std::array<std::uint32_t, 4>& rejected_causes() const { return rejected_causes_; }
+  std::uint64_t dropped_causes() const { return dropped_causes_; }
   const std::vector<Vu1StoreRecord>& store_records() const { return store_records_; }
   std::uint64_t dropped_store_records() const { return dropped_store_records_; }
   std::uint64_t first_rejected_pair() const { return first_rejected_pair_; }
@@ -76,7 +91,9 @@ private:
   bool execute_upper(std::uint32_t code);
   bool kick_gif(unsigned address_reg);
   void transfer_path1(bool flush);
-  void store_data(std::uint32_t address, std::uint32_t value);
+  void store_data(std::uint32_t address, std::uint32_t value, unsigned reg, unsigned lane);
+  std::uint32_t add_cause(VuCauseRecord record);
+  void trace_upper(std::uint32_t code);
 
   Memory& memory_;
   Vu1State state_{};
@@ -120,6 +137,13 @@ private:
   std::uint64_t kick_next_cycle_ = 0, kick_previous_tag_ = 0;
   std::uint64_t kick_tag_ = 0, xgkick_stall_cycles_ = 0;
   std::vector<std::uint8_t> kick_packet_;
+  bool trace_causes_ = false;
+  std::vector<VuCauseRecord> causes_;
+  std::array<std::array<std::uint32_t, 4>, 32> vf_causes_{}, lower_causes_{};
+  std::array<std::uint32_t, 4> acc_causes_{}, rejected_causes_{};
+  std::array<std::uint32_t, 4096> data_causes_{};
+  std::uint64_t dropped_causes_ = 0;
+  std::uint32_t current_lower_ = 0;
 };
 
 } // namespace ps2vita

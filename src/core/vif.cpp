@@ -207,6 +207,7 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
             static_cast<std::uint32_t>((address + byte) & 0x3FFFu);
         const auto value = load32(data + cursor + byte);
         memory_.write32(destination, value);
+        vu1_.invalidate_data_cause(destination);
         if (trace_provenance_) {
           if (unpack_records_.size() < 4096u)
             unpack_records_.push_back({packets_submitted_, vu1_.pairs_executed(),

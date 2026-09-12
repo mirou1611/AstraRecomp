@@ -22,6 +22,7 @@ int main(int argc, char** argv) {
   ps2vita::Vif1 vif(memory);
   vif.enable_provenance_trace(true);
   vif.vu1().enable_store_trace(true);
+  vif.vu1().enable_causal_trace(true);
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
   const bool accepted = vif.submit(data.data(), data.size());
@@ -50,6 +51,32 @@ int main(int argc, char** argv) {
       vu.store_records().size(), static_cast<unsigned long long>(vu.dropped_store_records()),
       static_cast<unsigned long long>(vu.first_rejected_pair()));
   if (vu.path1_tags_rejected() != 0u) {
+    std::printf("causal_trace nodes=%zu dropped=%llu (id=0 means unknown; lower inputs and Q ancestry incomplete)\n",
+        vu.causes().size(), static_cast<unsigned long long>(vu.dropped_causes()));
+    std::vector<std::uint32_t> pending;
+    std::vector<bool> seen(vu.causes().size() + 1u);
+    for (unsigned lane = 0; lane < 4; ++lane) {
+      const auto root = vu.rejected_causes()[lane];
+      std::printf("tag_cause lane=%u generation=%u\n", lane, root);
+      if (root) pending.push_back(root);
+    }
+    unsigned shown = 0;
+    while (!pending.empty() && shown < 64u) {
+      const auto id = pending.back(); pending.pop_back();
+      if (id == 0 || id > vu.causes().size() || seen[id]) continue;
+      seen[id] = true; ++shown;
+      const auto& c = vu.causes()[id - 1u];
+      const char* kind = c.kind == ps2vita::VuCauseRecord::Kind::Store ?
+          ((c.instruction >> 25) == 0x40u ? "SQI" : "SQ") :
+          c.kind == ps2vita::VuCauseRecord::Kind::LowerInput ? "lower_input" : "upper";
+      std::printf("cause id=%u kind=%s pc=%04X instruction=%08X pair=%llu cycle=%llu address=%04X reg=%u lane=%u mask=%X value=%08X parents=%u,%u,%u incomplete=%u acc=%u\n",
+          id, kind, c.pc, c.instruction, static_cast<unsigned long long>(c.pair),
+          static_cast<unsigned long long>(c.cycle), c.address, c.reg, c.lane, c.mask,
+          c.value, c.parents[0], c.parents[1], c.parents[2], static_cast<unsigned>(c.incomplete),
+          static_cast<unsigned>(c.accumulator));
+      for (auto parent : c.parents) if (parent) pending.push_back(parent);
+    }
+    if (!pending.empty()) std::puts("causal_walk truncated at 64 nodes");
     const unsigned span = ((vu.first_rejected_address() - vu.first_rejected_kick_start()) & 0x3FFFu) + 16u;
     std::printf("vif_provenance unpack=%zu dropped=%llu runs=%zu dropped_runs=%llu\n",
         vif.unpack_records().size(), static_cast<unsigned long long>(vif.dropped_unpack_records()),

@@ -2962,6 +2962,71 @@ void test_vu1_sqi() {
   check(vu.dropped_store_records() == 4, "VU1 disabled store trace stays unchanged");
 }
 
+void test_vu1_causal_slice() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  const std::array<std::uint32_t, 6> lower{{0x8000033Cu, 0x8000033Cu,
+      0x81E3637Du, 0x800016FCu, 0x8000033Cu, 0x8000033Cu}};
+  const std::array<std::uint32_t, 6> upper{{
+      (15u << 21) | (2u << 16) | (1u << 11) | (3u << 6) | 0x28u,
+      (15u << 21) | (12u << 16) | (3u << 11) | (5u << 6) | 0x3Du,
+      0x2FFu, 0x2FFu, 0x400002FFu, 0x2FFu}};
+  for (unsigned i = 0; i < lower.size(); ++i) {
+    memory.write32(micro + i * 8, lower[i]); memory.write32(micro + i * 8 + 4, upper[i]);
+  }
+  vu.enable_causal_trace(true);
+  vu.state().vf[1][0] = vu.state().vf[2][0] = 0x40000000u;
+  vu.state().vi[2] = vu.state().vi[3] = 0x10;
+  vu.start(0); vu.run(6);
+  const auto root = vu.rejected_causes()[0];
+  check(vu.path1_tags_rejected() == 1 && root != 0 && vu.dropped_causes() == 0,
+        "Causal debugger preserves rejected tag's store generation");
+  if (root) {
+    const auto& store = vu.causes()[root - 1];
+    check(store.kind == ps2vita::VuCauseRecord::Kind::Store && store.pc == 16 &&
+          store.address == 0x100 && store.reg == 12 && store.value == 64 && store.mask == 15,
+          "Tag cause identifies source VF lane, instruction, mask and value");
+    check(store.parents[0] != 0, "Tag store links to VF producer");
+    if (store.parents[0]) {
+      const auto& convert = vu.causes()[store.parents[0] - 1];
+      check(convert.pc == 8 && convert.parents[0] != 0,
+            "Causal slice walks backward through conversion");
+      if (convert.parents[0]) {
+        const auto& add = vu.causes()[convert.parents[0] - 1];
+        check(add.pc == 0 && add.incomplete, "Causal slice stops explicitly at unknown initial inputs");
+      }
+    }
+    vu.invalidate_data_cause(ps2vita::Memory::kVu1DataBase + 0x100);
+    check(vu.rejected_causes()[0] == root, "Rejected cause snapshot survives later memory invalidation");
+  }
+  vu.reset();
+  check(vu.causes().empty() && vu.rejected_causes()[0] == 0, "VU reset clears causal generations");
+  vu.state().vf[1][0] = vu.state().vf[2][0] = 0x40000000u;
+  vu.state().vi[2] = vu.state().vi[3] = 0x10;
+  vu.start(0); vu.run(3);
+  vu.invalidate_data_cause(ps2vita::Memory::kVu1DataBase + 0x100);
+  vu.run(3);
+  check(vu.path1_tags_rejected() == 1 && vu.rejected_causes()[0] == 0,
+        "External data write invalidation prevents attributing stale VU ownership");
+  vu.reset();
+  memory.write32(micro, 0x8000033Cu);
+  memory.write32(micro + 4, (8u << 21) | (2u << 16) | (1u << 11) | (3u << 6) | 0x28u);
+  for (unsigned i = 0; i < 8200; ++i) { vu.start(0); vu.run(1); }
+  check(vu.causes().size() == 8192 && vu.dropped_causes() == 8,
+        "Causal storage is bounded without reusing generation IDs");
+  vu.enable_causal_trace(false); vu.start(0); vu.run(1);
+  check(vu.causes().empty(), "Disabled causal tracing has no retained or new nodes");
+  vu.reset(); vu.enable_causal_trace(true);
+  memory.write32(micro, 0x81E3637Du);
+  memory.write32(micro + 4, (8u << 21) | (2u << 16) | (12u << 11) | (12u << 6) | 0x28u);
+  vu.state().vf[12][0] = vu.state().vf[2][0] = 0x3F800000u;
+  vu.start(0); vu.run(1);
+  check(vu.causes().size() == 5 && vu.causes()[1].kind == ps2vita::VuCauseRecord::Kind::Store &&
+        vu.causes()[1].value == 0x3F800000u && vu.causes()[1].parents[0] == 0,
+        "Same-pair SQI ancestry uses old VF, not the paired upper producer");
+}
+
 void test_vu1_xgkick_packet() {
   ps2vita::Memory memory;
   memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800016FCu);
@@ -4224,6 +4289,7 @@ int main() {
   test_vif1_scratchpad_dma();
   test_vif1_v4_32_unpack();
   test_vif_provenance();
+  test_vu1_causal_slice();
   test_vu1_captured_prologue();
   test_vu1_captured_matrix_pair();
   test_vu1_sqi();

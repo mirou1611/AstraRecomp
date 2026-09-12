@@ -97,7 +97,60 @@ std::uint32_t float_to_int(std::uint32_t bits, unsigned scale) {
 
 } // namespace
 
+void Vu1::enable_causal_trace(bool enabled) {
+  trace_causes_ = enabled;
+  causes_.clear(); vf_causes_ = {}; lower_causes_ = {};
+  acc_causes_ = {}; data_causes_ = {}; rejected_causes_ = {};
+  dropped_causes_ = 0;
+}
+
+void Vu1::invalidate_data_cause(std::uint32_t address) {
+  if (trace_causes_)
+    data_causes_[((address - Memory::kVu1DataBase) & 0x3FFFu) / 4u] = 0;
+}
+
+std::uint32_t Vu1::add_cause(VuCauseRecord record) {
+  if (causes_.size() >= 8192u) { ++dropped_causes_; return 0; }
+  record.pc = state_.pc; record.pair = pairs_executed_; record.cycle = cycles_;
+  causes_.push_back(record);
+  return static_cast<std::uint32_t>(causes_.size()); // Zero is explicitly unknown.
+}
+
+void Vu1::trace_upper(std::uint32_t code) {
+  const unsigned fn = code & 63u, fd = (code >> 6) & 31u,
+      fs = (code >> 11) & 31u, ft = (code >> 16) & 31u;
+  const bool acc = fn >= 0x3Cu && (fd == 2u || fd == 6u);
+  const bool convert = fn >= 0x3Cu && fd == 5u;
+  const auto access = vector_access(code, true);
+  const unsigned dest = acc ? 0u : access.destination;
+  if (!acc && dest == 0u) return;
+  for (unsigned lane = 0; lane < 4; ++lane) {
+    if ((code & (1u << (24u - lane))) == 0u) continue;
+    VuCauseRecord record;
+    record.instruction = code; record.reg = dest; record.lane = lane;
+    record.accumulator = acc;
+    record.mask = (code >> 21) & 15u;
+    record.value = acc ? state_.acc[lane] : state_.vf[dest][lane];
+    record.parents[0] = lower_causes_[fs][lane];
+    record.incomplete = record.parents[0] == 0;
+    if (!convert && fn != 0x1Cu) {
+      const unsigned component = (acc || fn <= 0x13u) ? fn & 3u : lane;
+      record.parents[1] = lower_causes_[ft][component];
+      record.incomplete |= record.parents[1] == 0;
+    }
+    if ((fn >= 8u && fn <= 11u) || (acc && fd == 2u)) {
+      record.parents[2] = acc_causes_[lane];
+      record.incomplete |= record.parents[2] == 0;
+    }
+    if (fn == 0x1Cu) record.incomplete = true; // Q ancestry is not modeled yet.
+    const auto id = add_cause(record);
+    if (acc) acc_causes_[lane] = id;
+    else vf_causes_[dest][lane] = id;
+  }
+}
+
 void Vu1::reset() {
+  enable_causal_trace(trace_causes_);
   vf_ready_ = {}; cycles_ = vf_stall_cycles_ = 0;
   q_ready_ = q_stall_cycles_ = 0; pending_q_ = 0; q_pending_ = false;
   store_records_.clear(); dropped_store_records_ = 0; first_rejected_pair_ = 0;
@@ -191,12 +244,15 @@ bool Vu1::step() {
   end_pending_ = (upper & 0x40000000u) != 0u;
 
   lower_vf_snapshot_ = state_.vf;
+  current_lower_ = lower;
+  if (trace_causes_) lower_causes_ = vf_causes_;
   if (!execute_upper(upper)) {
     first_unsupported_upper_ = upper;
     running_ = false;
     return false;
   }
   // When I is set, the lower word is the immediate register payload.
+  if (trace_causes_) trace_upper(upper);
   if ((upper & 0x80000000u) != 0u) state_.i = lower;
   else {
     // The implemented upper writers use FD, except FTOI's FT. NOP and
@@ -213,6 +269,17 @@ bool Vu1::step() {
       first_unsupported_lower_ = lower;
       running_ = false;
       return false;
+    }
+    if (trace_causes_ && lower_dest != 0u && (upper_dest == 0u || upper_dest != lower_dest)) {
+      for (unsigned lane = 0; lane < 4; ++lane) {
+        if ((lower & (1u << (24u - lane))) == 0u) continue;
+        VuCauseRecord record;
+        record.kind = VuCauseRecord::Kind::LowerInput;
+        record.instruction = lower; record.reg = lower_dest; record.lane = lane;
+        record.mask = (lower >> 21) & 15u;
+        record.value = state_.vf[lower_dest][lane]; record.incomplete = true;
+        vf_causes_[lower_dest][lane] = add_cause(record);
+      }
     }
   }
 
@@ -249,8 +316,18 @@ bool Vu1::step() {
   return true;
 }
 
-void Vu1::store_data(std::uint32_t address, std::uint32_t value) {
+void Vu1::store_data(std::uint32_t address, std::uint32_t value, unsigned reg, unsigned lane) {
   memory_.write32(address, value);
+  if (trace_causes_) {
+    VuCauseRecord record;
+    record.kind = VuCauseRecord::Kind::Store;
+    record.instruction = current_lower_; record.value = value;
+    record.address = (address - Memory::kVu1DataBase) & 0x3FFFu;
+    record.reg = reg; record.lane = lane; record.mask = (current_lower_ >> 21) & 15u;
+    record.parents[0] = lower_causes_[reg][lane];
+    record.incomplete = record.parents[0] == 0;
+    data_causes_[record.address / 4u] = add_cause(record);
+  }
   if (!trace_stores_) return;
   if (store_records_.size() < 4096u)
     store_records_.push_back({pairs_executed_, cycles_, state_.pc,
@@ -272,7 +349,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
     for (unsigned lane = 0; lane < 4u; ++lane) {
       if ((code & (1u << (24u - lane))) == 0u) continue;
       const auto address = Memory::kVu1DataBase + qword * 16u + lane * 4u;
-      if (store) store_data(address, lower_vf_snapshot_[vector_reg][lane]);
+      if (store) store_data(address, lower_vf_snapshot_[vector_reg][lane], vector_reg, lane);
       else if (vector_reg != 0u) state_.vf[vector_reg][lane] = memory_.read32(address);
     }
     return true;
@@ -394,7 +471,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
       const auto mask = 1u << (24u - lane);
       if ((code & mask) != 0u)
         store_data(Memory::kVu1DataBase + qword * 16u + lane * 4u,
-                        lower_vf_snapshot_[fs][lane]);
+                        lower_vf_snapshot_[fs][lane], fs, lane);
     }
     if (address_reg != 0u) ++state_.vi[address_reg];
     return true;
@@ -479,6 +556,9 @@ void Vu1::transfer_path1(bool flush) {
           first_rejected_kick_start_ = last_kick_address_;
           first_rejected_tag_index_ = kick_tag_index_;
           first_rejected_previous_tag_ = kick_previous_tag_;
+          if (trace_causes_)
+            for (unsigned lane = 0; lane < 4; ++lane)
+              rejected_causes_[lane] = data_causes_[((kick_offset_ + lane * 4u) & 0x3FFFu) / 4u];
           for (unsigned word = 0; word < first_rejected_data_.size(); ++word)
             first_rejected_data_[word] = memory_.read32(Memory::kVu1DataBase +
                 ((last_kick_address_ + word * 4u) & 0x3FFFu));
