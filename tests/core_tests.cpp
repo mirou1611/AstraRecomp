@@ -1731,6 +1731,38 @@ void test_unaligned_memory_ops() {
   check(memory.read32(0x3000) == 0xBBCCDD11, "SWR little-endian merge");
 }
 
+void test_ee_overlapping_backreference_copy() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  // Synthetic forward byte-copy loop: overlapping source bytes must be read
+  // after earlier iterations have written them, as required by LZ backrefs.
+  const std::array<std::uint32_t, 7> code{{
+      (0x24u << 26) | (5u << 21) | (2u << 16), // LBU v0,0(a1)
+      (0x28u << 26) | (16u << 21) | (2u << 16), // SB v0,0(s0)
+      (9u << 26) | (5u << 21) | (5u << 16) | 1u,
+      (9u << 26) | (16u << 21) | (16u << 16) | 1u,
+      (9u << 26) | (4u << 21) | (4u << 16) | 0xFFFFu,
+      (5u << 26) | (4u << 21) | 0xFFFAu, // BNE a0,zero,loop
+      0u,
+  }};
+  for (unsigned i = 0; i < code.size(); ++i) memory.write32(0x1000u + i * 4, code[i]);
+  for (unsigned distance : {1u, 3u}) {
+    for (unsigned i = 0; i < 32; ++i) memory.write8(0x2000u + i, 0);
+    for (unsigned i = 0; i < distance; ++i) memory.write8(0x2000u + i, 0x80u + i);
+    cpu.reset(0x1000u);
+    cpu.state().gpr[4] = 9;
+    cpu.state().gpr[5] = 0x2000;
+    cpu.state().gpr[16] = 0x2000 + distance;
+    check(cpu.run(63) == ps2vita::StopReason::StepLimit && cpu.state().gpr[4] == 0 &&
+          cpu.state().pc == 0x101Cu, "EE overlapping backreference loop terminates exactly");
+    for (unsigned i = 0; i < 9; ++i)
+      check(memory.read8(0x2000u + distance + i) == 0x80u + i % distance,
+            "EE LBU/SB backreference propagates freshly written bytes");
+    check(cpu.state().gpr[2] == 0x80u + 8u % distance,
+          "EE backreference byte load remains unsigned");
+  }
+}
+
 void test_quadword_load_store() {
   ps2vita::Memory memory;
   ps2vita::Cpu cpu(memory);
@@ -4115,6 +4147,7 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_ee_overlapping_backreference_copy();
   test_vu1_q_latency();
   test_vu1_vector_scoreboard();
   test_vu1_pair_dependencies();

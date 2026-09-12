@@ -378,6 +378,7 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> low_store_trace{};
   std::array<StoreEntry, kTraceSize> vif_parameter_store_trace{};
   std::size_t vif_parameter_store_cursor = 0;
+  bool vif_parameter_writer_captured = false;
   std::array<StoreEntry, kTraceSize> syscall_store_trace{};
   std::array<StoreEntry, kTraceSize> sbus_store_trace{};
   std::array<StoreEntry, kTraceSize> dma_store_trace{};
@@ -596,6 +597,18 @@ int main(int argc, char** argv) {
       if (physical >= 0x00274200u && physical < 0x00274240u) {
         vif_parameter_store_trace[vif_parameter_store_cursor++ % kTraceSize] = {
             state.pc, instruction, address, state.gpr[source], state.gpr_hi[source]};
+        // BIOS-specific diagnostic only: preserve the byte writer's caller and
+        // operands before subsequent execution destroys their provenance.
+        if (!vif_parameter_writer_captured && state.pc == 0x00100BD0u) {
+          vif_parameter_writer_captured = true;
+          std::printf("vif_parameter_writer pc=%08X address=%08X\n", state.pc, address);
+          for (unsigned reg = 0; reg < 32; ++reg)
+            std::printf("vif_writer_gpr[%u]=%016llX:%016llX\n", reg,
+                static_cast<unsigned long long>(state.gpr_hi[reg]),
+                static_cast<unsigned long long>(state.gpr[reg]));
+          for (std::uint32_t pc = 0x00100B80u; pc < 0x00100C20u; pc += 4u)
+            std::printf("vif_writer_code[%08X]=%08X\n", pc, emulator.memory().read32(pc));
+        }
       }
       if (physical >= 0x1C0003C0u && physical < 0x1C000420u) {
         mailbox_store_trace.push_back({state.pc, instruction, address,
