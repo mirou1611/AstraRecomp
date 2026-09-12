@@ -2759,6 +2759,49 @@ void test_vif1_v4_32_unpack() {
         "VIF1 V4-32 UNPACK writes complete vectors at the encoded address");
 }
 
+void test_vif_provenance() {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  const std::array<std::uint32_t, 9> unpack{{0x6C0203FFu, 1, 2, 3, 4, 5, 6, 7, 8}};
+  const auto submit = [&]() { return vif.submit(
+      reinterpret_cast<const std::uint8_t*>(unpack.data()), sizeof(unpack)); };
+  check(submit() && vif.unpack_records().empty(), "VIF provenance disabled by default");
+  vif.enable_provenance_trace(true);
+  check(submit() && vif.unpack_records().size() == 8, "VIF traces complete unpack words");
+  const auto& first = vif.unpack_records().front();
+  const auto& last = vif.unpack_records().back();
+  check(first.packet == 2 && first.pair == 0 && first.source_offset == 4 &&
+        first.address == 0x3FF0 && first.value == 1 && last.address == 12 &&
+        last.source_offset == 32 && last.value == 8,
+        "VIF provenance records source offsets and wrapped destinations");
+  memory.write32(ps2vita::Memory::kVu1DataBase + 12, 99);
+  check(vif.unpack_records().back().value == 8, "VIF provenance owns original input values");
+  for (unsigned i = 0; i < 512; ++i) submit();
+  check(vif.unpack_records().size() == 4096 && vif.dropped_unpack_records() == 8,
+        "VIF unpack provenance is bounded with explicit truncation count");
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4, 0x400002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12, 0x2FFu);
+  const std::array<std::uint32_t, 2> run{{0, 0x14000000u}};
+  for (unsigned i = 0; i < 129; ++i)
+    check(vif.submit(reinterpret_cast<const std::uint8_t*>(run.data()), sizeof(run)),
+          "VIF run provenance fixture completes");
+  check(vif.run_records().size() == 128 && vif.dropped_run_records() == 1,
+        "VIF run provenance is bounded");
+  const auto& r = vif.run_records().front();
+  check(r.command_offset == 4 && r.command == 0x14000000u && r.first_pair == 0 &&
+        r.end_pair == 2 && r.start_pc == 0 && r.end_pc == 16 &&
+        r.rejected_before == 0 && r.rejected_after == 0,
+        "VIF run provenance brackets actual VU execution");
+  vif.enable_provenance_trace(false); submit();
+  check(vif.dropped_unpack_records() == 8, "Disabled VIF provenance stops recording");
+  vif.reset();
+  check(vif.unpack_records().empty() && vif.run_records().empty() &&
+        vif.dropped_unpack_records() == 0 && vif.dropped_run_records() == 0,
+        "VIF reset clears provenance and truncation counters");
+}
+
 void test_vu1_captured_prologue() {
   ps2vita::Memory memory;
   constexpr std::array<std::uint32_t, 5> lower{{
@@ -4147,6 +4190,7 @@ int main() {
   test_vif1_mpg_upload();
   test_vif1_scratchpad_dma();
   test_vif1_v4_32_unpack();
+  test_vif_provenance();
   test_vu1_captured_prologue();
   test_vu1_captured_matrix_pair();
   test_vu1_sqi();

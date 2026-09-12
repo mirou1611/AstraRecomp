@@ -20,6 +20,7 @@ int main(int argc, char** argv) {
   if (!input.read(reinterpret_cast<char*>(data.data()), data.size())) return 2;
   ps2vita::Memory memory;
   ps2vita::Vif1 vif(memory);
+  vif.enable_provenance_trace(true);
   vif.vu1().enable_store_trace(true);
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
@@ -50,6 +51,21 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(vu.first_rejected_pair()));
   if (vu.path1_tags_rejected() != 0u) {
     const unsigned span = ((vu.first_rejected_address() - vu.first_rejected_kick_start()) & 0x3FFFu) + 16u;
+    std::printf("vif_provenance unpack=%zu dropped=%llu runs=%zu dropped_runs=%llu\n",
+        vif.unpack_records().size(), static_cast<unsigned long long>(vif.dropped_unpack_records()),
+        vif.run_records().size(), static_cast<unsigned long long>(vif.dropped_run_records()));
+    for (const auto& record : vif.run_records())
+      std::printf("vif_run packet=%llu offset=%zx command=%08X pairs=%llu..%llu pc=%04X..%04X top=%03X rejects=%llu..%llu\n",
+          static_cast<unsigned long long>(record.packet), record.command_offset, record.command,
+          static_cast<unsigned long long>(record.first_pair), static_cast<unsigned long long>(record.end_pair),
+          record.start_pc, record.end_pc, record.top,
+          static_cast<unsigned long long>(record.rejected_before), static_cast<unsigned long long>(record.rejected_after));
+    for (const auto& record : vif.unpack_records()) {
+      if (((record.address - vu.first_rejected_kick_start()) & 0x3FFFu) >= span) continue;
+      std::printf("vif_upload packet=%llu pair=%llu source=%zx address=%04X value=%08X\n",
+          static_cast<unsigned long long>(record.packet), static_cast<unsigned long long>(record.pair),
+          record.source_offset, record.address, record.value);
+    }
     for (const auto& record : vu.store_records()) {
       if (((record.address - vu.first_rejected_kick_start()) & 0x3FFFu) >= span) continue;
       std::printf("packet_store pair=%llu cycle=%llu pc=%04X address=%04X value=%08X relation=%s\n",

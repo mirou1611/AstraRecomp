@@ -10,6 +10,20 @@
 
 namespace ps2vita {
 
+struct VifUnpackRecord {
+  std::uint64_t packet = 0, pair = 0;
+  std::size_t source_offset = 0;
+  std::uint16_t address = 0;
+  std::uint32_t value = 0;
+};
+struct VifRunRecord {
+  std::uint64_t packet = 0, first_pair = 0, end_pair = 0;
+  std::size_t command_offset = 0;
+  std::uint32_t command = 0;
+  std::uint16_t start_pc = 0, end_pc = 0, top = 0;
+  std::uint64_t rejected_before = 0, rejected_after = 0;
+};
+
 // Minimal VIF1 command frontend. DMA chain transport remains in Memory; this
 // class consumes the resulting word stream and updates VU1-visible state.
 class Vif1 {
@@ -17,6 +31,11 @@ public:
   explicit Vif1(Memory& memory) : memory_(memory), vu1_(memory) {}
   void reset();
   void enable_packet_capture(bool enabled) { capture_packet_ = enabled; }
+  void enable_provenance_trace(bool enabled) { trace_provenance_ = enabled; }
+  const std::vector<VifUnpackRecord>& unpack_records() const { return unpack_records_; }
+  const std::vector<VifRunRecord>& run_records() const { return run_records_; }
+  std::uint64_t dropped_unpack_records() const { return dropped_unpack_records_; }
+  std::uint64_t dropped_run_records() const { return dropped_run_records_; }
   const std::vector<std::uint8_t>& captured_packet() const { return captured_packet_; }
   bool packet_capture_overflow() const { return capture_overflow_; }
   bool submit(const std::uint8_t* data, std::size_t size);
@@ -41,6 +60,7 @@ public:
   const Vu1& vu1() const { return vu1_; }
 
 private:
+  void run_vu(std::uint32_t command, std::size_t command_offset);
   Memory& memory_;
   Vu1 vu1_;
   std::uint64_t packets_submitted_ = 0;
@@ -64,6 +84,10 @@ private:
   std::size_t direct_remaining_ = 0;
   std::vector<std::uint8_t> direct_packet_;
   std::deque<std::vector<std::uint8_t>> gif_packets_;
+  bool trace_provenance_ = false;
+  std::vector<VifUnpackRecord> unpack_records_;
+  std::vector<VifRunRecord> run_records_;
+  std::uint64_t dropped_unpack_records_ = 0, dropped_run_records_ = 0;
 };
 
 } // namespace ps2vita

@@ -19,6 +19,8 @@ std::uint32_t load32(const std::uint8_t* data) {
 } // namespace
 
 void Vif1::reset() {
+  unpack_records_.clear(); run_records_.clear();
+  dropped_unpack_records_ = dropped_run_records_ = 0;
   direct_remaining_ = 0;
   direct_packet_.clear();
   gif_packets_.clear();
@@ -40,6 +42,27 @@ void Vif1::reset() {
   itops_ = 0;
   top_ = 0;
   double_buffer_ = false;
+}
+
+void Vif1::run_vu(std::uint32_t command, std::size_t command_offset) {
+  VifRunRecord record;
+  if (trace_provenance_) {
+    record.packet = packets_submitted_;
+    record.command_offset = command_offset;
+    record.command = command;
+    record.first_pair = vu1_.pairs_executed();
+    record.start_pc = vu1_.state().pc;
+    record.top = top_;
+    record.rejected_before = vu1_.path1_tags_rejected();
+  }
+  vu1_.run(kVu1ExecutionBudget);
+  if (trace_provenance_) {
+    record.end_pair = vu1_.pairs_executed();
+    record.end_pc = vu1_.state().pc;
+    record.rejected_after = vu1_.path1_tags_rejected();
+    if (run_records_.size() < 128u) run_records_.push_back(record);
+    else ++dropped_run_records_;
+  }
 }
 
 bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
@@ -118,7 +141,7 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       double_buffer_ = !double_buffer_;
       vu1_.set_top(top_);
       vu1_.start(static_cast<std::uint16_t>((code & 0x3FFu) * 8u));
-      vu1_.run(kVu1ExecutionBudget);
+      run_vu(code, cursor - 4u);
       if (vu1_.running() || vu1_.first_unsupported_lower() != 0u ||
           vu1_.first_unsupported_upper() != 0u) {
         record_unsupported(code);
@@ -134,7 +157,7 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       double_buffer_ = !double_buffer_;
       vu1_.set_top(top_);
       vu1_.resume();
-      vu1_.run(kVu1ExecutionBudget);
+      run_vu(code, cursor - 4u);
       if (vu1_.running() || vu1_.first_unsupported_lower() != 0u ||
           vu1_.first_unsupported_upper() != 0u) {
         record_unsupported(code);
@@ -182,7 +205,14 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       for (std::size_t byte = 0; byte < bytes; byte += 4u) {
         const auto destination = Memory::kVu1DataBase +
             static_cast<std::uint32_t>((address + byte) & 0x3FFFu);
-        memory_.write32(destination, load32(data + cursor + byte));
+        const auto value = load32(data + cursor + byte);
+        memory_.write32(destination, value);
+        if (trace_provenance_) {
+          if (unpack_records_.size() < 4096u)
+            unpack_records_.push_back({packets_submitted_, vu1_.pairs_executed(),
+                cursor + byte, static_cast<std::uint16_t>(destination - Memory::kVu1DataBase), value});
+          else ++dropped_unpack_records_;
+        }
       }
       cursor += bytes;
       vectors_unpacked_ += count;
