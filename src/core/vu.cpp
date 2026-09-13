@@ -593,9 +593,19 @@ void Vu1::transfer_path1(bool flush) {
           first_rejected_kick_start_ = last_kick_address_;
           first_rejected_tag_index_ = kick_tag_index_;
           first_rejected_previous_tag_ = kick_previous_tag_;
-          if (trace_causes_)
-            for (unsigned lane = 0; lane < 4; ++lane)
-              rejected_causes_[lane] = data_causes_[((kick_offset_ + lane * 4u) & 0x3FFFu) / 4u];
+          if (trace_causes_) {
+            for (unsigned lane = 0; lane < 4; ++lane) {
+              const auto index = ((kick_offset_ + lane * 4u) & 0x3FFFu) / 4u;
+              auto& owner = data_causes_[index];
+              std::uint32_t consumed = 0;
+              std::memcpy(&consumed, tag_bytes.data() + lane * 4u, sizeof(consumed));
+              // A direct external write can bypass the invalidation hook.
+              // Never explain bytes using a writer whose value differs from
+              // the qword actually read by the transfer.
+              if (owner && causes_[owner - 1u].value != consumed) owner = 0;
+              rejected_causes_[lane] = owner;
+            }
+          }
           for (unsigned word = 0; word < first_rejected_data_.size(); ++word)
             first_rejected_data_[word] = memory_.read32(Memory::kVu1DataBase +
                 ((last_kick_address_ + word * 4u) & 0x3FFFu));

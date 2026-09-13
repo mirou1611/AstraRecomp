@@ -3046,6 +3046,19 @@ void test_vu1_causal_slice() {
   check(vu.path1_tags_rejected() == 1 && vu.rejected_causes()[0] == 0,
         "External data write invalidation prevents attributing stale VU ownership");
   vu.reset();
+  vu.state().vf[1][0] = vu.state().vf[2][0] = 0x40000000u;
+  vu.state().vi[2] = vu.state().vi[3] = 0x10;
+  vu.start(0); vu.run(3);
+  // Bypass the observer deliberately, modifying only one byte of the tag.
+  memory.write8(ps2vita::Memory::kVu1DataBase + 0x100, 65);
+  vu.run(3);
+  check(vu.path1_tags_rejected() == 1 && vu.first_rejected_tag() == 65 &&
+        vu.rejected_causes()[0] == 0 && vu.rejected_causes()[1] != 0,
+        "Rejected tag drops mismatched byte ancestry while retaining unchanged lanes");
+  memory.write8(ps2vita::Memory::kVu1DataBase + 0x100, 64);
+  check(vu.rejected_causes()[0] == 0,
+        "Later tag restoration does not rewrite frozen rejection ancestry");
+  vu.reset();
   memory.write32(micro, 0x8000033Cu);
   memory.write32(micro + 4, (8u << 21) | (2u << 16) | (1u << 11) | (3u << 6) | 0x28u);
   for (unsigned i = 0; i < 8200; ++i) { vu.start(0); vu.run(1); }
