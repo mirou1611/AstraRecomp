@@ -58,15 +58,19 @@ int main(int argc, char** argv) {
     for (unsigned lane = 0; lane < 4; ++lane) {
       const auto root = vu.rejected_causes()[lane];
       std::printf("tag_cause lane=%u generation=%u\n", lane, root);
-      if (root) pending.push_back(root);
     }
+    // The low lanes contain the tag control word; explain those first when
+    // the bounded walk cannot fit every lane's ancestry.
+    for (unsigned lane = 4; lane-- > 0; )
+      if (vu.rejected_causes()[lane]) pending.push_back(vu.rejected_causes()[lane]);
     unsigned shown = 0;
     while (!pending.empty() && shown < 64u) {
       const auto id = pending.back(); pending.pop_back();
       if (id == 0 || id > vu.causes().size() || seen[id]) continue;
       seen[id] = true; ++shown;
       const auto& c = vu.causes()[id - 1u];
-      const char* kind = c.kind == ps2vita::VuCauseRecord::Kind::Store ?
+      const char* kind = c.kind == ps2vita::VuCauseRecord::Kind::VifUpload ? "VIF_UNPACK" :
+          c.kind == ps2vita::VuCauseRecord::Kind::Store ?
           ((c.instruction >> 25) == 0x40u ? "SQI" : "SQ") :
           c.kind == ps2vita::VuCauseRecord::Kind::MemoryLoad ?
           ((c.instruction >> 25) == 0u ? "LQ" : "LQI") :
@@ -76,6 +80,9 @@ int main(int argc, char** argv) {
           static_cast<unsigned long long>(c.cycle), c.address, c.reg, c.lane, c.mask,
           c.value, c.parents[0], c.parents[1], c.parents[2], static_cast<unsigned>(c.incomplete),
           static_cast<unsigned>(c.accumulator));
+      if (c.kind == ps2vita::VuCauseRecord::Kind::VifUpload)
+        std::printf("  input packet=%llu source_offset=%llX (submitted stream, not EE address)\n",
+            static_cast<unsigned long long>(c.packet), static_cast<unsigned long long>(c.source_offset));
       for (auto parent : c.parents) if (parent) pending.push_back(parent);
     }
     if (!pending.empty()) std::puts("causal_walk truncated at 64 nodes");

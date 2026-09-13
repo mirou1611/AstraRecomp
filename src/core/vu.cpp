@@ -111,9 +111,23 @@ void Vu1::invalidate_data_cause(std::uint32_t address) {
 
 std::uint32_t Vu1::add_cause(VuCauseRecord record) {
   if (causes_.size() >= 8192u) { ++dropped_causes_; return 0; }
-  record.pc = state_.pc; record.pair = pairs_executed_; record.cycle = cycles_;
+  record.pc = record.kind == VuCauseRecord::Kind::VifUpload ? 0xFFFFu : state_.pc;
+  record.pair = pairs_executed_; record.cycle = cycles_;
   causes_.push_back(record);
   return static_cast<std::uint32_t>(causes_.size()); // Zero is explicitly unknown.
+}
+
+void Vu1::record_vif_upload(std::uint32_t address, std::uint32_t value,
+    std::uint32_t command, std::uint64_t packet, std::uint64_t source_offset) {
+  if (!trace_causes_) return;
+  VuCauseRecord record;
+  record.kind = VuCauseRecord::Kind::VifUpload;
+  record.address = (address - Memory::kVu1DataBase) & 0x3FFFu;
+  record.value = value; record.instruction = command;
+  record.packet = packet; record.source_offset = source_offset;
+  record.lane = (record.address & 15u) / 4u; record.mask = 15u;
+  record.incomplete = true; // Stream bytes are known; their EE ancestry is not.
+  data_causes_[record.address / 4u] = add_cause(record);
 }
 
 void Vu1::trace_upper(std::uint32_t code) {

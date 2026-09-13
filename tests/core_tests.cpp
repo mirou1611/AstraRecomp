@@ -2834,6 +2834,42 @@ void test_vif_provenance() {
         "VIF reset clears provenance and truncation counters");
 }
 
+void test_vif_causal_input() {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  auto& vu = vif.vu1();
+  vu.enable_causal_trace(true);
+  std::array<std::uint32_t, 5> upload{{0x6C0103FFu, 64u, 0, 0, 0}};
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()), sizeof(upload)),
+        "Causal VIF input fixture uploads");
+  check(vu.causes().size() == 4 && vu.causes()[0].packet == 1 &&
+        vu.causes()[0].source_offset == 4 && vu.causes()[0].address == 0x3FF0 &&
+        vu.causes()[0].pc == 0xFFFF && vu.causes()[0].incomplete,
+        "VIF causal input owns stream origin without inventing a VU PC or EE ancestry");
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  const std::array<std::uint32_t, 5> lower{{
+      (15u << 21) | (12u << 16) | (2u << 11),
+      0x81E3637Du, 0x800026FCu, 0x8000033Cu, 0x8000033Cu}};
+  for (unsigned i = 0; i < lower.size(); ++i) {
+    memory.write32(micro + 8 * i, lower[i]);
+    memory.write32(micro + 8 * i + 4, i == 3 ? 0x400002FFu : 0x2FFu);
+  }
+  vu.state().vi[2] = 0x3FF; vu.state().vi[3] = vu.state().vi[4] = 0x10;
+  vu.start(0); vu.run(5);
+  const auto root = vu.rejected_causes()[0];
+  check(root != 0, "Uploaded input reaches rejected tag through load and store");
+  if (root) {
+    const auto load = vu.causes()[root - 1].parents[0];
+    check(load != 0 && vu.causes()[load - 1].parents[0] == 1,
+          "Rejected tag slice reaches original VIF input generation");
+  }
+  upload[1] = 65;
+  vif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()), sizeof(upload));
+  check(vu.causes()[0].value == 64 && vu.causes().back().packet == 2 &&
+        vu.rejected_causes()[0] == root,
+        "Later VIF upload preserves immutable earlier input and rejected roots");
+}
+
 void test_vu1_captured_prologue() {
   ps2vita::Memory memory;
   constexpr std::array<std::uint32_t, 5> lower{{
@@ -4334,6 +4370,7 @@ int main() {
   test_vif1_scratchpad_dma();
   test_vif1_v4_32_unpack();
   test_vif_provenance();
+  test_vif_causal_input();
   test_vu1_causal_slice();
   test_vu1_causal_memory_loads();
   test_vu1_captured_prologue();

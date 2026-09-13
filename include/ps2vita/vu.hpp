@@ -25,7 +25,8 @@ struct Vu1StoreRecord {
   std::uint32_t value = 0;
 };
 struct VuCauseRecord {
-  enum class Kind { Upper, LowerInput, Store, MemoryLoad } kind = Kind::Upper;
+  enum class Kind { Upper, LowerInput, Store, MemoryLoad, VifUpload } kind = Kind::Upper;
+  std::uint64_t packet = 0, source_offset = 0;
   std::uint64_t pair = 0, cycle = 0;
   std::uint32_t instruction = 0, value = 0;
   std::uint16_t pc = 0, address = 0;
@@ -49,6 +50,8 @@ public:
   void enable_store_trace(bool enabled) { trace_stores_ = enabled; }
   void enable_causal_trace(bool enabled);
   void invalidate_data_cause(std::uint32_t address);
+  void record_vif_upload(std::uint32_t address, std::uint32_t value,
+      std::uint32_t command, std::uint64_t packet, std::uint64_t source_offset);
   const std::vector<VuCauseRecord>& causes() const { return causes_; }
   const std::array<std::uint32_t, 4>& rejected_causes() const { return rejected_causes_; }
   std::uint64_t dropped_causes() const { return dropped_causes_; }
