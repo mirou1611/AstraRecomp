@@ -25,7 +25,7 @@ struct Vu1StoreRecord {
   std::uint32_t value = 0;
 };
 struct VuCauseRecord {
-  enum class Kind { Upper, LowerInput, Store } kind = Kind::Upper;
+  enum class Kind { Upper, LowerInput, Store, MemoryLoad } kind = Kind::Upper;
   std::uint64_t pair = 0, cycle = 0;
   std::uint32_t instruction = 0, value = 0;
   std::uint16_t pc = 0, address = 0;

@@ -265,6 +265,16 @@ bool Vu1::step() {
     const bool lower_load = group == 0u || (group == 0x40u &&
         ((lfn == 0x3Cu && lfd == 0x0Du) || (lfn == 0x3Du && lfd == 0x0Fu)));
     const unsigned lower_dest = lower_load ? (lower >> 16) & 31u : 0u;
+    const bool memory_load = group == 0u ||
+        (group == 0x40u && lfn == 0x3Cu && lfd == 0x0Du);
+    // Capture before LQI increments VI. The address dependency itself remains
+    // outside this data-only slice, but the consumed memory version is exact.
+    unsigned load_address = 0;
+    if (trace_causes_ && memory_load) {
+      const unsigned load_is = (lower >> 11) & 15u;
+      load_address = static_cast<unsigned>((state_.vi[load_is] +
+          (group == 0u ? sign_extend(lower & 0x7FFu, 11u) : 0)) & 0x3FFu) * 16u;
+    }
     if ((upper_dest == 0u || upper_dest != lower_dest) && !execute_lower(lower)) {
       first_unsupported_lower_ = lower;
       running_ = false;
@@ -278,6 +288,19 @@ bool Vu1::step() {
         record.instruction = lower; record.reg = lower_dest; record.lane = lane;
         record.mask = (lower >> 21) & 15u;
         record.value = state_.vf[lower_dest][lane]; record.incomplete = true;
+        if (memory_load) {
+          record.kind = VuCauseRecord::Kind::MemoryLoad;
+          record.address = static_cast<std::uint16_t>(load_address + lane * 4u);
+          const auto parent = data_causes_[record.address / 4u];
+          // Direct host/EE memory mutation may bypass the invalidation hook.
+          // A value mismatch is evidence that this owner is no longer valid.
+          if (parent && causes_[parent - 1u].value == record.value) {
+            record.parents[0] = parent;
+            record.incomplete = false;
+          } else if (parent) {
+            data_causes_[record.address / 4u] = 0;
+          }
+        }
         vf_causes_[lower_dest][lane] = add_cause(record);
       }
     }

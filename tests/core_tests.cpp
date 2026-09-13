@@ -3027,6 +3027,51 @@ void test_vu1_causal_slice() {
         "Same-pair SQI ancestry uses old VF, not the paired upper producer");
 }
 
+void test_vu1_causal_memory_loads() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  for (bool increment : {false, true}) {
+    for (unsigned external = 0; external < 3; ++external) {
+      vu.reset(); vu.enable_causal_trace(true);
+      const auto load = increment ?
+          0x8000037Cu | (15u << 21) | (13u << 16) | (2u << 11) :
+          (15u << 21) | (13u << 16) | (2u << 11) | 0x7FFu;
+      const std::array<std::uint32_t, 6> lower{{
+          0x81E3637Du, load, 0x81E36B7Du, 0x800026FCu, 0x8000033Cu, 0x8000033Cu}};
+      for (unsigned i = 0; i < lower.size(); ++i) {
+        memory.write32(micro + 8 * i, lower[i]);
+        memory.write32(micro + 8 * i + 4, i == 4 ? 0x400002FFu : 0x2FFu);
+      }
+      vu.state().vf[12][0] = 64;
+      vu.state().vi[2] = increment ? 0x10 : 0x11;
+      vu.state().vi[3] = 0x10; vu.state().vi[4] = 0x11;
+      vu.start(0); vu.run(1);
+      if (external == 1) vu.invalidate_data_cause(ps2vita::Memory::kVu1DataBase + 0x100);
+      if (external == 2) memory.write32(ps2vita::Memory::kVu1DataBase + 0x100, 65);
+      vu.run(5);
+      const auto root = vu.rejected_causes()[0];
+      check(root != 0, "Memory-load causal fixture reaches rejected tag");
+      if (!root) continue;
+      const auto parent = vu.causes()[root - 1].parents[0];
+      check(parent != 0, "SQI links to preceding loaded VF value");
+      if (!parent) continue;
+      const auto& load_record = vu.causes()[parent - 1];
+      check(load_record.kind == ps2vita::VuCauseRecord::Kind::MemoryLoad &&
+            load_record.address == 0x100 && load_record.pc == 8,
+            "LQ signed offset and LQI pre-increment use the consumed address");
+      if (external == 0) {
+        check(load_record.parents[0] == 1 && !load_record.incomplete &&
+              vu.causes()[0].kind == ps2vita::VuCauseRecord::Kind::Store,
+              "Load slice follows the earlier memory store generation");
+      } else {
+        check(load_record.parents[0] == 0 && load_record.incomplete,
+              "Invalidated or mismatched memory input is not assigned stale ancestry");
+      }
+    }
+  }
+}
+
 void test_vu1_xgkick_packet() {
   ps2vita::Memory memory;
   memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800016FCu);
@@ -4290,6 +4335,7 @@ int main() {
   test_vif1_v4_32_unpack();
   test_vif_provenance();
   test_vu1_causal_slice();
+  test_vu1_causal_memory_loads();
   test_vu1_captured_prologue();
   test_vu1_captured_matrix_pair();
   test_vu1_sqi();

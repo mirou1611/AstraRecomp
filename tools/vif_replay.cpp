@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
       vu.store_records().size(), static_cast<unsigned long long>(vu.dropped_store_records()),
       static_cast<unsigned long long>(vu.first_rejected_pair()));
   if (vu.path1_tags_rejected() != 0u) {
-    std::printf("causal_trace nodes=%zu dropped=%llu (id=0 means unknown; lower inputs and Q ancestry incomplete)\n",
+    std::printf("causal_trace nodes=%zu dropped=%llu (id=0 means unknown; external inputs, VI and Q ancestry incomplete)\n",
         vu.causes().size(), static_cast<unsigned long long>(vu.dropped_causes()));
     std::vector<std::uint32_t> pending;
     std::vector<bool> seen(vu.causes().size() + 1u);
@@ -68,6 +68,8 @@ int main(int argc, char** argv) {
       const auto& c = vu.causes()[id - 1u];
       const char* kind = c.kind == ps2vita::VuCauseRecord::Kind::Store ?
           ((c.instruction >> 25) == 0x40u ? "SQI" : "SQ") :
+          c.kind == ps2vita::VuCauseRecord::Kind::MemoryLoad ?
+          ((c.instruction >> 25) == 0u ? "LQ" : "LQI") :
           c.kind == ps2vita::VuCauseRecord::Kind::LowerInput ? "lower_input" : "upper";
       std::printf("cause id=%u kind=%s pc=%04X instruction=%08X pair=%llu cycle=%llu address=%04X reg=%u lane=%u mask=%X value=%08X parents=%u,%u,%u incomplete=%u acc=%u\n",
           id, kind, c.pc, c.instruction, static_cast<unsigned long long>(c.pair),
