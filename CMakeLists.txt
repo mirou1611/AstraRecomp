@@ -167,6 +167,9 @@ else()
     target_compile_options(aot_benchmark PRIVATE -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ps2core_tests COMMAND ps2core_tests)
+  add_executable(path3_graphics_tests tests/path3_graphics_tests.cpp)
+  target_link_libraries(path3_graphics_tests PRIVATE ps2core)
+  add_test(NAME path3_graphics_tests COMMAND path3_graphics_tests)
   add_test(NAME astrair_builder_tests
            COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
                    "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_astrair.py")
