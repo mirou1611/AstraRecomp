@@ -110,7 +110,8 @@ void Gs::line(GsVertex a, GsVertex b) {
   }
 }
 
-void Gs::triangle(GsVertex a, GsVertex b, GsVertex c) {
+void Gs::triangle(GsVertex a, GsVertex b, GsVertex c,
+                  const TextureSampler& sample) {
   std::int64_t area = edge(a, b, c.x, c.y);
   // A collapsed triangle has no coverage; it is not a line primitive.
   if (area == 0) return;
@@ -141,6 +142,17 @@ void Gs::triangle(GsVertex a, GsVertex b, GsVertex c) {
       std::uint32_t color = 0;
       for (unsigned shift = 0; shift < 32; shift += 8)
         color |= mix_channel(a.color, b.color, c.color, wa, wb, wc, area, shift);
+      if (sample) {
+        // FST UV is unsigned 10.4 fixed point. Interpolate before removing
+        // the fractional bits; vertex winding swaps must also swap attributes.
+        const auto coordinate = [&](unsigned shift) {
+          const auto sum = ((a.uv >> shift) & 0x3FFFu) * wa +
+                           ((b.uv >> shift) & 0x3FFFu) * wb +
+                           ((c.uv >> shift) & 0x3FFFu) * wc;
+          return static_cast<unsigned>(sum / (area * 16));
+        };
+        color = sample(coordinate(0), coordinate(16), color);
+      }
       write(x, y, z, color);
     }
   }

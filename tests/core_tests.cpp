@@ -3815,6 +3815,59 @@ void gif_depth_register(ps2vita::Gif& gif, std::uint64_t value,
                    sizeof(packet)), "GIF depth register accepted");
 }
 
+void test_gif_textured_uv_triangles() {
+  const std::array<std::uint64_t, 14> upload{{
+      0x1000000000008004ull, 0xEull,
+      0x0001000100000000ull, 0x50u, 0u, 0x51u,
+      0x0000000200000002ull, 0x52u, 0u, 0x53u,
+      0x0800000000008001ull, 0u,
+      0xFF00FF00FF0000FFull, 0xFFFFFFFFFFFF0000ull}};
+  for (unsigned context = 0; context < 2; ++context) {
+    for (bool reverse : {false, true}) {
+      ps2vita::Gs gs;
+      ps2vita::Gif gif(gs);
+      check(gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()),
+                       sizeof(upload)), "UV triangle texture upload accepted");
+      gif_depth_register(gif, 1ull | (1ull << 14) | (1ull << 26) |
+          (1ull << 30) | (1ull << 34) | (1ull << 35), 6u + context);
+      gif_depth_register(gif, 0x113u | (context << 9), 0u);
+      const auto vertex = [&](unsigned x, unsigned y) {
+        gif_depth_register(gif, (x * 16u) | (std::uint64_t{y * 16u} << 16), 3u);
+        gif_depth_register(gif, (x * 64u) | (std::uint64_t{y * 64u} << 16), 5u);
+      };
+      vertex(0, 0);
+      if (reverse) { vertex(0, 2); vertex(2, 0); }
+      else { vertex(2, 0); vertex(0, 2); }
+      vertex(2, 2);
+      if (reverse) { vertex(2, 0); vertex(0, 2); }
+      else { vertex(0, 2); vertex(2, 0); }
+      check(gs.pixel(0, 0) == 0xFF0000FFu && gs.pixel(1, 0) == 0xFF00FF00u &&
+            gs.pixel(0, 1) == 0xFFFF0000u && gs.pixel(1, 1) == 0xFFFFFFFFu &&
+            gs.pixel(2, 1) == 0u,
+            "UV triangles sample texture across winding, shared edge and contexts");
+    }
+  }
+  ps2vita::Gs gs;
+  gs.set_alpha_test(1u); // NEVER + KEEP: texture alpha/color goes through write().
+  ps2vita::GsVertex a{0, 0, 0, 0x80808080u}, b{4, 0, 0, 0x80808080u},
+                    c{0, 4, 0, 0x80808080u};
+  b.uv = 24u; // 1.5 texels: interior x=2 must sample floor(0.75)=0.
+  unsigned calls = 0;
+  gs.triangle(a, b, c, [&](unsigned u, unsigned, std::uint32_t color) {
+    ++calls;
+    check(u <= 1u && color == 0x80808080u, "UV sampler gets bounded coordinates and color");
+    return 0xFFFFFFFFu;
+  });
+  check(calls != 0u && gs.pixel(1, 1) == 0u,
+        "Textured fragments still obey GS alpha test");
+  gs.set_alpha_test(0u);
+  gs.triangle(a, b, c, [](unsigned u, unsigned, std::uint32_t) {
+    return u + 1u;
+  });
+  check(gs.pixel(2, 0) == 1u && gs.pixel(3, 0) == 2u,
+        "UV fractions are retained until after interpolation");
+}
+
 void test_gif_depth_state() {
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
@@ -4475,6 +4528,7 @@ int main() {
   test_vu0_broadcast_minmax();
   test_triangle_trace();
   test_gif_texture_attribute_latches();
+  test_gif_textured_uv_triangles();
   test_vif_packet_capture();
   test_vif_unsupported_location();
   test_vif_direct();

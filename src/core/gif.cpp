@@ -371,7 +371,14 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
       // vertices intact: a subsequent strip/fan may enable interpolation.
       if ((prim_ & (1u << 3)) == 0u)
         first.color = second.color = vertex.color;
-      gs_.triangle(first, second, vertex);
+      if ((prim_ & 0x110u) == 0x110u) { // TME and FST: affine UV path.
+        gs_.triangle(first, second, vertex,
+            [this, context](unsigned u, unsigned v, std::uint32_t color) {
+              return sample_texture(context, u, v, color);
+            });
+      } else {
+        gs_.triangle(first, second, vertex);
+      }
       ++triangles_emitted_;
     }
     if (primitive == 3u) vertex_count_ = 0u;

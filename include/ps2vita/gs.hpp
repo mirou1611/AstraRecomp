@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace ps2vita {
@@ -38,7 +39,10 @@ public:
   void clear(std::uint32_t color, std::uint32_t depth = 0xFFFFFFFFu);
   void point(const GsVertex& vertex);
   void line(GsVertex a, GsVertex b);
-  void triangle(GsVertex a, GsVertex b, GsVertex c);
+  using TextureSampler = std::function<std::uint32_t(unsigned, unsigned,
+                                                     std::uint32_t)>;
+  void triangle(GsVertex a, GsVertex b, GsVertex c,
+                const TextureSampler& sample = {});
 
   const std::uint32_t* pixels() const { return color_.data(); }
   std::uint32_t pixel(int x, int y) const;
