@@ -31,27 +31,46 @@ int main(int argc, char** argv) {
   ad(0u, 3u); ad(0u, 5u);
   ad(32u, 3u); ad(2048u, 5u);
   ad(32ull << 16, 3u); ad(2048ull << 16, 5u);
-  for (std::size_t i = 0; i < packet.size(); ++i)
-    memory.write64(0x2000u + static_cast<unsigned>(i * 8u), packet[i]);
+  constexpr std::uint32_t entry = 0x100000u, packet_address = 0x101000u;
   const std::uint32_t program[]{
       0x3C081001u, // lui t0, 0x1001 (SW sign-extends the Axxx offset)
-      0x34092000u, // ori t1, zero, packet address
+      0x3C090010u, // lui t1, 0x0010
+      0x35291000u, // ori t1, t1, packet address low half
       0xAD09A010u, // sw t1, D2_MADR(t0)
       0x34090000u | static_cast<std::uint32_t>(packet.size() / 2u),
       0xAD09A020u, // sw t1, D2_QWC(t0)
       0x34090101u, // direction=from memory, start
-      0xAD09A000u  // sw t1, D2_CHCR(t0)
+      0xAD09A000u, // sw t1, D2_CHCR(t0)
+      0x8D09A000u, // poll: lw t1, D2_CHCR(t0)
+      0x31290100u, // andi t1, t1, STR
+      0x1520FFFDu, // bne t1, zero, poll
+      0u,         // delay slot
+      0x0000000Du // break: host test completion, not a hardware exit service
   };
+  // ELF32 little-endian MIPS executable, one load segment containing code and
+  // aligned packet data. Emit integers explicitly, independent of host endian.
+  const auto segment_size = packet_address - entry + packet.size() * 8u;
+  std::vector<std::uint8_t> elf(0x100u + segment_size);
+  const auto put = [&](std::size_t offset, std::uint64_t value, unsigned bytes) {
+    for (unsigned byte = 0; byte < bytes; ++byte)
+      elf[offset + byte] = static_cast<std::uint8_t>(value >> (byte * 8u));
+  };
+  put(0, 0x464C457Fu, 4); put(4, 0x010101u, 3);
+  put(16, 2, 2); put(18, 8, 2); put(20, 1, 4);
+  put(24, entry, 4); put(28, 52, 4);
+  put(40, 52, 2); put(42, 32, 2); put(44, 1, 2);
+  put(52, 1, 4); put(56, 0x100, 4);
+  put(60, entry, 4); put(64, entry, 4);
+  put(68, segment_size, 4); put(72, segment_size, 4);
+  put(76, 5, 4); put(80, 16, 4);
   for (unsigned i = 0; i < sizeof(program) / sizeof(program[0]); ++i)
-    memory.write32(0x1000u + i * 4u, program[i]);
-  emulator.cpu().reset(0x1000u);
-  const auto reason = emulator.cpu().run(7u);
-  // Advance the modeled device clock until completion, with a hard test bound.
-  for (unsigned tick = 0; tick < 4096u &&
-       (memory.read32(0x1000A000u) & 0x100u) != 0u; ++tick)
-    memory.advance(1u);
-  emulator.service_graphics();
-  bool ok = reason == ps2vita::StopReason::StepLimit &&
+    put(0x100u + i * 4u, program[i], 4);
+  for (std::size_t i = 0; i < packet.size(); ++i)
+    put(0x100u + packet_address - entry + i * 8u, packet[i], 8);
+  const auto loaded = emulator.load_elf(elf.data(), elf.size());
+  const auto reason = emulator.run_slice(10000u); // Hard bound on guest poll.
+  bool ok = loaded.ok && loaded.entry == entry && loaded.segments == 1u &&
+      reason == ps2vita::StopReason::Break &&
       emulator.gif().triangles_emitted() == 1u &&
       emulator.gif().packets_rejected() == 0u &&
       emulator.gif().pending_bytes() == 0u &&
@@ -69,9 +88,14 @@ int main(int argc, char** argv) {
       if (emulator.gs().pixel(x, y) != expected) ++mismatches;
     }
   ok = ok && mismatches == 0u;
-  if (argc == 2) {
+  if (argc >= 2) {
     std::ofstream output(argv[1], std::ios::binary);
     ok = ps2vita::write_framebuffer_ppm(output, emulator.gs()) && ok;
+  }
+  if (argc >= 3) {
+    std::ofstream output(argv[2], std::ios::binary);
+    output.write(reinterpret_cast<const char*>(elf.data()), elf.size());
+    ok = static_cast<bool>(output) && ok;
   }
   std::cout << "PATH3 EE-store/DMA/textured-triangle: " << (ok ? "PASS" : "FAIL")
             << " pixel_mismatches=" << mismatches << '\n';
