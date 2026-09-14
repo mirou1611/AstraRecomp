@@ -21,6 +21,14 @@ int main(int argc, char** argv) {
   const auto ad = [&](std::uint64_t value, std::uint64_t reg) {
     packet.insert(packet.end(), {0x1000000000008001ull, 0xEull, value, reg});
   };
+  ad(1u, 0x1Au); // PRMODECONT: use PRIM attributes.
+  // FRAME base 32 * 8192 = 0x40000, separate from texture at 0x100.
+  ad(32u | (10ull << 16), 0x4Cu); // 640-wide PSMCT32 framebuffer.
+  ad(128u | (1ull << 32), 0x4Eu); // Mask depth writes.
+  ad(1u, 0x46u); // COLCLAMP
+  ad(0u, 0x14u); // TEX1: nearest filtering, no mip selection.
+  ad(0u, 0x08u); // CLAMP: repeat.
+  ad(0u, 0x3Fu); // TEXFLUSH after the upload.
   ad(1ull | (1ull << 14) | (1ull << 26) | (1ull << 30) |
       (1ull << 34) | (1ull << 35), 6u); // 2x2 PSMCT32, DECAL RGBA
   ad(0u, 0x18u); // XYOFFSET
@@ -34,6 +42,9 @@ int main(int argc, char** argv) {
   constexpr std::uint32_t entry = 0x100000u, packet_address = 0x101000u;
   const std::uint32_t program[]{
       0x3C081001u, // lui t0, 0x1001 (SW sign-extends the Axxx offset)
+      0x8D09E000u, // lw t1, D_CTRL(t0)
+      0x35290001u, // ori t1, t1, DMAE
+      0xAD09E000u, // sw t1, D_CTRL(t0), preserve other bits
       0x3C090010u, // lui t1, 0x0010
       0x35291000u, // ori t1, t1, packet address low half
       0xAD09A010u, // sw t1, D2_MADR(t0)
@@ -45,7 +56,8 @@ int main(int argc, char** argv) {
       0x31290100u, // andi t1, t1, STR
       0x1520FFFDu, // bne t1, zero, poll
       0u,         // delay slot
-      0x0000000Du // break: host test completion, not a hardware exit service
+      0x0000000Du, // break: host test completion, not a hardware exit service
+      0u          // reserved delay slot for the persistent-loop variant
   };
   // ELF32 little-endian MIPS executable, one load segment containing code and
   // aligned packet data. Emit integers explicitly, independent of host endian.
@@ -94,6 +106,28 @@ int main(int argc, char** argv) {
   }
   if (argc >= 3) {
     std::ofstream output(argv[2], std::ios::binary);
+    output.write(reinterpret_cast<const char*>(elf.data()), elf.size());
+    ok = static_cast<bool>(output) && ok;
+  }
+  // Independently execute the exported persistent variant too. Its terminal
+  // loop must be reached after DMA, not merely consume the poll's host budget.
+  const auto done = entry + sizeof(program) - 8u;
+  put(0x100u + sizeof(program) - 8u, 0x08000000u | (done >> 2), 4);
+  std::vector<std::uint32_t> expected_pixels(emulator.gs().pixels(),
+      emulator.gs().pixels() + ps2vita::Gs::kWidth * ps2vita::Gs::kHeight);
+  emulator.gs().clear(0u);
+  const auto loop_loaded = emulator.load_elf(elf.data(), elf.size());
+  const auto loop_reason = emulator.run_slice(10000u);
+  const bool at_done = emulator.cpu().state().pc == done ||
+                      emulator.cpu().state().pc == done + 4u;
+  ok = ok && loop_loaded.ok && loop_reason == ps2vita::StopReason::StepLimit &&
+      at_done && emulator.gif().triangles_emitted() == 1u &&
+      emulator.vif1().packets_submitted() == 0u &&
+      (memory.read32(0x1000A000u) & 0x100u) == 0u;
+  for (std::size_t i = 0; i < expected_pixels.size(); ++i)
+    ok = (emulator.gs().pixels()[i] == expected_pixels[i]) && ok;
+  if (argc >= 4) {
+    std::ofstream output(argv[3], std::ios::binary);
     output.write(reinterpret_cast<const char*>(elf.data()), elf.size());
     ok = static_cast<bool>(output) && ok;
   }
