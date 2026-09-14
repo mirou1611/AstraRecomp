@@ -42,6 +42,18 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(vu.first_rejected_tag()),
       static_cast<unsigned long long>(gif.triangles_emitted()));
   std::ofstream image(argv[2], std::ios::binary | std::ios::trunc);
+  std::printf("vu_exit running=%u pc=%04X unsupported_upper=%08X unsupported_lower=%08X\n",
+      unsigned(vu.running()), vu.state().pc, vu.first_unsupported_upper(),
+      vu.first_unsupported_lower());
+  // Small static window, not an execution trace. Branches may make the actual
+  // E-bit pair nonadjacent to the final PC; do not infer execution from this alone.
+  for (int offset = -24; offset <= 8; offset += 8) {
+    const auto pc = static_cast<unsigned>((int(vu.state().pc) + offset) & 0x3FF8);
+    const auto lower = memory.read32(ps2vita::Memory::kVu1MicroBase + pc);
+    const auto upper = memory.read32(ps2vita::Memory::kVu1MicroBase + pc + 4u);
+    std::printf("vu_exit_micro pc=%04X lower=%08X upper=%08X E=%u I=%u\n",
+        pc, lower, upper, unsigned((upper >> 30) & 1u), unsigned(upper >> 31));
+  }
   std::printf("vu_timing cycles=%llu vf_stalls=%llu q_stalls=%llu xgkick_stalls=%llu\n",
       static_cast<unsigned long long>(vu.cycles_executed()),
       static_cast<unsigned long long>(vu.vf_stall_cycles()),

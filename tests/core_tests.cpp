@@ -3386,6 +3386,19 @@ void test_vu1_end_and_resume() {
   vu.run(1u);
   check(vu.running() && vu.pairs_executed() == 3u && vu.state().pc == 0x18u,
         "VU1 MSCNT-style resume continues at the retained TPC");
+  // Minimal captured termination/resume sequence (not the BIOS program).
+  for (unsigned pc = 0x2F8u; pc <= 0x310u; pc += 8u) {
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pc,
+                   pc == 0x308u ? 0x400007BFu : 0x8000033Cu);
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pc + 4u,
+                   pc == 0x2F8u ? 0x400002FFu : 0x000002FFu);
+  }
+  vu.reset(); vu.start(0x2F8u); vu.run(2000000u);
+  check(!vu.running() && vu.pairs_executed() == 2u && vu.state().pc == 0x308u,
+        "Captured E-bit tail terminates at 0308 without exhausting run budget");
+  vu.resume(); vu.run(2u);
+  check(vu.running() && vu.pairs_executed() == 4u && vu.state().pc == 0x108u,
+        "Captured MSCNT entry branches back to 0108 after its delay pair");
 }
 
 void test_vu1_mtir_xtop() {
