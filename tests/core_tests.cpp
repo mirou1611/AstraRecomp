@@ -557,6 +557,62 @@ void test_vu0_broadcast_minmax() {
         "VU min/max preserves masked lanes, VF0 and STATUS");
 }
 
+void test_gif_texture_attribute_latches() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gif.enable_triangle_trace(true);
+  // STQ -> RGBA -> XYZ; another STQ alone must not change RGBAQ.Q.
+  const std::array<std::uint64_t, 18> packet{{
+      1ull | (8ull << 60), 0x5E52512Eull,
+      3u, 0u, // A+D PRIM triangle
+      0x3F0000003E800000ull, 0xDEADBEEF40000000ull,
+      0x8000000080ull, 0x8000000080ull,
+      0u, 0u,
+      0x3F8000003F000000ull, 0x40800000u,
+      128u, 0u,
+      0x4040000080808080ull, 1u, // A+D RGBAQ Q=3 independent of temp Q=4
+      128ull << 32, 0u}};
+  const auto* bytes = reinterpret_cast<const std::uint8_t*>(packet.data());
+  check(gif.submit(bytes, 39u) && gif.triangle_records().empty(),
+        "Partial STQ packet waits for complete payload");
+  check(gif.submit(bytes + 39u, sizeof(packet) - 39u), "STQ packet accepted");
+  check(gif.triangle_records().size() == 1u, "STQ fixture emits triangle");
+  if (gif.triangle_records().size() != 1u) return;
+  const auto first = gif.triangle_records()[0];
+  check(first.vertices[0].st == 0x3F0000003E800000ull &&
+        first.vertices[0].q == 0x40000000u &&
+        first.vertices[1].st == 0x3F8000003F000000ull &&
+        first.vertices[1].q == 0x40000000u && first.vertices[2].q == 0x40400000u,
+        "STQ latches ST immediately but Q only through PACKED RGBA");
+  // Next tag resets temporary Q to one; ST remains unchanged. REGLIST ST
+  // modifies only ST, and UV is independently latched with the next vertex.
+  const std::array<std::uint64_t, 10> next{{
+      1ull | (4ull << 60) | (1ull << 46) | (3ull << 47), 0x5551ull,
+      0x8000000080ull, 0x8000000080ull, 0u, 0u,
+      128u, 0u, 128ull << 32, 0u}};
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(next.data()), sizeof(next)),
+        "Next PACKED tag accepted");
+  check(gif.triangle_records().back().vertices[0].q == 0x3F800000u &&
+        gif.triangle_records().back().vertices[0].st == first.vertices[1].st,
+        "New GIFtag resets temporary Q without clearing ST");
+  const std::array<std::uint64_t, 8> reglist{{
+      1ull | (1ull << 58) | (6ull << 60), 0x555321ull,
+      0x40A0000080808080ull, 0x3E8000003F800000ull, 0x00200010u,
+      0u, 128u, 128ull << 16}};
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(reglist.data()), sizeof(reglist)),
+        "REGLIST texture attributes accepted");
+  const auto& last = gif.triangle_records().back().vertices[0];
+  check(last.q == 0x40A00000u && last.st == 0x3E8000003F800000ull &&
+        last.uv == 0x00200010u, "REGLIST ST and UV preserve explicit RGBAQ Q");
+  gif.reset();
+  gif.submit(reinterpret_cast<const std::uint8_t*>(next.data()), sizeof(next));
+  check(gif.triangle_records().size() == 1u &&
+        gif.triangle_records()[0].vertices[0].st == 0u &&
+        gif.triangle_records()[0].vertices[0].uv == 0u &&
+        gif.triangle_records()[0].vertices[0].q == 0x3F800000u,
+        "Reset clears texture latches and restores PACKED Q default");
+}
+
 void test_triangle_trace() {
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
@@ -4418,6 +4474,7 @@ int main() {
   test_vu0_broadcast_subtract();
   test_vu0_broadcast_minmax();
   test_triangle_trace();
+  test_gif_texture_attribute_latches();
   test_vif_packet_capture();
   test_vif_unsupported_location();
   test_vif_direct();

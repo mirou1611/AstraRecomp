@@ -28,6 +28,8 @@ void Gif::reset() {
   triangle_records_.clear();
   prim_ = 0;
   rgbaq_ = 0x8000000080808080ull;
+  st_ = 0;
+  packed_q_ = 0x3F800000u;
   tex0_[0] = tex0_[1] = 0;
   test_[0] = test_[1] = 0;
   zbuf_[0] = zbuf_[1] = 0;
@@ -80,6 +82,9 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
       payload_bytes = static_cast<std::size_t>(loops) * 16u;
     if (pending_.size() - tag_start < 16u + payload_bytes) break;
     cursor += 16u;
+    // A new nonempty GIFtag resets the temporary Q, not GS RGBAQ.Q.
+    // Do this only when the buffered tag can actually be processed.
+    if (loops != 0u) packed_q_ = 0x3F800000u;
     if (format == 0u && loops != 0u && (tag & (1ull << 46)) != 0u)
       set_prim((tag >> 47) & 0x7FFu);
 
@@ -101,7 +106,10 @@ bool Gif::submit(const std::uint8_t* data, std::size_t size) {
                 (((value >> 32) & 0xFFu) << 8) |
                 ((upper & 0xFFu) << 16) |
                 (((upper >> 32) & 0xFFu) << 24);
-            rgbaq_ = (rgbaq_ & 0xFFFFFFFF00000000ull) | rgba;
+            rgbaq_ = (std::uint64_t{packed_q_} << 32) | rgba;
+          } else if (descriptor == 0x02u) {
+            st_ = value;
+            packed_q_ = static_cast<std::uint32_t>(upper);
           } else if (descriptor == 0x03u) {
             uv_ = (value & 0x3FFFu) | (((value >> 32) & 0x3FFFu) << 16);
           } else if (descriptor == 0x04u || descriptor == 0x0Cu) {
@@ -264,6 +272,7 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   switch (address) {
   case 0x00: set_prim(value); break;
   case 0x01: rgbaq_ = value; break;
+  case 0x02: st_ = value; break; // A+D / REGLIST ST does not change Q.
   case 0x03: uv_ = value; break;
   case 0x06: tex0_[0] = value; break;
   case 0x07: tex0_[1] = value; break;
@@ -315,7 +324,8 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
         scaled_coordinate(xyz, xyoffset_[context], 0u, 0u),
         scaled_coordinate(xyz, xyoffset_[context], 16u, 32u),
         static_cast<std::uint32_t>(xyz >> 32),
-        static_cast<std::uint32_t>(rgbaq_)};
+        static_cast<std::uint32_t>(rgbaq_), st_, uv_,
+        static_cast<std::uint32_t>(rgbaq_ >> 32)};
   };
 
   if (primitive == 0u) {

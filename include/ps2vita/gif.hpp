@@ -73,6 +73,8 @@ private:
   std::vector<std::uint8_t> local_memory_;
   std::uint64_t prim_ = 0;
   std::uint64_t rgbaq_ = 0x8000000080808080ull;
+  std::uint64_t st_ = 0;
+  std::uint32_t packed_q_ = 0x3F800000u;
   std::uint64_t tex0_[2]{};
   std::uint64_t test_[2]{};
   std::uint64_t zbuf_[2]{};

@@ -10,6 +10,9 @@ struct GsVertex {
   int y = 0;
   std::uint32_t z = 0;
   std::uint32_t color = 0xFFFFFFFFu; // AABBGGRR, matching the Vita framebuffer.
+  // Raw guest texture attributes, latched at XYZ kick (no host FP conversion).
+  std::uint64_t st = 0, uv = 0;
+  std::uint32_t q = 0;
 };
 
 class Gs {
