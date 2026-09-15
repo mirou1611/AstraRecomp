@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -328,10 +329,23 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
         "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP] "
-        "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM] [FIRST_VIF_BIN]\n");
+        "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM] [FIRST_VIF_BIN]\n"
+        "optional ASTRA_TRACE_SECONDS=1..86400 bounds host runtime and reports progress; 0 disables\n");
     return 2;
   }
 
+  unsigned host_seconds = 0;
+  if (const char* limit = std::getenv("ASTRA_TRACE_SECONDS")) {
+    if (*limit == '\0') return 2;
+    for (const char* p = limit; *p; ++p) {
+      if (*p < '0' || *p > '9' || host_seconds > 8640u) {
+        std::fputs("ASTRA_TRACE_SECONDS must be an integer in 0..86400\n", stderr);
+        return 2;
+      }
+      host_seconds = host_seconds * 10u + static_cast<unsigned>(*p - '0');
+    }
+    if (host_seconds > 86400u) return 2;
+  }
   std::ifstream input(argv[1], std::ios::binary);
   const std::vector<std::uint8_t> bios(
       (std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
@@ -447,7 +461,22 @@ int main(int argc, char** argv) {
   bool vif_failure_reported = false;
   std::array<std::uint64_t, 2> spu_keyon_writes{};
   std::array<std::uint32_t, 2> spu_keyon_masks{};
+  const auto host_start = std::chrono::steady_clock::now();
+  bool host_deadline = false;
+  unsigned last_report = 0;
   for (; steps < max_steps; ++steps) {
+    if (host_seconds != 0u && (steps & 0xFFFFu) == 0u) {
+      const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::steady_clock::now() - host_start).count();
+      if (elapsed >= last_report + 5u) {
+        std::fprintf(stderr, "host_progress seconds=%lld steps=%llu pc=%08X\n",
+            static_cast<long long>(elapsed), static_cast<unsigned long long>(steps),
+            emulator.cpu().state().pc);
+        std::fflush(stderr);
+        last_report = static_cast<unsigned>(elapsed);
+      }
+      if (elapsed >= host_seconds) { host_deadline = true; break; }
+    }
     if (sbus_probe_step != 0u && steps == sbus_probe_step) {
       std::fprintf(stderr,
           "diagnostic: injecting IOP ICFG bit-1 SBUS probe at step %llu\n",
@@ -896,6 +925,9 @@ int main(int argc, char** argv) {
     low_stub_word = current_low_stub_word;
   }
 
+  if (host_seconds != 0u)
+    std::printf("host_deadline=%u limit_seconds=%u (checked between EE steps)\n",
+        unsigned(host_deadline), host_seconds);
   const auto& state = emulator.cpu().state();
   const auto& iop_state = emulator.iop().state();
   if (low_clear_triggered)
