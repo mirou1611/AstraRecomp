@@ -3871,7 +3871,7 @@ void test_gif_texture_color_component() {
       0x0800000000008001ull, 0u,
       0x20FF804020FF8040ull, 0x20FF804020FF8040ull}};
   for (unsigned context = 0; context < 2; ++context)
-    for (unsigned tfx = 0; tfx < 2; ++tfx)
+    for (unsigned tfx = 0; tfx < 4; ++tfx)
       for (unsigned tcc = 0; tcc < 2; ++tcc)
         for (unsigned alpha : {0u, 64u, 128u, 255u}) {
           ps2vita::Gs gs;
@@ -3883,9 +3883,12 @@ void test_gif_texture_color_component() {
               (std::uint64_t{tfx} << 35), 6u + context);
           gif_depth_register(gif, (alpha << 24) | 0x00C04020u, 1u);
           gif_depth_register(gif, 0u, 3u);
-          const unsigned expected_alpha = !tcc ? alpha : tfx ? 32u : alpha / 4u;
+          const unsigned expected_alpha = !tcc ? alpha : tfx == 0u ? alpha / 4u :
+              tfx == 2u ? std::min(255u, 32u + alpha) : 32u;
+          const auto highlight_rgb = 0x00FF0000u |
+              (std::min(255u, 64u + alpha) << 8) | std::min(255u, 16u + alpha);
           const std::uint32_t expected = (expected_alpha << 24) |
-              (tfx ? 0x00FF8040u : 0x00FF4010u);
+              (tfx == 0u ? 0x00FF4010u : tfx == 1u ? 0x00FF8040u : highlight_rgb);
           const auto triangle = [&] {
             gif_depth_register(gif, 0x113u | (context << 9), 0u);
             gif_depth_register(gif, 0u, 5u);
@@ -3896,7 +3899,7 @@ void test_gif_texture_color_component() {
                              0x47u + context);
           triangle();
           check(gs.pixel(0, 0) == expected,
-                "RGB/RGBA MODULATE/DECAL preserve color and select alpha in both contexts");
+                "All four texture functions select RGB/RGBA alpha in both contexts");
           gs.clear(0x12345678u);
           gif_depth_register(gif, 1u | (4u << 1) | ((expected_alpha ^ 1u) << 4),
                              0x47u + context);

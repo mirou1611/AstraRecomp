@@ -251,21 +251,27 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
   }
   const auto texture_function = static_cast<unsigned>((tex0 >> 35) & 3u);
   const bool texture_alpha = (tex0 & (1ull << 34)) != 0u;
-  if (texture_function != 0u) {
-    // DECAL uses texture RGB. HIGHLIGHT modes remain incomplete here.
+  if (texture_function == 1u) { // DECAL
     return texture_alpha ? color :
         (color & 0x00FFFFFFu) | (vertex_color & 0xFF000000u);
   }
-  std::uint32_t modulated = 0;
-  for (unsigned shift = 0; shift < 32u; shift += 8u) {
+  const auto vertex_alpha = vertex_color >> 24;
+  const auto texel_alpha = color >> 24;
+  std::uint32_t output = 0;
+  for (unsigned shift = 0; shift < 24u; shift += 8u) {
     const auto texel = (color >> shift) & 0xFFu;
     const auto vertex = (vertex_color >> shift) & 0xFFu;
-    modulated |= std::min(255u, (texel * vertex) >> 7u) << shift;
+    const auto highlight = texture_function >= 2u ? vertex_alpha : 0u;
+    output |= std::min(255u, ((texel * vertex) >> 7u) + highlight) << shift;
   }
-  // TCC=RGB preserves incoming alpha, including for MODULATE. It must be
-  // selected before alpha test/blending, not patched into the framebuffer.
-  return texture_alpha ? modulated :
-      (modulated & 0x00FFFFFFu) | (vertex_color & 0xFF000000u);
+  auto alpha = vertex_alpha; // TCC=RGB preserves incoming alpha in every mode.
+  if (texture_alpha) {
+    if (texture_function == 0u) alpha = (texel_alpha * vertex_alpha) >> 7u;
+    else if (texture_function == 2u) alpha = texel_alpha + vertex_alpha;
+    else alpha = texel_alpha; // HIGHLIGHT2
+  }
+  // Texture-function saturation precedes alpha test and framebuffer blending.
+  return output | (std::min(255u, alpha) << 24);
 }
 
 void Gif::set_prim(std::uint64_t value) {

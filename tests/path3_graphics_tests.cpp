@@ -13,8 +13,13 @@ int main(int argc, char** argv) {
   const bool perspective = argc > 1 && std::strcmp(argv[1], "--stq") == 0;
   const bool rgb_decal = argc > 1 && std::strcmp(argv[1], "--rgb-decal") == 0;
   const bool rgb_modulate = argc > 1 && std::strcmp(argv[1], "--rgb-modulate") == 0;
+  const bool highlight1 = argc > 1 && std::strcmp(argv[1], "--highlight") == 0;
+  const bool highlight2 = argc > 1 && std::strcmp(argv[1], "--highlight2") == 0;
+  const bool highlight = highlight1 || highlight2;
   const bool rgb = rgb_decal || rgb_modulate;
-  if (perspective || rgb) { --argc; ++argv; }
+  if (perspective || rgb || highlight) { --argc; ++argv; }
+  const unsigned expected_alpha = highlight1 ? 0x60u : highlight2 ? 0x20u :
+                                  rgb ? 0x40u : 0xFFu;
   ps2vita::Emulator emulator;
   auto& memory = emulator.memory();
   std::vector<std::uint64_t> packet{
@@ -23,6 +28,10 @@ int main(int argc, char** argv) {
       0x0000000200000002ull, 0x52u, 0u, 0x53u,
       0x0800000000008001ull, 0u,
       0xFF00FF00FF0000FFull, 0xFFFFFFFFFFFF0000ull};
+  if (highlight) {
+    packet[12] = 0x2000FF00200000FFull;
+    packet[13] = 0x20FFFFFF20FF0000ull;
+  }
   const auto ad = [&](std::uint64_t value, std::uint64_t reg) {
     packet.insert(packet.end(), {0x1000000000008001ull, 0xEull, value, reg});
   };
@@ -35,7 +44,8 @@ int main(int argc, char** argv) {
   ad(0u, 0x08u); // CLAMP: repeat.
   ad(0u, 0x3Fu); // TEXFLUSH after the upload.
   ad(1ull | (1ull << 14) | (1ull << 26) | (1ull << 30) |
-      (rgb ? 0ull : (1ull << 34)) | (rgb_modulate ? 0ull : (1ull << 35)),
+      (rgb ? 0ull : (1ull << 34)) |
+      ((highlight1 ? 2ull : highlight2 ? 3ull : rgb_modulate ? 0ull : 1ull) << 35),
       6u); // 2x2 PSMCT32, selected TCC/TFX.
   ad(0u, 0x18u); // XYOFFSET
   ad(0x07FF000007FF0000ull, 0x40u); // SCISSOR
@@ -48,6 +58,7 @@ int main(int argc, char** argv) {
   // RGB must retain vertex alpha=0x40, not use/modulate texture alpha=0xFF.
   // Make the alpha result observable in reference RGB captures too.
   if (rgb) ad(1u | (4u << 1) | (0x40u << 4), 0x47u); // EQUAL, KEEP
+  if (highlight) ad(1u | (4u << 1) | (expected_alpha << 4), 0x47u);
   ad(perspective ? 0x13u : 0x113u, 0u);
   if (perspective) {
     ad(0x3F80000080808080ull, 1u); // Q=1
@@ -57,7 +68,7 @@ int main(int argc, char** argv) {
     ad(0x3F80000080808080ull, 1u); // Q=1
     ad(0x3F80000000000000ull, 2u); ad(2048ull << 16, 5u); // S=0, T=1
   } else {
-    ad(rgb ? 0x40808080u : 0x80808080u, 1u);
+    ad(rgb || highlight ? 0x40808080u : 0x80808080u, 1u);
     ad(0u, 3u); ad(0u, 5u);
     ad(32u, 3u); ad(2048u, 5u);
     ad(32ull << 16, 3u); ad(2048ull << 16, 5u);
@@ -128,7 +139,7 @@ int main(int argc, char** argv) {
       const bool green = perspective ? 3 * x >= 32 : x >= 16;
       const bool blue = perspective ? 2 * y >= 32 + x : y >= 16;
       const std::uint32_t expected = x + y < 32 ?
-          ((rgb ? 0x40000000u : 0xFF000000u) |
+          ((expected_alpha << 24) | (highlight ? 0x00404040u : 0u) |
            (green ? 0x0000FF00u : blue ? 0x00FF0000u : 0x000000FFu)) : 0u;
       if (emulator.gs().pixel(x, y) != expected) ++mismatches;
     }
