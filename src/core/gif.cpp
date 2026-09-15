@@ -250,14 +250,22 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
     return vertex_color;
   }
   const auto texture_function = static_cast<unsigned>((tex0 >> 35) & 3u);
-  if (texture_function != 0u) return color; // DECAL/highlight reference path.
+  const bool texture_alpha = (tex0 & (1ull << 34)) != 0u;
+  if (texture_function != 0u) {
+    // DECAL uses texture RGB. HIGHLIGHT modes remain incomplete here.
+    return texture_alpha ? color :
+        (color & 0x00FFFFFFu) | (vertex_color & 0xFF000000u);
+  }
   std::uint32_t modulated = 0;
   for (unsigned shift = 0; shift < 32u; shift += 8u) {
     const auto texel = (color >> shift) & 0xFFu;
     const auto vertex = (vertex_color >> shift) & 0xFFu;
     modulated |= std::min(255u, (texel * vertex) >> 7u) << shift;
   }
-  return modulated;
+  // TCC=RGB preserves incoming alpha, including for MODULATE. It must be
+  // selected before alpha test/blending, not patched into the framebuffer.
+  return texture_alpha ? modulated :
+      (modulated & 0x00FFFFFFu) | (vertex_color & 0xFF000000u);
 }
 
 void Gif::set_prim(std::uint64_t value) {

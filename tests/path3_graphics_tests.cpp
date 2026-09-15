@@ -11,7 +11,10 @@
 // Execute guest EE stores to kick PATH3 DMA; never submit directly to Gif.
 int main(int argc, char** argv) {
   const bool perspective = argc > 1 && std::strcmp(argv[1], "--stq") == 0;
-  if (perspective) { --argc; ++argv; }
+  const bool rgb_decal = argc > 1 && std::strcmp(argv[1], "--rgb-decal") == 0;
+  const bool rgb_modulate = argc > 1 && std::strcmp(argv[1], "--rgb-modulate") == 0;
+  const bool rgb = rgb_decal || rgb_modulate;
+  if (perspective || rgb) { --argc; ++argv; }
   ps2vita::Emulator emulator;
   auto& memory = emulator.memory();
   std::vector<std::uint64_t> packet{
@@ -32,7 +35,8 @@ int main(int argc, char** argv) {
   ad(0u, 0x08u); // CLAMP: repeat.
   ad(0u, 0x3Fu); // TEXFLUSH after the upload.
   ad(1ull | (1ull << 14) | (1ull << 26) | (1ull << 30) |
-      (1ull << 34) | (1ull << 35), 6u); // 2x2 PSMCT32, DECAL RGBA
+      (rgb ? 0ull : (1ull << 34)) | (rgb_modulate ? 0ull : (1ull << 35)),
+      6u); // 2x2 PSMCT32, selected TCC/TFX.
   ad(0u, 0x18u); // XYOFFSET
   ad(0x07FF000007FF0000ull, 0x40u); // SCISSOR
   ad(0u, 0x47u); // No alpha/depth test
@@ -41,6 +45,9 @@ int main(int argc, char** argv) {
   ad(0u, 5u);
   const auto clear_kick_address_word = packet.size() + 3u;
   ad(10240u | (7168ull << 16), 5u);
+  // RGB must retain vertex alpha=0x40, not use/modulate texture alpha=0xFF.
+  // Make the alpha result observable in reference RGB captures too.
+  if (rgb) ad(1u | (4u << 1) | (0x40u << 4), 0x47u); // EQUAL, KEEP
   ad(perspective ? 0x13u : 0x113u, 0u);
   if (perspective) {
     ad(0x3F80000080808080ull, 1u); // Q=1
@@ -50,7 +57,7 @@ int main(int argc, char** argv) {
     ad(0x3F80000080808080ull, 1u); // Q=1
     ad(0x3F80000000000000ull, 2u); ad(2048ull << 16, 5u); // S=0, T=1
   } else {
-    ad(0x80808080u, 1u);
+    ad(rgb ? 0x40808080u : 0x80808080u, 1u);
     ad(0u, 3u); ad(0u, 5u);
     ad(32u, 3u); ad(2048u, 5u);
     ad(32ull << 16, 3u); ad(2048ull << 16, 5u);
@@ -121,7 +128,8 @@ int main(int argc, char** argv) {
       const bool green = perspective ? 3 * x >= 32 : x >= 16;
       const bool blue = perspective ? 2 * y >= 32 + x : y >= 16;
       const std::uint32_t expected = x + y < 32 ?
-          (green ? 0xFF00FF00u : blue ? 0xFFFF0000u : 0xFF0000FFu) : 0u;
+          ((rgb ? 0x40000000u : 0xFF000000u) |
+           (green ? 0x0000FF00u : blue ? 0x00FF0000u : 0x000000FFu)) : 0u;
       if (emulator.gs().pixel(x, y) != expected) ++mismatches;
     }
   ok = ok && mismatches == 0u;

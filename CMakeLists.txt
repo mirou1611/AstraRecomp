@@ -171,6 +171,8 @@ else()
   target_link_libraries(path3_graphics_tests PRIVATE ps2core)
   add_test(NAME path3_graphics_tests COMMAND path3_graphics_tests)
   add_test(NAME path3_stq_graphics_tests COMMAND path3_graphics_tests --stq)
+  add_test(NAME path3_rgb_decal_tests COMMAND path3_graphics_tests --rgb-decal)
+  add_test(NAME path3_rgb_modulate_tests COMMAND path3_graphics_tests --rgb-modulate)
   add_test(NAME astrair_builder_tests
            COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
                    "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_astrair.py")

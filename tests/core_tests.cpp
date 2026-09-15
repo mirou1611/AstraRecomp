@@ -3863,6 +3863,49 @@ void gif_depth_register(ps2vita::Gif& gif, std::uint64_t value,
                    sizeof(packet)), "GIF depth register accepted");
 }
 
+void test_gif_texture_color_component() {
+  const std::array<std::uint64_t, 14> upload{{
+      0x1000000000008004ull, 0xEull,
+      0x0001000100000000ull, 0x50u, 0u, 0x51u,
+      0x0000000200000002ull, 0x52u, 0u, 0x53u,
+      0x0800000000008001ull, 0u,
+      0x20FF804020FF8040ull, 0x20FF804020FF8040ull}};
+  for (unsigned context = 0; context < 2; ++context)
+    for (unsigned tfx = 0; tfx < 2; ++tfx)
+      for (unsigned tcc = 0; tcc < 2; ++tcc)
+        for (unsigned alpha : {0u, 64u, 128u, 255u}) {
+          ps2vita::Gs gs;
+          ps2vita::Gif gif(gs);
+          check(gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()),
+                           sizeof(upload)), "TCC texture upload accepted");
+          gif_depth_register(gif, 1ull | (1ull << 14) | (1ull << 26) |
+              (1ull << 30) | (std::uint64_t{tcc} << 34) |
+              (std::uint64_t{tfx} << 35), 6u + context);
+          gif_depth_register(gif, (alpha << 24) | 0x00C04020u, 1u);
+          gif_depth_register(gif, 0u, 3u);
+          const unsigned expected_alpha = !tcc ? alpha : tfx ? 32u : alpha / 4u;
+          const std::uint32_t expected = (expected_alpha << 24) |
+              (tfx ? 0x00FF8040u : 0x00FF4010u);
+          const auto triangle = [&] {
+            gif_depth_register(gif, 0x113u | (context << 9), 0u);
+            gif_depth_register(gif, 0u, 5u);
+            gif_depth_register(gif, 128u, 5u);
+            gif_depth_register(gif, 128ull << 16, 5u);
+          };
+          gif_depth_register(gif, 1u | (4u << 1) | (expected_alpha << 4),
+                             0x47u + context);
+          triangle();
+          check(gs.pixel(0, 0) == expected,
+                "RGB/RGBA MODULATE/DECAL preserve color and select alpha in both contexts");
+          gs.clear(0x12345678u);
+          gif_depth_register(gif, 1u | (4u << 1) | ((expected_alpha ^ 1u) << 4),
+                             0x47u + context);
+          triangle();
+          check(gs.pixel(0, 0) == 0x12345678u,
+                "TCC-selected alpha reaches alpha test before framebuffer write");
+        }
+}
+
 void test_gif_textured_uv_triangles() {
   const std::array<std::uint64_t, 14> upload{{
       0x1000000000008004ull, 0xEull,
@@ -4082,7 +4125,7 @@ void test_textured_sprite_scissor_preserves_uv() {
   }};
   const std::array<std::array<std::uint64_t, 2>, 9> draw{{
       {{0x1000000000008008ull, 0xEull}},
-      {{1ull | (1ull << 14) | (1ull << 35), 6u}},
+      {{1ull | (1ull << 14) | (1ull << 34) | (1ull << 35), 6u}}, // DECAL RGBA
       {{0x116u, 0u}},
       {{0x00030000000F0008ull, 0x40u}}, // host scissor X=2..3, Y=0
       {{0u, 3u}},
@@ -4578,6 +4621,7 @@ int main() {
   test_gif_texture_attribute_latches();
   test_gs_perspective_safety();
   test_gif_textured_uv_triangles();
+  test_gif_texture_color_component();
   test_vif_packet_capture();
   test_vif_unsupported_location();
   test_vif_direct();
