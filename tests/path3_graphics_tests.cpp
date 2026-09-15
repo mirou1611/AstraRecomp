@@ -2,6 +2,7 @@
 #include "ps2vita/framebuffer_dump.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -9,6 +10,8 @@
 // Self-contained logical-GS integration oracle, not a hardware golden dump.
 // Execute guest EE stores to kick PATH3 DMA; never submit directly to Gif.
 int main(int argc, char** argv) {
+  const bool perspective = argc > 1 && std::strcmp(argv[1], "--stq") == 0;
+  if (perspective) { --argc; ++argv; }
   ps2vita::Emulator emulator;
   auto& memory = emulator.memory();
   std::vector<std::uint64_t> packet{
@@ -38,11 +41,20 @@ int main(int argc, char** argv) {
   ad(0u, 5u);
   const auto clear_kick_address_word = packet.size() + 3u;
   ad(10240u | (7168ull << 16), 5u);
-  ad(0x113u, 0u); // triangle + texture + fixed UV
-  ad(0x80808080u, 1u);
-  ad(0u, 3u); ad(0u, 5u);
-  ad(32u, 3u); ad(2048u, 5u);
-  ad(32ull << 16, 3u); ad(2048ull << 16, 5u);
+  ad(perspective ? 0x13u : 0x113u, 0u);
+  if (perspective) {
+    ad(0x3F80000080808080ull, 1u); // Q=1
+    ad(0u, 2u); ad(0u, 5u);
+    ad(0x4000000080808080ull, 1u); // Q=2
+    ad(0x40000000u, 2u); ad(2048u, 5u); // S=2, T=0
+    ad(0x3F80000080808080ull, 1u); // Q=1
+    ad(0x3F80000000000000ull, 2u); ad(2048ull << 16, 5u); // S=0, T=1
+  } else {
+    ad(0x80808080u, 1u);
+    ad(0u, 3u); ad(0u, 5u);
+    ad(32u, 3u); ad(2048u, 5u);
+    ad(32ull << 16, 3u); ad(2048ull << 16, 5u);
+  }
   // An off-scissor point changes primitive class and submits the pending
   // triangle batch in the reference renderer without needing display scanout.
   ad(0u, 0u);
@@ -106,8 +118,10 @@ int main(int argc, char** argv) {
     for (int x = 0; x < ps2vita::Gs::kWidth; ++x) {
       // Independently specified coverage and nearest texels: no rasterizer
       // helpers or captured output are used to generate the expectation.
+      const bool green = perspective ? 3 * x >= 32 : x >= 16;
+      const bool blue = perspective ? 2 * y >= 32 + x : y >= 16;
       const std::uint32_t expected = x + y < 32 ?
-          (x >= 16 ? 0xFF00FF00u : y >= 16 ? 0xFFFF0000u : 0xFF0000FFu) : 0u;
+          (green ? 0xFF00FF00u : blue ? 0xFFFF0000u : 0xFF0000FFu) : 0u;
       if (emulator.gs().pixel(x, y) != expected) ++mismatches;
     }
   ok = ok && mismatches == 0u;

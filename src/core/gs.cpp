@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
+#include <cstring>
+#include <limits>
 
 namespace ps2vita {
 namespace {
@@ -111,11 +114,23 @@ void Gs::line(GsVertex a, GsVertex b) {
 }
 
 void Gs::triangle(GsVertex a, GsVertex b, GsVertex c,
-                  const TextureSampler& sample) {
+                  const TextureSampler& sample, unsigned st_width, unsigned st_height) {
   std::int64_t area = edge(a, b, c.x, c.y);
   // A collapsed triangle has no coverage; it is not a line primitive.
   if (area == 0) return;
   if (area < 0) { std::swap(b, c); area = -area; }
+  const auto fp = [](std::uint32_t bits) {
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return static_cast<double>(value);
+  };
+  const double sa = fp(static_cast<std::uint32_t>(a.st)),
+               sb = fp(static_cast<std::uint32_t>(b.st)),
+               sc = fp(static_cast<std::uint32_t>(c.st));
+  const double ta = fp(static_cast<std::uint32_t>(a.st >> 32)),
+               tb = fp(static_cast<std::uint32_t>(b.st >> 32)),
+               tc = fp(static_cast<std::uint32_t>(c.st >> 32));
+  const double qa = fp(a.q), qb = fp(b.q), qc = fp(c.q);
   // With positive edge() area and screen Y increasing downwards, include
   // left/downward and top/leftward edges; exclude their opposite partners.
   const auto inclusive = [](const GsVertex& from, const GsVertex& to) {
@@ -151,7 +166,23 @@ void Gs::triangle(GsVertex a, GsVertex b, GsVertex c,
                            ((c.uv >> shift) & 0x3FFFu) * wc;
           return static_cast<unsigned>(sum / (area * 16));
         };
-        color = sample(coordinate(0), coordinate(16), color);
+        if (st_width != 0u && st_height != 0u) {
+          // S, T and Q are independently affine in screen space. Divide AFTER
+          // interpolation; area cancels between numerator and denominator.
+          const double q = qa * wa + qb * wb + qc * wc;
+          if (q == 0.0 || !std::isfinite(q)) continue;
+          const double u = (sa * wa + sb * wb + sc * wc) * st_width / q;
+          const double v = (ta * wa + tb * wb + tc * wc) * st_height / q;
+          // Safety boundary for the current unsigned logical-memory sampler.
+          // Negative/nonfinite coordinates and GS clamp modes need a separate
+          // hardware-validated implementation; never cast them with C++ UB.
+          const double max = std::numeric_limits<unsigned>::max();
+          if (!std::isfinite(u) || !std::isfinite(v) ||
+              u < 0.0 || v < 0.0 || u > max || v > max) continue;
+          color = sample(static_cast<unsigned>(u), static_cast<unsigned>(v), color);
+        } else {
+          color = sample(coordinate(0), coordinate(16), color);
+        }
       }
       write(x, y, z, color);
     }

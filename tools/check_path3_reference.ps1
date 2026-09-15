@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$ImagePath)
+param([Parameter(Mandatory=$true)][string]$ImagePath, [switch]$Perspective)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 $bitmap = [System.Drawing.Bitmap]::new((Resolve-Path -LiteralPath $ImagePath).Path)
@@ -12,9 +12,11 @@ try {
     # include a padding row/column in the RT crop; those are not golden pixels.
     for ($y = 0; $y -lt 128; $y++) {
         for ($x = 0; $x -lt 128; $x++) {
-            $expected = if ($x + $y -ge 128) { 0 } elseif ($x -ge 64) {
+            $green = if ($Perspective) { 3 * $x -ge 128 } else { $x -ge 64 }
+            $blue = if ($Perspective) { 2 * $y -ge 128 + $x } else { $y -ge 64 }
+            $expected = if ($x + $y -ge 128) { 0 } elseif ($green) {
                 0x00FF00
-            } elseif ($y -ge 64) { 0x0000FF } else { 0xFF0000 }
+            } elseif ($blue) { 0x0000FF } else { 0xFF0000 }
             $actual = $bitmap.GetPixel($x, $y).ToArgb() -band 0xFFFFFF
             if ($actual -ne $expected) {
                 $mismatches++

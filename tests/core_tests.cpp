@@ -557,6 +557,41 @@ void test_vu0_broadcast_minmax() {
         "VU min/max preserves masked lanes, VF0 and STATUS");
 }
 
+void test_gs_perspective_safety() {
+  ps2vita::Gs gs;
+  ps2vita::GsVertex a{0, 0, 0, 0x80808080u}, b{8, 0, 0, 0x80808080u},
+                    c{0, 8, 0, 0x80808080u};
+  a.q = b.q = c.q = 0x3F800000u;
+  b.st = 0x3F800000u; c.st = 0x3F80000000000000ull;
+  const auto sampler = [](unsigned u, unsigned v, std::uint32_t) {
+    return 1u + u + 16u * v;
+  };
+  gs.clear(0u); gs.triangle(a, b, c, sampler, 8u, 8u);
+  const auto pixel = gs.pixel(2, 3);
+  gs.clear(0u); gs.triangle(a, c, b, sampler, 8u, 8u);
+  check(pixel == 51u && gs.pixel(2, 3) == pixel,
+        "Perspective attributes follow reversed winding and texture dimensions");
+  for (const auto bits : {0u, 0x7F800000u, 0x7FC00000u}) {
+    a.q = b.q = c.q = bits;
+    unsigned calls = 0;
+    gs.clear(0x12345678u);
+    gs.triangle(a, b, c, [&](unsigned, unsigned, std::uint32_t) {
+      ++calls; return 1u;
+    }, 8u, 8u);
+    check(calls == 0u && gs.pixel(2, 3) == 0x12345678u,
+          "Zero and nonfinite Q safely skip unsupported fragments");
+  }
+  a.q = b.q = c.q = 0x3F800000u;
+  for (const auto bits : {0xBF800000u, 0x7F800000u, 0x7FC00000u, 0x7F7FFFFFu}) {
+    a.st = b.st = c.st = bits;
+    unsigned calls = 0;
+    gs.triangle(a, b, c, [&](unsigned, unsigned, std::uint32_t) {
+      ++calls; return 1u;
+    }, 8u, 8u);
+    check(calls == 0u, "Unsupported ST range never reaches integer conversion or sampler");
+  }
+}
+
 void test_gif_texture_attribute_latches() {
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
@@ -4541,6 +4576,7 @@ int main() {
   test_vu0_broadcast_minmax();
   test_triangle_trace();
   test_gif_texture_attribute_latches();
+  test_gs_perspective_safety();
   test_gif_textured_uv_triangles();
   test_vif_packet_capture();
   test_vif_unsupported_location();

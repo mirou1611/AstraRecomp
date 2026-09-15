@@ -42,7 +42,8 @@ public:
   using TextureSampler = std::function<std::uint32_t(unsigned, unsigned,
                                                      std::uint32_t)>;
   void triangle(GsVertex a, GsVertex b, GsVertex c,
-                const TextureSampler& sample = {});
+                const TextureSampler& sample = {},
+                unsigned st_width = 0, unsigned st_height = 0);
 
   const std::uint32_t* pixels() const { return color_.data(); }
   std::uint32_t pixel(int x, int y) const;
