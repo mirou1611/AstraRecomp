@@ -43,6 +43,10 @@ int main(int argc, char** argv) {
   ad(0u, 3u); ad(0u, 5u);
   ad(32u, 3u); ad(2048u, 5u);
   ad(32ull << 16, 3u); ad(2048ull << 16, 5u);
+  // An off-scissor point changes primitive class and submits the pending
+  // triangle batch in the reference renderer without needing display scanout.
+  ad(0u, 0u);
+  ad(0xFFFFFFFFu, 5u);
   constexpr std::uint32_t entry = 0x100000u, packet_address = 0x101000u;
   const std::uint32_t program[]{
       0x3C081001u, // lui t0, 0x1001 (SW sign-extends the Axxx offset)
