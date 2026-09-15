@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace ps2vita {
 
@@ -21,7 +22,7 @@ constexpr std::uint32_t kNtscScanlineDivisor = 1573425u;
 Memory::Memory()
     : ram_(kRamSize, 0), bios_(kBiosSize, 0), scratch_(kScratchSize, 0),
       hw_(kHwSize, 0), gs_hw_(kGsHwSize, 0), vu_mem_(kVuSize, 0),
-      iop_ram_(kIopRamSize, 0),
+      iop_ram_(kIopRamSize, 0), spu2_ram_(2u * 1024u * 1024u, 0),
       iop_hw_(kIopHwSize, 0),
       ee_internal_(kEeInternalSize, 0), dve_(kDveSize, 0) {
   clear();
@@ -101,6 +102,13 @@ void Memory::clear() {
   std::fill(gs_hw_.begin(), gs_hw_.end(), 0);
   std::fill(vu_mem_.begin(), vu_mem_.end(), 0);
   std::fill(iop_ram_.begin(), iop_ram_.end(), 0);
+  spu2_hw_.fill(0);
+  enable_spu2_shadow(false);
+  // Both SPU2 cores reset ready. STATX bit 7 is cleared while a DMA transfer
+  // is active and restored when the transfer completes.
+  spu2_hw_[0x0344u] = 0x80u;
+  spu2_hw_[0x0744u] = 0x80u;
+  std::fill(spu2_ram_.begin(), spu2_ram_.end(), 0);
   iop_scratch_.fill(0);
   std::fill(iop_hw_.begin(), iop_hw_.end(), 0);
   // SIO2 reset state: no controller/memory-card devices are attached. The
@@ -142,6 +150,19 @@ void Memory::clear() {
   timer5_target_future_ = false;
   sif0_cycles_remaining_ = 0;
   sif1_cycles_remaining_ = 0;
+  gif_cycles_remaining_ = 0;
+  gif_dma_source_ = 0;
+  gif_dma_qwc_ = 0;
+  gif_packets_.clear();
+  vif1_cycles_remaining_ = 0;
+  vif1_final_tadr_ = 0;
+  vif1_final_madr_ = 0;
+  vif1_packets_.clear();
+  vif_dma_spans_.clear();
+  spu2_dma_cycles_remaining_.fill(0);
+  spu2_dma_source_.fill(0);
+  spu2_dma_target_.fill(0);
+  spu2_dma_bytes_.fill(0);
   iop_cache_control_ = 0;
   // EE hardware reset values observed by the BIOS during board detection.
   write32(0x1000F260u, 0x1D000060u);
@@ -460,6 +481,190 @@ void Memory::write64(std::uint32_t address, std::uint64_t value) {
   write32(address + 4, static_cast<std::uint32_t>(value >> 32));
 }
 
+std::uint32_t Memory::cycles_until_next_event() const {
+  const auto raw_ee = [&](std::size_t offset) {
+    return static_cast<std::uint32_t>(hw_[offset]) |
+        (static_cast<std::uint32_t>(hw_[offset + 1]) << 8) |
+        (static_cast<std::uint32_t>(hw_[offset + 2]) << 16) |
+        (static_cast<std::uint32_t>(hw_[offset + 3]) << 24);
+  };
+  const auto raw_iop = [&](std::size_t offset) {
+    return static_cast<std::uint32_t>(iop_hw_[offset]) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 1]) << 8) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 2]) << 16) |
+        (static_cast<std::uint32_t>(iop_hw_[offset + 3]) << 24);
+  };
+
+  // Treat each IOP clock edge as a boundary for now. This is intentionally
+  // conservative until Timer 5 and IOP execution expose their exact deadlines.
+  std::uint32_t distance = 8u - iop_cycle_remainder_;
+  distance = std::min(distance, hblank_cycles_remaining_);
+  distance = std::min(distance, video_cycles_remaining_);
+  for (const auto remaining : spu2_dma_cycles_remaining_) {
+    if (remaining != 0u) distance = std::min(distance, remaining);
+  }
+  if (sif0_cycles_remaining_ != 0u)
+    distance = std::min(distance, sif0_cycles_remaining_);
+  if (sif1_cycles_remaining_ != 0u)
+    distance = std::min(distance, sif1_cycles_remaining_);
+  if (gif_cycles_remaining_ != 0u)
+    distance = std::min(distance, gif_cycles_remaining_);
+  if (vif1_cycles_remaining_ != 0u)
+    distance = std::min(distance, vif1_cycles_remaining_);
+
+  // SIF starts are discovered by advance(), so an armed pair with no scheduled
+  // countdown can transition on the very next call.
+  const bool sif1_armed = sif1_cycles_remaining_ == 0u &&
+      (raw_ee(0xC400u) & 0x100u) != 0u &&
+      (raw_iop(0x0538u) & 0x01000000u) != 0u;
+  const bool sif0_armed = sif0_cycles_remaining_ == 0u &&
+      (raw_ee(0xC000u) & 0x100u) != 0u &&
+      (raw_iop(0x0528u) & 0x01000000u) != 0u;
+  const auto gif_chcr = raw_ee(0xA000u);
+  const bool gif_armed = gif_cycles_remaining_ == 0u &&
+      (gif_chcr & 0x100u) != 0u && (gif_chcr & 0xCu) == 0u &&
+      (raw_ee(0xA020u) & 0xFFFFu) != 0u;
+  const auto vif1_chcr = raw_ee(0x9000u);
+  const bool vif1_armed = vif1_cycles_remaining_ == 0u &&
+      (vif1_chcr & 0x100u) != 0u && (vif1_chcr & 0xCu) == 0x4u;
+  return sif0_armed || sif1_armed || gif_armed || vif1_armed
+      ? 1u : distance;
+}
+
+bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
+                              std::uint32_t& final_tadr,
+                              std::uint32_t& final_madr,
+                              std::uint32_t& total_qwc,
+                              std::vector<VifDmaSpan>* spans) const {
+  // DMA bit 31 selects scratchpad; it is not a CPU KSEG address bit.
+  // Keep encoded addresses for channel writeback and chain control flow.
+  auto tadr = read32(0x10009030u) & 0xFFFFFFF0u;
+  const auto dma_address = [](std::uint32_t address) {
+    return (address & 0x80000000u) != 0u ?
+        kScratchBase + (address & (kScratchSize - 1u)) : address & 0x1FFFFFFFu;
+  };
+  const auto dma_valid = [&](std::uint32_t address, std::size_t bytes) {
+    return (address & 0x80000000u) != 0u || valid(dma_address(address), bytes);
+  };
+  const auto chcr = read32(0x10009000u);
+  std::array<std::uint32_t, 2> return_stack{};
+  unsigned return_depth = 0;
+  total_qwc = 0;
+  final_tadr = tadr;
+  final_madr = 0;
+  const auto append = [&](std::uint32_t source, std::size_t bytes) {
+    if (packet == nullptr) return;
+    const auto old_size = packet->size();
+    if (spans) {
+      std::size_t offset = 0;
+      while (offset < bytes) {
+        const auto encoded = source + static_cast<std::uint32_t>(offset);
+        const auto address = dma_address(encoded);
+        const auto chunk = (encoded & 0x80000000u) != 0u ?
+            std::min(bytes - offset, static_cast<std::size_t>(kScratchSize -
+                (encoded & (kScratchSize - 1u)))) : bytes - offset;
+        spans->push_back({address, old_size + offset, chunk});
+        offset += chunk;
+      }
+    }
+    packet->resize(old_size + bytes);
+    for (std::size_t byte = 0; byte < bytes; ++byte)
+      (*packet)[old_size + byte] = read8(dma_address(source + static_cast<std::uint32_t>(byte)));
+  };
+
+  for (unsigned tag_index = 0; tag_index < 256u; ++tag_index) {
+    if (!dma_valid(tadr, 16u)) return false;
+    const auto tag = read64(dma_address(tadr));
+    const auto qwc = static_cast<std::uint32_t>(tag & 0xFFFFu);
+    const auto id = static_cast<unsigned>((tag >> 28) & 7u);
+    const auto address = static_cast<std::uint32_t>(tag >> 32) & 0xFFFFFFF0u;
+    const bool inline_data = id == 1u || id == 2u || id >= 5u;
+    const auto source = inline_data ? tadr + 16u : address;
+    const auto bytes = static_cast<std::size_t>(qwc) * 16u;
+    if (!dma_valid(source, bytes) || total_qwc > UINT32_MAX - qwc) return false;
+    if ((chcr & 0x40u) != 0u) append(tadr + 8u, 8u); // TTE tag payload.
+    append(source, bytes);
+    total_qwc += qwc;
+    final_madr = source + static_cast<std::uint32_t>(bytes);
+
+    const bool irq_end = (tag & (1ull << 31)) != 0u &&
+                         (chcr & 0x80u) != 0u;
+    if (id == 0u || id == 7u || irq_end) {
+      final_tadr = inline_data ? source + static_cast<std::uint32_t>(bytes)
+                               : tadr + 16u;
+      return true;
+    }
+    if (id == 1u) tadr = source + static_cast<std::uint32_t>(bytes); // CNT
+    else if (id == 2u) tadr = address; // NEXT
+    else if (id == 3u || id == 4u) tadr += 16u; // REF / REFS
+    else if (id == 5u) { // CALL
+      if (return_depth >= return_stack.size()) return false;
+      return_stack[return_depth++] = source + static_cast<std::uint32_t>(bytes);
+      tadr = address;
+    } else if (id == 6u) { // RET
+      if (return_depth == 0u) return false;
+      tadr = return_stack[--return_depth];
+    } else {
+      return false;
+    }
+    final_tadr = tadr;
+  }
+  return false;
+}
+
+void Memory::spu2_shadow_write(unsigned offset, std::uint8_t value) {
+  const unsigned core = offset / 0x400u;
+  const unsigned reg = offset & 0x3FFu;
+  if (reg >= 0x1A0u && reg <= 0x1A6u && reg != 0x1A3u) {
+    const bool on = reg < 0x1A4u;
+    const unsigned first = (reg - (on ? 0x1A0u : 0x1A4u)) * 8u;
+    for (unsigned bit = 0; bit < 8u; ++bit) {
+      if ((value & (1u << bit)) == 0u) continue;
+      const auto index = core * 24u + first + bit;
+      if (on) spu2_shadow_delay_[index] = 2;
+      else { spu2_shadow_delay_[index] = 0; spu2_shadow_[index].key_off(); }
+    }
+  } else if (reg >= 0x1C0u && reg < 0x2E0u && (reg - 0x1C0u) % 12u >= 4u &&
+             (reg - 0x1C0u) % 12u < 8u) {
+    const auto voice = (reg - 0x1C0u) / 12u;
+    const auto addr = 0x1F900000u + core * 0x400u + 0x1C4u + voice * 12u;
+    spu2_shadow_[core * 24u + voice].set_loop_address(
+        (std::uint32_t(iop_read16(addr)) << 16) | iop_read16(addr + 2u));
+  }
+}
+
+void Memory::advance_spu2_shadow(std::uint32_t cycles) {
+  const std::uint64_t total = std::uint64_t(spu2_shadow_cycles_) + cycles;
+  spu2_shadow_cycles_ = total % 6144u; // 768 IOP clocks, eight EE clocks each.
+  for (std::uint64_t tick = 0; tick < total / 6144u; ++tick) {
+    ++spu2_shadow_ticks_;
+    spu2_shadow_dry_ = {};
+    for (unsigned index = 0; index < 48u; ++index) {
+      auto& voice = spu2_shadow_[index];
+      if (!voice.active() && spu2_shadow_delay_[index] == 0) continue;
+      const auto base = 0x1F900000u + (index / 24u) * 0x400u;
+      const auto offset = (index % 24u) * 16u;
+      voice.configure(iop_read16(base + offset + 4u), iop_read16(base + offset + 6u),
+                      iop_read16(base + offset + 8u));
+      if (spu2_shadow_delay_[index] != 0 && --spu2_shadow_delay_[index] == 0) {
+        const auto ssa = base + 0x1C0u + (index % 24u) * 12u;
+        voice.key_on((std::uint32_t(iop_read16(ssa)) << 16) | iop_read16(ssa + 2u));
+      }
+      const int sample = voice.tick(*this);
+      spu2_shadow_peak_ = std::max(spu2_shadow_peak_, unsigned(sample < 0 ? -sample : sample));
+      for (unsigned channel = 0; channel < 2u; ++channel) {
+        const auto mask = iop_read32(base + (channel == 0u ? 0x188u : 0x190u));
+        if ((mask & (1u << (index % 24u))) == 0u) continue;
+        std::int32_t scaled = 0;
+        if (spu2_fixed_volume(static_cast<std::int16_t>(sample),
+                             iop_read16(base + offset + channel * 2u), scaled))
+          spu2_shadow_dry_[index / 24u][channel] += scaled;
+        else spu2_shadow_sweeps_ |= 1ull << index;
+      }
+    }
+  }
+}
+
 void Memory::advance(std::uint32_t cycles) {
   const auto raw_ee = [&](std::size_t offset) {
     return static_cast<std::uint32_t>(hw_[offset]) |
@@ -611,6 +816,94 @@ void Memory::advance(std::uint32_t cycles) {
         }
         store_iop(0x04A0u, new_count);
         store_iop(0x04A4u, mode);
+      }
+    }
+  }
+
+  for (unsigned core = 0; core < 2u; ++core) {
+    auto& remaining = spu2_dma_cycles_remaining_[core];
+    if (remaining == 0u) continue;
+    if (cycles < remaining) {
+      remaining -= cycles;
+      continue;
+    }
+
+    remaining = 0u;
+    for (std::uint32_t byte = 0; byte < spu2_dma_bytes_[core]; ++byte) {
+      const auto source =
+          (spu2_dma_source_[core] + byte) & (kIopRamSize - 1u);
+      const auto destination =
+          (spu2_dma_target_[core] * 2u + byte) % spu2_ram_.size();
+      spu2_ram_[destination] = iop_ram_[source];
+    }
+    const auto final_source =
+        spu2_dma_source_[core] + spu2_dma_bytes_[core];
+    const auto final_target =
+        (spu2_dma_target_[core] + spu2_dma_bytes_[core] / 2u) & 0xFFFFFu;
+    const auto dma_offset = core == 0u ? 0x00C0u : 0x0500u;
+    const auto tsa_offset = core == 0u ? 0x01A8u : 0x05A8u;
+    const auto attr_offset = core == 0u ? 0x019Au : 0x059Au;
+    const auto statx_offset = core == 0u ? 0x0344u : 0x0744u;
+    store_iop(dma_offset, final_source & 0x00FFFFFFu);
+    store_iop(dma_offset + 4u, 0u);
+    store_iop(dma_offset + 8u,
+              raw_iop(dma_offset + 8u) & ~0x01000000u);
+    spu2_hw_[tsa_offset] = static_cast<std::uint8_t>(final_target >> 16);
+    spu2_hw_[tsa_offset + 1u] = 0u;
+    spu2_hw_[tsa_offset + 2u] = static_cast<std::uint8_t>(final_target);
+    spu2_hw_[tsa_offset + 3u] = static_cast<std::uint8_t>(final_target >> 8);
+    auto statx = iop_read16(0x1F900000u + statx_offset);
+    statx = static_cast<std::uint16_t>(statx & ~0x0400u);
+    if ((iop_read16(0x1F900000u + attr_offset) & 0x0030u) != 0u)
+      statx = static_cast<std::uint16_t>(statx | 0x0080u);
+    spu2_hw_[statx_offset] = static_cast<std::uint8_t>(statx);
+    spu2_hw_[statx_offset + 1u] = static_cast<std::uint8_t>(statx >> 8);
+
+    // DMA4 uses channel 4/status bit 28 in DICR, while DMA7 uses channel
+    // zero/status bit 24 in DICR2. Both signal the shared IOP DMA line.
+    const auto dicr_offset = core == 0u ? 0x00F4u : 0x0574u;
+    const auto status_bit = core == 0u ? 28u : 24u;
+    store_iop(dicr_offset, raw_iop(dicr_offset) | (1u << status_bit));
+    store_iop(0x0070u, raw_iop(0x0070u) | (1u << 3));
+  }
+
+  if (gif_cycles_remaining_ != 0u) {
+    if (cycles < gif_cycles_remaining_) {
+      gif_cycles_remaining_ -= cycles;
+    } else {
+      gif_cycles_remaining_ = 0u;
+      const auto bytes = static_cast<std::size_t>(gif_dma_qwc_) * 16u;
+      std::vector<std::uint8_t> packet(bytes);
+      for (std::size_t byte = 0; byte < bytes; ++byte)
+        packet[byte] = read8(gif_dma_source_ + static_cast<std::uint32_t>(byte));
+      gif_packets_.push_back(std::move(packet));
+      store_ee(0xA010u, gif_dma_source_ + static_cast<std::uint32_t>(bytes));
+      store_ee(0xA020u, 0u);
+      store_ee(0xA000u, raw_ee(0xA000u) & ~0x100u);
+      store_ee(0xE010u, raw_ee(0xE010u) | (1u << 2));
+      gif_dma_source_ = 0u;
+      gif_dma_qwc_ = 0u;
+    }
+  }
+
+  if (vif1_cycles_remaining_ != 0u) {
+    if (cycles < vif1_cycles_remaining_) {
+      vif1_cycles_remaining_ -= cycles;
+    } else {
+      vif1_cycles_remaining_ = 0u;
+      std::vector<std::uint8_t> packet;
+      std::uint32_t final_tadr = 0;
+      std::uint32_t final_madr = 0;
+      std::uint32_t total_qwc = 0;
+      std::vector<VifDmaSpan> spans;
+      if (build_vif1_chain(&packet, final_tadr, final_madr, total_qwc, &spans)) {
+        vif_dma_spans_ = std::move(spans);
+        vif1_packets_.push_back(std::move(packet));
+        store_ee(0x9010u, vif1_final_madr_);
+        store_ee(0x9020u, 0u);
+        store_ee(0x9030u, vif1_final_tadr_);
+        store_ee(0x9000u, raw_ee(0x9000u) & ~0x100u);
+        store_ee(0xE010u, raw_ee(0xE010u) | (1u << 1));
       }
     }
   }
@@ -800,6 +1093,44 @@ void Memory::advance(std::uint32_t cycles) {
       store_ee(0xF240u, raw_ee(0xF240u) | 0x20u | 0x2000u);
     }
   }
+
+  if (gif_cycles_remaining_ == 0u) {
+    const auto chcr = raw_ee(0xA000u);
+    const auto qwc = raw_ee(0xA020u) & 0xFFFFu;
+    const auto source = raw_ee(0xA010u) & 0x0FFFFFF0u;
+    if ((chcr & 0x100u) != 0u && (chcr & 0xCu) == 0u && qwc != 0u &&
+        valid(source, static_cast<std::size_t>(qwc) * 16u)) {
+      gif_dma_source_ = source;
+      gif_dma_qwc_ = qwc;
+      gif_cycles_remaining_ = qwc * 8u;
+    }
+  }
+
+  if (spu2_shadow_enabled_) advance_spu2_shadow(cycles);
+
+  if (vif1_cycles_remaining_ == 0u) {
+    const auto chcr = raw_ee(0x9000u);
+    if ((chcr & 0x100u) != 0u && (chcr & 0xCu) == 0x4u) {
+      std::uint32_t total_qwc = 0;
+      if (build_vif1_chain(nullptr, vif1_final_tadr_, vif1_final_madr_,
+                           total_qwc))
+        vif1_cycles_remaining_ = (total_qwc == 0u ? 1u : total_qwc) * 8u;
+    }
+  }
+}
+
+bool Memory::pop_gif_packet(std::vector<std::uint8_t>& packet) {
+  if (gif_packets_.empty()) return false;
+  packet = std::move(gif_packets_.front());
+  gif_packets_.pop_front();
+  return true;
+}
+
+bool Memory::pop_vif1_packet(std::vector<std::uint8_t>& packet) {
+  if (vif1_packets_.empty()) return false;
+  packet = std::move(vif1_packets_.front());
+  vif1_packets_.pop_front();
+  return true;
 }
 
 std::uint32_t Memory::ee_interrupt_lines() const {
@@ -835,6 +1166,8 @@ bool Memory::iop_valid(std::uint32_t address, std::size_t size) const {
   if (p == 0x1FFE0130u) return size <= 4;
   if (p >= 0x1D000000u && p <= 0x1D000060u)
     return size <= 0x1D000064u - p;
+  if (p >= 0x1F900000u && p < 0x1F900800u)
+    return size <= 0x1F900800u - p;
   return false;
 }
 
@@ -872,6 +1205,8 @@ std::uint8_t Memory::iop_read8(std::uint32_t address) const {
   }
   if (p >= 0x1F800000u && p < 0x1F801000u)
     return iop_scratch_[p - 0x1F800000u];
+  if (p >= 0x1F900000u && p < 0x1F900800u)
+    return spu2_hw_[p - 0x1F900000u];
   if (p == 0x1F808264u)
     return 0xFFu; // SIO2 FIFO: disconnected device response.
   if (p >= 0x1FFE0130u && p < 0x1FFE0134u)
@@ -945,6 +1280,23 @@ void Memory::iop_write8(std::uint32_t address, std::uint8_t value) {
           set_result(1u);
         }
         break;
+      case 0x15u: // ForbidDVDP
+        // Retail OSDSYS uses this command to disable DVD-Video playback while
+        // entering the browser. A normal PS2 returns 5; reporting the generic
+        // unsupported-command value makes CDVDFSV retry the RPC indefinitely.
+        cdvd_scmd_result_[0] = 0x05u;
+        set_result(1u);
+        break;
+      case 0x22u: // ReadWakeUpTime
+        // With no wake-up alarm programmed the drive returns a successful
+        // ten-byte all-zero record. OSDSYS polls this during browser startup.
+        set_result(10u);
+        break;
+      case 0x24u: // RCBypassCtrl
+        // The retail BIOS initializes the remote-control bypass even when no
+        // receiver is attached. A zero result acknowledges the requested mode.
+        set_result(1u);
+        break;
       case 0x36u: { // ReadRegionParams
         // The 02.00E retail BIOS asks for the optical-drive region block while
         // bringing up cdvdman. Return the complete 15-byte response; a generic
@@ -993,6 +1345,9 @@ void Memory::iop_write8(std::uint32_t address, std::uint8_t value) {
     }
   } else if (p >= 0x1F800000u && p < 0x1F801000u) {
     iop_scratch_[p - 0x1F800000u] = value;
+  } else if (p >= 0x1F900000u && p < 0x1F900800u) {
+    spu2_hw_[p - 0x1F900000u] = value;
+    if (spu2_shadow_enabled_) spu2_shadow_write(p - 0x1F900000u, value);
   } else if (p >= 0x1FFE0130u && p < 0x1FFE0134u) {
     const unsigned shift = (p & 3u) * 8u;
     iop_cache_control_ = (iop_cache_control_ & ~(0xFFu << shift)) |
@@ -1057,6 +1412,10 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
   }
   if (p == 0x1F801070u) {
     value = iop_read32(address) & value;
+  } else if (p == 0x1F8010F4u) {
+    const auto current = iop_read32(address);
+    const auto flags = (current & 0x7F000000u) & ~(value & 0x7F000000u);
+    value = flags | (value & 0x00FFFFFFu);
   } else if (p == 0x1F801574u) {
     const auto current = iop_read32(address);
     const auto flags = (current & 0x7F000000u) & ~(value & 0x7F000000u);
@@ -1090,6 +1449,35 @@ void Memory::iop_write32(std::uint32_t address, std::uint32_t value) {
     iop_hw_[0x726Du] = 0xD1u;
     iop_hw_[0x726Eu] = 0x01u;
     iop_hw_[0x0072u] |= 0x02u;
+  } else if ((p == 0x1F8010C8u || p == 0x1F801508u) &&
+             (value & 0x01000000u) != 0u) {
+    // SPU2 cores 0 and 1 use IOP DMA channels 4 and 7 respectively. BCR
+    // describes 32-bit words while TSA is measured in 16-bit sound-RAM words.
+    const unsigned core = p == 0x1F8010C8u ? 0u : 1u;
+    const auto dma_base = core == 0u ? 0x1F8010C0u : 0x1F801500u;
+    const auto tsa_base = core == 0u ? 0x1F9001A8u : 0x1F9005A8u;
+    const auto bcr = iop_read32(dma_base + 4u);
+    const auto blocks = bcr >> 16;
+    const auto words = bcr & 0xFFFFu;
+    const auto transfer_words = static_cast<std::uint64_t>(blocks) * words;
+    const auto transfer_bytes = transfer_words * 4u;
+    if ((value & 0x00000201u) == 0x00000201u && transfer_bytes != 0u &&
+        transfer_bytes <= UINT32_MAX) {
+      spu2_dma_source_[core] = iop_read32(dma_base) & 0x00FFFFFFu;
+      const auto tsa_high = iop_read16(tsa_base) & 0xFu;
+      const auto tsa_low = iop_read16(tsa_base + 2u);
+      spu2_dma_target_[core] = (tsa_high << 16) | tsa_low;
+      spu2_dma_bytes_[core] = static_cast<std::uint32_t>(transfer_bytes);
+      // PCSX2's documented SPU2 timing uses 24 IOP cycles per 16-bit word;
+      // one IOP cycle corresponds to eight EE master cycles here.
+      const auto duration = transfer_bytes * 96u;
+      spu2_dma_cycles_remaining_[core] = duration > UINT32_MAX
+          ? UINT32_MAX : static_cast<std::uint32_t>(duration);
+      const auto statx_address = core == 0u ? 0x1F900344u : 0x1F900744u;
+      const auto statx = static_cast<std::uint16_t>(
+          (iop_read16(statx_address) & ~0x0080u) | 0x0400u);
+      iop_write16(statx_address, statx);
+    }
   }
   iop_write8(address, static_cast<std::uint8_t>(value));
   iop_write8(address + 1u, static_cast<std::uint8_t>(value >> 8));

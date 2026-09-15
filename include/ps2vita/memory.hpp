@@ -3,9 +3,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <deque>
 #include <vector>
+#include "ps2vita/spu2_voice.hpp"
 
 namespace ps2vita {
+
+struct VifDmaSpan {
+  std::uint32_t source = 0;
+  std::size_t stream_offset = 0;
+  std::size_t bytes = 0;
+};
 
 class Memory {
 public:
@@ -56,6 +64,9 @@ public:
   void write64(std::uint32_t address, std::uint64_t value);
   // Advances asynchronous hardware models by EE guest cycles.
   void advance(std::uint32_t cycles);
+  // Conservative EE-cycle distance to the next possible device-model state
+  // transition. Callers may batch fewer cycles without crossing a boundary.
+  std::uint32_t cycles_until_next_event() const;
   // Pending external interrupt lines as R5900 Cause.IP bits.
   std::uint32_t ee_interrupt_lines() const;
   bool iop_interrupt_pending() const;
@@ -67,9 +78,32 @@ public:
   void iop_write8(std::uint32_t address, std::uint8_t value);
   void iop_write16(std::uint32_t address, std::uint16_t value);
   void iop_write32(std::uint32_t address, std::uint32_t value);
+  std::uint8_t spu2_ram_read8(std::uint32_t address) const {
+    return spu2_ram_[address % spu2_ram_.size()];
+  }
+  // Opt-in shadow execution only: never changes guest-visible SPU2 state.
+  void enable_spu2_shadow(bool enabled) {
+    spu2_shadow_enabled_ = enabled;
+    spu2_shadow_ = {}; spu2_shadow_delay_ = {};
+    spu2_shadow_cycles_ = 0; spu2_shadow_ticks_ = 0; spu2_shadow_peak_ = 0;
+    spu2_shadow_dry_ = {}; spu2_shadow_sweeps_ = 0;
+  }
+  std::uint64_t spu2_shadow_ticks() const { return spu2_shadow_ticks_; }
+  unsigned spu2_shadow_peak() const { return spu2_shadow_peak_; }
+  std::int32_t spu2_shadow_dry(unsigned core, unsigned channel) const {
+    return spu2_shadow_dry_.at(core).at(channel);
+  }
+  std::uint64_t spu2_shadow_sweeps() const { return spu2_shadow_sweeps_; }
+  const Spu2Voice& spu2_shadow_voice(unsigned core, unsigned voice) const {
+    return spu2_shadow_.at(core * 24u + voice);
+  }
   bool copy_in(std::uint32_t address, const void* source, std::size_t size);
   bool zero(std::uint32_t address, std::size_t size);
   bool load_bios(const void* source, std::size_t size);
+  // Retrieves one completed EE GIF DMA payload in submission order.
+  bool pop_gif_packet(std::vector<std::uint8_t>& packet);
+  bool pop_vif1_packet(std::vector<std::uint8_t>& packet);
+  const std::vector<VifDmaSpan>& vif_dma_spans() const { return vif_dma_spans_; }
   bool has_bios() const { return bios_loaded_; }
   std::uint32_t page_generation(std::uint32_t address) const;
   void clear_tlb();
@@ -89,6 +123,11 @@ private:
   };
 
   std::uint32_t physical(std::uint32_t address) const;
+  bool build_vif1_chain(std::vector<std::uint8_t>* packet,
+                        std::uint32_t& final_tadr,
+                        std::uint32_t& final_madr,
+                        std::uint32_t& total_qwc,
+                        std::vector<VifDmaSpan>* spans = nullptr) const;
   std::vector<std::uint8_t> ram_;
   std::vector<std::uint8_t> bios_;
   std::vector<std::uint8_t> scratch_;
@@ -96,6 +135,17 @@ private:
   std::vector<std::uint8_t> gs_hw_;
   std::vector<std::uint8_t> vu_mem_;
   std::vector<std::uint8_t> iop_ram_;
+  std::array<std::uint8_t, 0x800> spu2_hw_{};
+  bool spu2_shadow_enabled_ = false;
+  std::array<Spu2Voice, 48> spu2_shadow_{};
+  std::array<unsigned, 48> spu2_shadow_delay_{};
+  unsigned spu2_shadow_cycles_ = 0, spu2_shadow_peak_ = 0;
+  std::uint64_t spu2_shadow_ticks_ = 0;
+  std::array<std::array<std::int32_t, 2>, 2> spu2_shadow_dry_{};
+  std::uint64_t spu2_shadow_sweeps_ = 0; // Sticky voice mask, either channel.
+  void spu2_shadow_write(unsigned offset, std::uint8_t value);
+  void advance_spu2_shadow(std::uint32_t cycles);
+  std::vector<std::uint8_t> spu2_ram_;
   std::array<std::uint8_t, 4096> iop_scratch_{};
   mutable std::vector<std::uint8_t> iop_hw_;
   std::vector<std::uint8_t> ee_internal_;
@@ -132,6 +182,19 @@ private:
   bool timer5_target_future_ = false;
   std::uint32_t sif0_cycles_remaining_ = 0;
   std::uint32_t sif1_cycles_remaining_ = 0;
+  std::uint32_t gif_cycles_remaining_ = 0;
+  std::uint32_t gif_dma_source_ = 0;
+  std::uint32_t gif_dma_qwc_ = 0;
+  std::deque<std::vector<std::uint8_t>> gif_packets_;
+  std::uint32_t vif1_cycles_remaining_ = 0;
+  std::uint32_t vif1_final_tadr_ = 0;
+  std::uint32_t vif1_final_madr_ = 0;
+  std::deque<std::vector<std::uint8_t>> vif1_packets_;
+  std::vector<VifDmaSpan> vif_dma_spans_;
+  std::array<std::uint32_t, 2> spu2_dma_cycles_remaining_{};
+  std::array<std::uint32_t, 2> spu2_dma_source_{};
+  std::array<std::uint32_t, 2> spu2_dma_target_{};
+  std::array<std::uint32_t, 2> spu2_dma_bytes_{};
   std::uint32_t iop_cache_control_ = 0;
 };
 

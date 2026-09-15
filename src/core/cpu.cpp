@@ -72,6 +72,15 @@ std::uint64_t packed_subtract_bytes(std::uint64_t lhs, std::uint64_t rhs) {
   return result;
 }
 
+std::uint64_t packed_subtract_words(std::uint64_t lhs, std::uint64_t rhs) {
+  const auto low = static_cast<std::uint32_t>(lhs) -
+                   static_cast<std::uint32_t>(rhs);
+  const auto high = static_cast<std::uint32_t>(lhs >> 32) -
+                    static_cast<std::uint32_t>(rhs >> 32);
+  return static_cast<std::uint64_t>(low) |
+         (static_cast<std::uint64_t>(high) << 32);
+}
+
 } // namespace
 
 Cpu::Cpu(Memory& memory) : memory_(memory) {}
@@ -562,6 +571,8 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
       case 0x29: state_.fpr[fd] = as_bits(std::fmin(s, t)); break;
       case 0x30: set_condition(false); break;
       case 0x32: set_condition(!std::isnan(s) && !std::isnan(t) && s == t); break;
+      case 0x34: set_condition(!std::isnan(s) && !std::isnan(t) && s < t); break;
+      case 0x36: set_condition(!std::isnan(s) && !std::isnan(t) && s <= t); break;
       case 0x3C: set_condition(!std::isnan(s) && !std::isnan(t) && s < t); break;
       case 0x3E: set_condition(!std::isnan(s) && !std::isnan(t) && s <= t); break;
       default: return StopReason::InvalidInstruction;
@@ -614,6 +625,7 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
           state_.vu0_vf = {};
           state_.vu0_vf_hi = {};
           state_.vu0_vi = {};
+          state_.vu0_acc = {};
           state_.vu0_vf_hi[0] = 0x3F80000000000000ull;
         }
       } else if (rd == kCmsar1) {
@@ -646,7 +658,99 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
           state_.vu0_vi[destination] =
               (state_.vu0_vi[destination] & 0xFFFF0000u) | result;
         }
-      } else if (fn == 0x2Cu) { // VSUB
+      } else if ((fn >= 0x08u && fn <= 0x0Bu) ||
+                 (fn >= 0x3Cu && ((special2 >= 0x08u && special2 <= 0x0Bu) ||
+                                      (special2 >= 0x18u && special2 <= 0x1Bu)))) {
+        // VMADDbc / VMADDAbc / VMULAbc, functional accumulator arithmetic.
+        const bool to_acc = fn >= 0x3Cu;
+        const bool multiply_only = to_acc && special2 >= 0x18u;
+        const auto scalar = as_float(vu_lane(state_, rt, ins & 3u));
+        for (unsigned lane = 0; lane < 4u; ++lane) {
+          if ((ins & (1u << (24u - lane))) == 0u) continue;
+          const float product = as_float(vu_lane(state_, rd, lane)) * scalar;
+          const auto result = as_bits(multiply_only ? product :
+              as_float(state_.vu0_acc[lane]) + product);
+          if (to_acc) state_.vu0_acc[lane] = result;
+          else if (sa != 0u) set_vu_lane(state_, sa, lane, result);
+        }
+      } else if ((fn >= 0x3Cu && special2 == 0x2Eu) || fn == 0x2Eu) {
+        // VOPMULA / VOPMSUB: XYZ outer-product terms, W unchanged.
+        // Snapshot all results before writes because FD may alias FS or FT.
+        // Functional arithmetic only; MAC flags and pipeline timing remain TODO.
+        const bool accumulate = fn >= 0x3Cu;
+        std::array<std::uint32_t, 3> result{};
+        for (unsigned lane = 0; lane < 3u; ++lane) {
+          const unsigned left = (lane + 1u) % 3u;
+          const unsigned right = (lane + 2u) % 3u;
+          const float product = as_float(vu_lane(state_, rd, left)) *
+                                as_float(vu_lane(state_, rt, right));
+          result[lane] = as_bits(accumulate ? product :
+              as_float(state_.vu0_acc[lane]) - product);
+        }
+        for (unsigned lane = 0; lane < 3u; ++lane) {
+          if (accumulate) state_.vu0_acc[lane] = result[lane];
+          else if (sa != 0u) set_vu_lane(state_, sa, lane, result[lane]);
+        }
+      } else if (fn >= 0x3Cu && (special2 == 0x38u || special2 == 0x39u)) {
+        // Functional VDIV / VSQRT. Q is immediately visible in this subset;
+        // a cycle-accurate division pipeline is still outstanding.
+        const auto denominator_bits = vu_lane(state_, rt, (ins >> 23) & 3u);
+        const auto denominator = as_float(denominator_bits);
+        state_.vu0_vi[16] &= ~0x30u;
+        if (special2 == 0x39u) {
+          if (denominator < 0.0f) state_.vu0_vi[16] |= 0x10u;
+          state_.vu0_vi[22] = as_bits(std::sqrt(std::fabs(denominator)));
+        } else {
+          const auto numerator_bits = vu_lane(state_, rd, (ins >> 21) & 3u);
+          const auto numerator = as_float(numerator_bits);
+          if (denominator == 0.0f) {
+            state_.vu0_vi[16] |= numerator == 0.0f ? 0x10u : 0x20u;
+            state_.vu0_vi[22] = ((numerator_bits ^ denominator_bits) & 0x80000000u) |
+                                0x7F7FFFFFu;
+          } else state_.vu0_vi[22] = as_bits(numerator / denominator);
+        }
+      } else if (fn >= 0x3Cu && special2 == 0x2Fu) { // VNOP
+      } else if (fn >= 0x3Cu && special2 == 0x3Bu) { // VWAITQ, functional Q ready.
+      } else if (fn <= 0x07u || fn == 0x20u) { // VADD/VSUB broadcast / VADDq
+        const bool subtract = fn >= 0x04u && fn <= 0x07u;
+        const auto scalar = as_float(fn == 0x20u ? state_.vu0_vi[22] :
+            vu_lane(state_, rt, fn & 3u));
+        if (sa != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane)
+            if ((ins & (1u << (24u - lane))) != 0u)
+              set_vu_lane(state_, sa, lane,
+                  as_bits(subtract ? as_float(vu_lane(state_, rd, lane)) - scalar :
+                      as_float(vu_lane(state_, rd, lane)) + scalar));
+        }
+      } else if (fn >= 0x10u && fn <= 0x17u) { // VMAX/VMINI broadcast
+        const auto scalar = vu_lane(state_, rt, fn & 3u);
+        const auto ordered = [](std::uint32_t bits) {
+          return (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+        };
+        if (sa != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane) {
+            if ((ins & (1u << (24u - lane))) == 0u) continue;
+            const auto value = vu_lane(state_, rd, lane);
+            const bool less = ordered(value) < ordered(scalar);
+            set_vu_lane(state_, sa, lane, (fn < 0x14u ? less : !less) ? scalar : value);
+          }
+        }
+      } else if ((fn >= 0x18u && fn <= 0x1Cu) || fn == 0x2Au) { // VMUL[x/y/z/w/q]
+        // Capture the broadcast scalar before writing any destination lane;
+        // FD may alias FT. Timing/MAC/status follow the current functional
+        // macro-mode subset, not a complete VU0 pipeline model.
+        const bool broadcast = fn != 0x2Au;
+        const auto scalar = broadcast ? as_float(fn == 0x1Cu ? state_.vu0_vi[22] :
+            vu_lane(state_, rt, fn & 3u)) : 0.0f;
+        if (sa != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane) {
+            if ((ins & (1u << (24u - lane))) != 0u)
+              set_vu_lane(state_, sa, lane,
+                  as_bits(as_float(vu_lane(state_, rd, lane)) *
+                      (broadcast ? scalar : as_float(vu_lane(state_, rt, lane)))));
+          }
+        }
+      } else if (fn == 0x28u || fn == 0x2Cu) { // VADD / VSUB
         const unsigned ft = rt;
         const unsigned fs = rd;
         const unsigned fd = sa;
@@ -654,8 +758,11 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
           for (unsigned index = 0; index < 4; ++index) {
             if (ins & (1u << (24u - index))) {
               set_vu_lane(state_, fd, index,
-                          as_bits(as_float(vu_lane(state_, fs, index)) -
-                                  as_float(vu_lane(state_, ft, index))));
+                          as_bits(fn == 0x28u
+                              ? as_float(vu_lane(state_, fs, index)) +
+                                    as_float(vu_lane(state_, ft, index))
+                              : as_float(vu_lane(state_, fs, index)) -
+                                    as_float(vu_lane(state_, ft, index))));
             }
           }
         }
@@ -701,6 +808,45 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
                             value);
           }
         }
+      } else if (fn >= 0x3Cu && special2 >= 0x14u && special2 <= 0x17u) {
+        // VFTOI0/4/12/15: scale, truncate toward zero, saturate before casting.
+        constexpr unsigned shifts[] = {0u, 4u, 12u, 15u};
+        const float scale = static_cast<float>(1u << shifts[special2 & 3u]);
+        if (rt != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane) {
+            if ((ins & (1u << (24u - lane))) == 0u) continue;
+            const float value = as_float(vu_lane(state_, rd, lane)) * scale;
+            const auto bits = as_bits(value);
+            const auto result = (bits & 0x7F800000u) >= 0x4F000000u ?
+                ((bits & 0x80000000u) ? 0x80000000u : 0x7FFFFFFFu) :
+                static_cast<std::uint32_t>(static_cast<std::int32_t>(value));
+            set_vu_lane(state_, rt, lane, result);
+          }
+        }
+      } else if (fn >= 0x3Cu && special2 == 0x1Du) { // VABS
+        if (rt != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane)
+            if (ins & (1u << (24u - lane)))
+              set_vu_lane(state_, rt, lane, vu_lane(state_, rd, lane) & 0x7FFFFFFFu);
+        }
+      } else if (fn >= 0x3Cu && special2 == 0x30u) { // VMOVE
+        if (rt != 0u) {
+          for (unsigned lane = 0; lane < 4u; ++lane)
+            if (ins & (1u << (24u - lane)))
+              set_vu_lane(state_, rt, lane, vu_lane(state_, rd, lane));
+        }
+      } else if (fn >= 0x3Cu && special2 == 0x31u) { // VMR32
+        const unsigned destination = rt;
+        const unsigned source = rd;
+        if (destination != 0u) {
+          const std::array<std::uint32_t, 4> rotated = {
+              vu_lane(state_, source, 1u), vu_lane(state_, source, 2u),
+              vu_lane(state_, source, 3u), vu_lane(state_, source, 0u)};
+          for (unsigned lane = 0; lane < 4u; ++lane) {
+            if (ins & (1u << (24u - lane)))
+              set_vu_lane(state_, destination, lane, rotated[lane]);
+          }
+        }
       } else {
         return StopReason::InvalidInstruction;
       }
@@ -730,7 +876,23 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
   }
   case 0x1C: { // MMI multimedia instruction groups.
     const unsigned sub = (ins >> 6) & 31u;
-    if (fn == 0x04) { // PLZCW
+    if (fn == 0x00u || fn == 0x01u || fn == 0x20u || fn == 0x21u) {
+      // MADD/MADDU and accumulator-1 variants. Accumulate modulo 2^64
+      // without signed overflow; HI/LO each receive sign-extended words.
+      auto& low = (fn & 0x20u) ? state_.lo1 : state_.lo;
+      auto& high = (fn & 0x20u) ? state_.hi1 : state_.hi;
+      const auto accumulator = static_cast<std::uint64_t>(static_cast<std::uint32_t>(low)) |
+          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(high)) << 32);
+      const auto product = (fn & 1u) ?
+          static_cast<std::uint64_t>(static_cast<std::uint32_t>(rsv)) *
+              static_cast<std::uint32_t>(rtv) :
+          static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(rsv)) *
+              static_cast<std::int32_t>(rtv));
+      const auto result = accumulator + product;
+      low = sx32(static_cast<std::uint32_t>(result));
+      high = sx32(static_cast<std::uint32_t>(result >> 32));
+      set_reg(rd, low);
+    } else if (fn == 0x04) { // PLZCW
       if (rd != 0) {
         const auto count_after_sign = [](std::uint32_t word) {
           const bool sign = (word & 0x80000000u) != 0u;
@@ -784,6 +946,13 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
       const auto b = static_cast<std::uint32_t>(rtv);
       state_.lo1 = b ? sx32(a / b) : std::numeric_limits<std::uint64_t>::max();
       state_.hi1 = sx32(b ? a % b : a);
+    } else if (fn == 0x28 && sub == 0x12) { // PEXTUW
+      const auto source_s = state_.gpr_hi[rs];
+      const auto source_t = state_.gpr_hi[rt];
+      if (rd != 0u) {
+        state_.gpr[rd] = (source_t & 0xFFFFFFFFull) | (source_s << 32);
+        state_.gpr_hi[rd] = (source_t >> 32) | (source_s & 0xFFFFFFFF00000000ull);
+      }
     } else if (fn == 0x08 && sub == 0x12) { // PEXTLW
       if (rd != 0) {
         const auto low = (rtv & 0xFFFFFFFFu) | (rsv << 32);
@@ -795,6 +964,12 @@ StopReason Cpu::execute(std::uint32_t ins, std::uint32_t pc,
       if (rd != 0) {
         state_.gpr[rd] = packed_subtract_bytes(rsv, rtv);
         state_.gpr_hi[rd] = packed_subtract_bytes(
+            state_.gpr_hi[rs], state_.gpr_hi[rt]);
+      }
+    } else if (fn == 0x08 && sub == 0x01) { // PSUBW
+      if (rd != 0) {
+        state_.gpr[rd] = packed_subtract_words(rsv, rtv);
+        state_.gpr_hi[rd] = packed_subtract_words(
             state_.gpr_hi[rs], state_.gpr_hi[rt]);
       }
     } else if (fn == 0x09 && sub == 0x08) { // PMFHI

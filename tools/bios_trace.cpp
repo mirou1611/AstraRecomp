@@ -1,8 +1,12 @@
 #include "ps2vita/emulator.hpp"
+#include "ps2vita/execution_census.hpp"
+#include "ps2vita/framebuffer_dump.hpp"
+#include "ps2vita/spu2_adpcm.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -53,6 +57,18 @@ struct Sif0Event {
   std::uint32_t words = 0;
   std::uint32_t ee_tag = 0;
   std::uint32_t destination = 0;
+};
+
+struct Sif1Event {
+  std::uint64_t step = 0;
+  bool active = false;
+  std::uint32_t tadr = 0;
+  std::uint32_t tag_tadr = 0;
+  std::uint32_t dma_tag = 0;
+  std::uint32_t source = 0;
+  std::uint32_t destination = 0;
+  std::uint32_t words = 0;
+  std::array<std::uint32_t, 4> packet{};
 };
 
 struct SyscallEvent {
@@ -153,17 +169,183 @@ void print_opcode_profile(const char* processor,
   }
 }
 
+std::uint32_t load_width(std::uint32_t instruction) {
+  switch (instruction >> 26) {
+  case 0x20u: case 0x24u: return 1u; // LB/LBU
+  case 0x21u: case 0x25u: return 2u; // LH/LHU
+  case 0x22u: case 0x23u: case 0x26u: case 0x27u:
+  case 0x30u: case 0x31u: case 0x32u: return 4u;
+  case 0x1Au: case 0x1Bu: case 0x34u: case 0x35u: case 0x37u: return 8u;
+  case 0x1Eu: case 0x36u: return 16u;
+  default: return 0u;
+  }
+}
+
+std::uint32_t ee_physical_address(std::uint32_t address) {
+  return (address & 0xE0000000u) == 0x80000000u ||
+         (address & 0xE0000000u) == 0xA0000000u
+      ? address & 0x1FFFFFFFu : address;
+}
+
+bool is_ee_mmio(std::uint32_t address) {
+  const auto p = ee_physical_address(address);
+  return (p >= 0x10000000u && p < 0x10010000u) ||
+      (p >= 0x12000000u && p < 0x12010000u) ||
+      (p >= 0x1A000000u && p < 0x1A010000u) ||
+      (p >= 0x1D000000u && p < 0x1D000064u) ||
+      (p >= 0x1F400000u && p < 0x1F410000u) ||
+      (p >= 0x1F801000u && p < 0x1F910000u) ||
+      address >= 0xFFFE0000u;
+}
+
+bool is_iop_mmio(std::uint32_t address) {
+  const auto p = address & 0x1FFFFFFFu;
+  return (p >= 0x1D000000u && p < 0x1D000064u) ||
+      (p >= 0x1F400000u && p < 0x1F410000u) ||
+      (p >= 0x1F801000u && p < 0x1F910000u) || p == 0x1FFE0130u;
+}
+
+enum CensusEventKind : std::uint32_t {
+  kSif0Start,
+  kSif0Complete,
+  kEeInterruptRise,
+  kIopInterruptRise,
+  kVif0DmaStart,
+  kVif1DmaStart,
+  kGifDmaStart,
+  kSif1DmaStart,
+  kSpu0DmaStart,
+  kSpu1DmaStart,
+};
+
+constexpr std::array<const char*, 10> kCensusEventNames = {
+    "sif0_start", "sif0_complete", "ee_interrupt_rise",
+    "iop_interrupt_rise", "vif0_dma_start", "vif1_dma_start",
+    "gif_dma_start", "sif1_dma_start", "spu0_dma_start",
+    "spu1_dma_start"};
+
+void write_census_processor(std::ostream& output, const char* name,
+                            const ps2vita::ExecutionCensus& census,
+                            bool trailing_comma) {
+  const auto blocks = census.blocks();
+  const auto edges = census.edges();
+  const auto indirect_targets = census.indirect_targets();
+  const auto mmio_reads = census.mmio_reads();
+  output << "  \"" << name << "\": {\n"
+         << "    \"instructions\": " << census.instruction_count() << ",\n"
+         << "    \"blocks\": [\n";
+  for (std::size_t index = 0; index < blocks.size(); ++index) {
+    char pc[11]{};
+    char sp_min[11]{};
+    char sp_max[11]{};
+    char gp_min[11]{};
+    char gp_max[11]{};
+    std::snprintf(pc, sizeof(pc), "0x%08X", blocks[index].pc);
+    std::snprintf(sp_min, sizeof(sp_min), "0x%08X", blocks[index].sp_min);
+    std::snprintf(sp_max, sizeof(sp_max), "0x%08X", blocks[index].sp_max);
+    std::snprintf(gp_min, sizeof(gp_min), "0x%08X", blocks[index].gp_min);
+    std::snprintf(gp_max, sizeof(gp_max), "0x%08X", blocks[index].gp_max);
+    output << "      {\"pc\": \"" << pc << "\", \"entries\": "
+           << blocks[index].entries << ", \"sp_min\": \"" << sp_min
+           << "\", \"sp_max\": \"" << sp_max << "\", \"gp_min\": \""
+           << gp_min << "\", \"gp_max\": \"" << gp_max << "\"}"
+           << (index + 1u == blocks.size() ? "\n" : ",\n");
+  }
+  output << "    ],\n    \"edges\": [\n";
+  for (std::size_t index = 0; index < edges.size(); ++index) {
+    char source[11]{};
+    char target[11]{};
+    std::snprintf(source, sizeof(source), "0x%08X", edges[index].source);
+    std::snprintf(target, sizeof(target), "0x%08X", edges[index].target);
+    output << "      {\"source\": \"" << source
+           << "\", \"target\": \"" << target
+           << "\", \"transitions\": " << edges[index].transitions << "}"
+           << (index + 1u == edges.size() ? "\n" : ",\n");
+  }
+  output << "    ],\n    \"indirect_targets\": [\n";
+  for (std::size_t index = 0; index < indirect_targets.size(); ++index) {
+    char site[11]{};
+    char target[11]{};
+    std::snprintf(site, sizeof(site), "0x%08X", indirect_targets[index].site);
+    std::snprintf(target, sizeof(target), "0x%08X",
+                  indirect_targets[index].target);
+    output << "      {\"site\": \"" << site
+           << "\", \"target\": \"" << target
+           << "\", \"transitions\": "
+           << indirect_targets[index].transitions << "}"
+           << (index + 1u == indirect_targets.size() ? "\n" : ",\n");
+  }
+  output << "    ],\n    \"mmio_reads\": [\n";
+  for (std::size_t index = 0; index < mmio_reads.size(); ++index) {
+    char site[11]{};
+    char address[11]{};
+    std::snprintf(site, sizeof(site), "0x%08X", mmio_reads[index].site);
+    std::snprintf(address, sizeof(address), "0x%08X",
+                  mmio_reads[index].address);
+    output << "      {\"site\": \"" << site
+           << "\", \"address\": \"" << address
+           << "\", \"width\": " << mmio_reads[index].width
+           << ", \"reads\": " << mmio_reads[index].reads << "}"
+           << (index + 1u == mmio_reads.size() ? "\n" : ",\n");
+  }
+  output << "    ]\n  }" << (trailing_comma ? ",\n" : "\n");
+}
+
+void write_execution_census(std::ostream& output, std::uint64_t ee_steps,
+                            std::uint64_t iop_divisor,
+                            const ps2vita::ExecutionCensus& ee,
+                            const ps2vita::ExecutionCensus& iop,
+                            const ps2vita::EventCensus& event_census) {
+  output << "{\n"
+         << "  \"schema\": \"astrarecomp.execution-census\",\n"
+         << "  \"version\": 3,\n"
+         << "  \"ee_steps\": " << ee_steps << ",\n"
+         << "  \"iop_divisor\": " << iop_divisor << ",\n";
+  write_census_processor(output, "ee", ee, true);
+  write_census_processor(output, "iop", iop, true);
+  const auto events = event_census.events();
+  output << "  \"events\": [\n";
+  for (std::size_t index = 0; index < events.size(); ++index) {
+    const auto kind = events[index].kind;
+    const auto* name = kind < kCensusEventNames.size()
+        ? kCensusEventNames[kind] : "unknown";
+    const auto gaps = events[index].count > 1u ? events[index].count - 1u : 0u;
+    const auto average_gap = gaps == 0u ? 0u : events[index].total_gap / gaps;
+    output << "    {\"kind\": \"" << name << "\", \"count\": "
+           << events[index].count << ", \"min_gap\": "
+           << events[index].min_gap << ", \"max_gap\": "
+           << events[index].max_gap << ", \"average_gap\": "
+           << average_gap << "}"
+           << (index + 1u == events.size() ? "\n" : ",\n");
+  }
+  output << "  ]\n";
+  output << "}\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 10) {
+  if (argc < 2 || argc > 13) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
         "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP] "
-        "[TIMER5_PROBE_STEP]\n");
+        "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM] [FIRST_VIF_BIN]\n"
+        "optional ASTRA_TRACE_SECONDS=1..86400 bounds host runtime and reports progress; 0 disables\n");
     return 2;
   }
 
+  unsigned host_seconds = 0;
+  if (const char* limit = std::getenv("ASTRA_TRACE_SECONDS")) {
+    if (*limit == '\0') return 2;
+    for (const char* p = limit; *p; ++p) {
+      if (*p < '0' || *p > '9' || host_seconds > 8640u) {
+        std::fputs("ASTRA_TRACE_SECONDS must be an integer in 0..86400\n", stderr);
+        return 2;
+      }
+      host_seconds = host_seconds * 10u + static_cast<unsigned>(*p - '0');
+    }
+    if (host_seconds > 86400u) return 2;
+  }
   std::ifstream input(argv[1], std::ios::binary);
   const std::vector<std::uint8_t> bios(
       (std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
@@ -189,18 +371,29 @@ int main(int argc, char** argv) {
       ? std::strtoull(argv[8], nullptr, 0) : 0u;
   const std::uint64_t timer5_probe_step = argc >= 10
       ? std::strtoull(argv[9], nullptr, 0) : 0u;
+  // '-' skips the optional census when requesting a framebuffer capture.
+  const char* census_path = argc >= 11 && std::string(argv[10]) != "-" ? argv[10] : nullptr;
+  const char* framebuffer_path = argc >= 12 ? argv[11] : nullptr;
+  const char* vif_path = argc >= 13 ? argv[12] : nullptr;
 
   ps2vita::Emulator emulator;
+  emulator.enable_vif_packet_capture(vif_path != nullptr);
+  emulator.enable_triangle_trace(true);
   if (!emulator.load_bios(bios.data(), bios.size()) || !emulator.boot_bios()) {
     std::fprintf(stderr, "BIOS must be exactly 4 MiB\n");
     return 2;
   }
 
   constexpr std::size_t kTraceSize = 256;
+  emulator.memory().enable_spu2_shadow(true);
   std::array<TraceEntry, kTraceSize> trace{};
   std::array<IopTraceEntry, kTraceSize> iop_trace{};
   std::array<CacheEntry, kTraceSize> cache_trace{};
   std::array<StoreEntry, kTraceSize> low_store_trace{};
+  std::array<StoreEntry, kTraceSize> vif_parameter_store_trace{};
+  std::size_t vif_parameter_store_cursor = 0;
+  bool vif_parameter_writer_captured = false;
+  unsigned vif_copy_probes = 0;
   std::array<StoreEntry, kTraceSize> syscall_store_trace{};
   std::array<StoreEntry, kTraceSize> sbus_store_trace{};
   std::array<StoreEntry, kTraceSize> dma_store_trace{};
@@ -210,6 +403,7 @@ int main(int argc, char** argv) {
   std::array<StoreEntry, kTraceSize> iop_dma_store_trace{};
   std::array<StoreEntry, kTraceSize> iop_cdvd_trace{};
   std::array<StoreEntry, kTraceSize> iop_sio2_trace{};
+  std::array<StoreEntry, kTraceSize> iop_spu_trace{};
   std::array<StoreEntry, kTraceSize> iop_scmd_trace{};
   std::array<std::uint64_t, 256> iop_scmd_counts{};
   std::array<std::uint64_t, 4096> ee_opcode_counts{};
@@ -229,6 +423,7 @@ int main(int argc, char** argv) {
   std::size_t iop_dma_store_cursor = 0;
   std::size_t iop_cdvd_cursor = 0;
   std::size_t iop_sio2_cursor = 0;
+  std::size_t iop_spu_cursor = 0;
   std::size_t iop_scmd_cursor = 0;
   unsigned last_iop_scmd = 256u;
   std::vector<char> serial_output;
@@ -237,7 +432,9 @@ int main(int argc, char** argv) {
   iop_serial_output.reserve(16384);
   std::vector<StoreEntry> mailbox_store_trace;
   std::vector<StoreEntry> ee_packet_state_store_trace;
+  std::vector<StoreEntry> iop_rpc_wait_store_trace;
   std::vector<Sif0Event> sif0_events;
+  std::vector<Sif1Event> sif1_events;
   std::vector<SyscallEvent> syscall_events;
   constexpr std::array<std::uint32_t, 3> kGraphicsDmaChcr = {
       0x10008000u, 0x10009000u, 0x1000A000u};
@@ -247,6 +444,7 @@ int main(int argc, char** argv) {
   std::array<std::uint64_t, 3> graphics_dma_first_step{};
   std::array<std::uint32_t, 3> graphics_dma_first_pc{};
   bool sif0_was_active = false;
+  bool sif1_was_active = false;
   std::uint64_t steps = 0;
   std::uint64_t hits = 0;
   std::uint32_t low_stub_word = 0;
@@ -255,7 +453,30 @@ int main(int argc, char** argv) {
   bool iop_stop_triggered = false;
   ps2vita::StopReason reason = ps2vita::StopReason::None;
   ps2vita::IopStopReason iop_reason = ps2vita::IopStopReason::None;
+  ps2vita::ExecutionCensus ee_census;
+  ps2vita::ExecutionCensus iop_census;
+  ps2vita::EventCensus event_census;
+  bool ee_interrupt_was_pending = false;
+  bool iop_interrupt_was_pending = false;
+  bool vif_failure_reported = false;
+  std::array<std::uint64_t, 2> spu_keyon_writes{};
+  std::array<std::uint32_t, 2> spu_keyon_masks{};
+  const auto host_start = std::chrono::steady_clock::now();
+  bool host_deadline = false;
+  unsigned last_report = 0;
   for (; steps < max_steps; ++steps) {
+    if (host_seconds != 0u && (steps & 0xFFFFu) == 0u) {
+      const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::steady_clock::now() - host_start).count();
+      if (elapsed >= last_report + 5u) {
+        std::fprintf(stderr, "host_progress seconds=%lld steps=%llu pc=%08X\n",
+            static_cast<long long>(elapsed), static_cast<unsigned long long>(steps),
+            emulator.cpu().state().pc);
+        std::fflush(stderr);
+        last_report = static_cast<unsigned>(elapsed);
+      }
+      if (elapsed >= host_seconds) { host_deadline = true; break; }
+    }
     if (sbus_probe_step != 0u && steps == sbus_probe_step) {
       std::fprintf(stderr,
           "diagnostic: injecting IOP ICFG bit-1 SBUS probe at step %llu\n",
@@ -281,7 +502,36 @@ int main(int argc, char** argv) {
           emulator.memory().iop_read32(tadr + 4u) & 0x000FFFFFu,
           emulator.memory().iop_read32(tadr + 8u),
           emulator.memory().iop_read32(tadr + 12u) & 0x0FFFFFF0u});
+      if (census_path) {
+        event_census.record(sif0_active ? kSif0Start : kSif0Complete, steps);
+      }
       sif0_was_active = sif0_active;
+    }
+    const bool sif1_active =
+        (emulator.memory().read32(0x1000C400u) & 0x100u) != 0u &&
+        (emulator.memory().iop_read32(0x1F801538u) & 0x01000000u) != 0u;
+    if (sif1_active != sif1_was_active) {
+      const auto tadr =
+          emulator.memory().read32(0x1000C430u) & 0x0FFFFFF0u;
+      auto tag_tadr = tadr;
+      auto dma_tag = emulator.memory().read32(tag_tadr);
+      for (unsigned redirects = 0; redirects < 8u; ++redirects) {
+        const auto id = (dma_tag >> 28) & 7u;
+        const auto qwc = dma_tag & 0xFFFFu;
+        if (id != 2u || qwc != 0u) break;
+        tag_tadr = emulator.memory().read32(tag_tadr + 4u) & 0x0FFFFFF0u;
+        dma_tag = emulator.memory().read32(tag_tadr);
+      }
+      const auto source =
+          emulator.memory().read32(tag_tadr + 4u) & 0x0FFFFFF0u;
+      sif1_events.push_back({steps, sif1_active, tadr, tag_tadr, dma_tag,
+          source, emulator.memory().read32(source) & 0x00FFFFFFu,
+          emulator.memory().read32(source + 4u) & 0x000FFFFFu,
+          {emulator.memory().read32(source + 16u),
+           emulator.memory().read32(source + 20u),
+           emulator.memory().read32(source + 24u),
+           emulator.memory().read32(source + 28u)}});
+      sif1_was_active = sif1_active;
     }
     const auto instruction = emulator.memory().read32(state.pc);
     if ((instruction & 0xFC00003Fu) == 0x0000000Cu) {
@@ -289,6 +539,16 @@ int main(int argc, char** argv) {
                                 state.gpr[31], state.gpr[29]});
     }
     const auto ee_lines = emulator.memory().ee_interrupt_lines();
+    const bool ee_interrupt_pending = ee_lines != 0u;
+    const bool iop_interrupt_pending = emulator.memory().iop_interrupt_pending();
+    if (census_path) {
+      if (ee_interrupt_pending && !ee_interrupt_was_pending)
+        event_census.record(kEeInterruptRise, steps);
+      if (iop_interrupt_pending && !iop_interrupt_was_pending)
+        event_census.record(kIopInterruptRise, steps);
+    }
+    ee_interrupt_was_pending = ee_interrupt_pending;
+    iop_interrupt_was_pending = iop_interrupt_pending;
     const auto ee_status = state.cop0[12];
     const bool ee_takes_interrupt = ee_lines != 0u &&
         (ee_status & ee_lines) != 0u &&
@@ -297,6 +557,13 @@ int main(int argc, char** argv) {
     if (!ee_takes_interrupt) {
       ++ee_opcode_counts[opcode_family(instruction)];
       ++ee_profile_total;
+      if (census_path) {
+        const auto branch_register = (instruction >> 21) & 31u;
+        ee_census.record(state.pc, instruction,
+            static_cast<std::uint32_t>(state.gpr[29]),
+            static_cast<std::uint32_t>(state.gpr[28]),
+            static_cast<std::uint32_t>(state.gpr[branch_register]));
+      }
     }
     trace[cursor++ % kTraceSize] = {
         state.pc, instruction, state.gpr[2],
@@ -309,6 +576,17 @@ int main(int argc, char** argv) {
           static_cast<std::uint32_t>(state.gpr[base] + offset), state.cop0[12]};
     }
     const unsigned opcode = instruction >> 26;
+    if (census_path && !ee_takes_interrupt) {
+      const auto width = load_width(instruction);
+      if (width != 0u) {
+        const unsigned base = (instruction >> 21) & 31u;
+        const auto offset = static_cast<std::int16_t>(instruction);
+        const auto address = static_cast<std::uint32_t>(state.gpr[base] + offset);
+        if (is_ee_mmio(address))
+          ee_census.record_mmio_read(state.pc, ee_physical_address(address),
+                                     width);
+      }
+    }
     if (opcode == 0x28u) {
       const unsigned base = (instruction >> 21) & 31u;
       const unsigned source = (instruction >> 16) & 31u;
@@ -319,6 +597,16 @@ int main(int argc, char** argv) {
                                 ? address & 0x1FFFFFFFu : address;
       if (physical == 0x1000F180u && serial_output.size() < 16384u)
         serial_output.push_back(static_cast<char>(state.gpr[source]));
+    }
+    if (opcode == 0x39u) { // SWC1 source comes from FPR, not GPR.
+      const auto base = (instruction >> 21) & 31u;
+      const auto source = (instruction >> 16) & 31u;
+      const auto address = static_cast<std::uint32_t>(state.gpr[base] +
+          static_cast<std::int16_t>(instruction));
+      const auto physical = ee_physical_address(address);
+      if (physical >= 0x00274200u && physical < 0x00274240u)
+        vif_parameter_store_trace[vif_parameter_store_cursor++ % kTraceSize] = {
+            state.pc, instruction, address, state.fpr[source], 0u};
     }
     if ((opcode >= 0x28u && opcode <= 0x2Eu) || opcode == 0x1Fu ||
         opcode == 0x3Fu) {
@@ -333,6 +621,52 @@ int main(int argc, char** argv) {
         low_store_trace[low_store_cursor++ % kTraceSize] = {
             state.pc, instruction, address, state.gpr[source],
             state.gpr_hi[source]};
+      }
+      // Captured 2.00E BIOS first-VIF parameter packet. Like the other
+      // instruction traces, these are attempted stores, not bus-write proof.
+      if (physical >= 0x00274200u && physical < 0x00274240u) {
+        vif_parameter_store_trace[vif_parameter_store_cursor++ % kTraceSize] = {
+            state.pc, instruction, address, state.gpr[source], state.gpr_hi[source]};
+        if (vif_copy_probes < 64u &&
+            (state.pc == 0x00100BD0u || state.pc == 0x00100BECu)) {
+          // Both observed copy paths increment a1 between LBU and SB. Only
+          // inspect plain RAM, never an arbitrary pointer into MMIO.
+          const auto copy_source = ee_physical_address(
+              static_cast<std::uint32_t>(state.gpr[5] - 1u));
+          if (copy_source < ps2vita::Memory::kRamSize) {
+            ++vif_copy_probes;
+            std::printf("vif_copy_byte pc=%08X destination=%08X source=%08X memory=%02X operand=%02X remaining=%llu\n",
+                state.pc, physical, copy_source, emulator.memory().read8(copy_source),
+                static_cast<unsigned>(state.gpr[source] & 0xFFu),
+                static_cast<unsigned long long>(state.gpr[4]));
+          }
+        }
+        // BIOS-specific diagnostic only: preserve the byte writer's caller and
+        // operands before subsequent execution destroys their provenance.
+        if (!vif_parameter_writer_captured && state.pc == 0x00100BD0u) {
+          vif_parameter_writer_captured = true;
+          std::printf("vif_parameter_writer pc=%08X address=%08X\n", state.pc, address);
+          for (unsigned reg = 0; reg < 32; ++reg)
+            std::printf("vif_writer_gpr[%u]=%016llX:%016llX\n", reg,
+                static_cast<unsigned long long>(state.gpr_hi[reg]),
+                static_cast<unsigned long long>(state.gpr[reg]));
+          for (std::uint32_t pc = 0x00100B80u; pc < 0x00100C20u; pc += 4u)
+            std::printf("vif_writer_code[%08X]=%08X\n", pc, emulator.memory().read32(pc));
+          const auto decoder = ee_physical_address(static_cast<std::uint32_t>(state.gpr[7]));
+          if (decoder <= ps2vita::Memory::kRamSize - 32u) {
+            for (unsigned offset = 0; offset < 32; offset += 4)
+              std::printf("vif_decoder[%08X]=%08X\n", decoder + offset,
+                  emulator.memory().read32(decoder + offset));
+            const auto input = ee_physical_address(emulator.memory().read32(decoder + 20u));
+            if (input <= ps2vita::Memory::kRamSize - 16u ||
+                (input >= ps2vita::Memory::kBiosBase &&
+                 input <= ps2vita::Memory::kBiosBase + ps2vita::Memory::kBiosSize - 16u)) {
+              for (unsigned offset = 0; offset < 16; ++offset)
+                std::printf("vif_decoder_input[%08X]=%02X\n", input + offset,
+                    emulator.memory().read8(input + offset));
+            }
+          }
+        }
       }
       if (physical >= 0x1C0003C0u && physical < 0x1C000420u) {
         mailbox_store_trace.push_back({state.pc, instruction, address,
@@ -373,15 +707,34 @@ int main(int argc, char** argv) {
            ++channel) {
         if (physical == kGraphicsDmaChcr[channel] &&
             (state.gpr[source] & 0x100u) != 0u) {
+          if (census_path) {
+            event_census.record(
+                static_cast<std::uint32_t>(kVif0DmaStart + channel), steps);
+          }
           if (graphics_dma_starts[channel]++ == 0u) {
             graphics_dma_first_step[channel] = steps;
             graphics_dma_first_pc[channel] = state.pc;
           }
         }
       }
+      if (census_path && physical == 0x1000C400u &&
+          (state.gpr[source] & 0x100u) != 0u)
+        event_census.record(kSif1DmaStart, steps);
     }
     if (stop_pc != 0u && state.pc == stop_pc && ++hits >= stop_hit) break;
     reason = emulator.cpu().step();
+    emulator.service_graphics();
+    if (!vif_failure_reported && emulator.vif1().first_unsupported_packet() != 0u) {
+      vif_failure_reported = true;
+      std::printf("first_vif_failure step=%llu next_ee_pc=%08X tadr=%08X madr=%08X\n",
+          static_cast<unsigned long long>(steps), emulator.cpu().state().pc,
+          emulator.memory().read32(0x10009030u), emulator.memory().read32(0x10009010u));
+      // These spans describe the latest completed DMA, not arbitrary queued
+      // submissions. Label them explicitly rather than asserting provenance.
+      for (const auto& span : emulator.memory().vif_dma_spans())
+        std::printf("first_vif_failure_latest_dma source=%08X offset=%zu bytes=%zu\n",
+            span.source, span.stream_offset, span.bytes);
+    }
     if (reason != ps2vita::StopReason::None) break;
     if ((steps % iop_divisor) == iop_divisor - 1u) {
       const auto& iop = emulator.iop().state();
@@ -391,6 +744,11 @@ int main(int argc, char** argv) {
       if (!iop_takes_interrupt) {
         ++iop_opcode_counts[opcode_family(iop_instruction)];
         ++iop_profile_total;
+        if (census_path) {
+          const auto branch_register = (iop_instruction >> 21) & 31u;
+          iop_census.record(iop.pc, iop_instruction, iop.gpr[29], iop.gpr[28],
+                            iop.gpr[branch_register]);
+        }
       }
       iop_trace[iop_cursor++ % kTraceSize] = {iop.pc, iop_instruction,
           iop.gpr[2], iop.gpr[3], iop.gpr[4], iop.gpr[31]};
@@ -407,6 +765,16 @@ int main(int argc, char** argv) {
           iop_serial_output.push_back(static_cast<char>(iop.gpr[source]));
       }
       const unsigned iop_opcode = iop_instruction >> 26;
+      if (census_path && !iop_takes_interrupt) {
+        const auto width = load_width(iop_instruction);
+        if (width != 0u) {
+          const unsigned base = (iop_instruction >> 21) & 31u;
+          const auto offset = static_cast<std::int16_t>(iop_instruction);
+          const auto address = (iop.gpr[base] + offset) & 0x1FFFFFFFu;
+          if (is_iop_mmio(address))
+            iop_census.record_mmio_read(iop.pc, address, width);
+        }
+      }
       if (iop_opcode >= 0x20u && iop_opcode <= 0x26u) {
         const unsigned base = (iop_instruction >> 21) & 31u;
         const auto offset = static_cast<std::int16_t>(iop_instruction);
@@ -420,6 +788,13 @@ int main(int argc, char** argv) {
               iop.pc, iop_instruction, address,
               emulator.memory().iop_read32(address & ~3u), 0u};
         }
+        if ((address >= 0x1F900000u && address < 0x1F900800u) ||
+            (address >= 0x1F8010C0u && address < 0x1F8010D0u) ||
+            (address >= 0x1F801500u && address < 0x1F801510u)) {
+          iop_spu_trace[iop_spu_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address,
+              emulator.memory().iop_read32(address & ~3u), 0u};
+        }
       }
       if (iop_opcode == 0x28u || iop_opcode == 0x29u ||
           iop_opcode == 0x2Au || iop_opcode == 0x2Bu ||
@@ -428,12 +803,75 @@ int main(int argc, char** argv) {
         const unsigned source = (iop_instruction >> 16) & 31u;
         const auto offset = static_cast<std::int16_t>(iop_instruction);
         const auto address = (iop.gpr[base] + offset) & 0x1FFFFFFFu;
+        if (!iop_takes_interrupt && address >= 0x1F900000u && address < 0x1F900800u &&
+            (iop_opcode == 0x28u || iop_opcode == 0x29u || iop_opcode == 0x2Bu)) {
+          const auto reg = address & 0x3FFu;
+          if (reg >= 0x1A0u && reg <= 0x1A2u) {
+            const unsigned core = (address >> 10) & 1u;
+            const auto value = iop.gpr[source] & (iop_opcode == 0x28u ? 0xFFu :
+                iop_opcode == 0x29u ? 0xFFFFu : 0xFFFFFFFFu);
+            const auto mask = (value << ((reg - 0x1A0u) * 8u)) & 0xFFFFFFu;
+            if (mask != 0u) {
+              ++spu_keyon_writes[core]; spu_keyon_masks[core] |= mask;
+              if (spu_keyon_writes[core] <= 4u) {
+                for (unsigned voice = 0; voice < 24u; ++voice) {
+                  if ((mask & (1u << voice)) == 0u) continue;
+                  const auto base_address = 0x1F900000u + core * 0x400u;
+                  const auto ssa_register = base_address + 0x1C0u + voice * 12u;
+                  const auto ssa = ((std::uint32_t(emulator.memory().iop_read16(ssa_register)) << 16) |
+                      emulator.memory().iop_read16(ssa_register + 2u)) & 0xFFFF8u;
+                  std::array<std::uint8_t, 16> encoded{};
+                  for (unsigned byte = 0; byte < encoded.size(); ++byte)
+                    encoded[byte] = emulator.memory().spu2_ram_read8(ssa * 2u + byte);
+                  ps2vita::Spu2AdpcmHistory history;
+                  ps2vita::Spu2AdpcmBlock decoded;
+                  const bool decoded_ok = ps2vita::decode_spu2_adpcm(encoded, history, decoded);
+                  int peak = 0;
+                  for (const auto sample : decoded.samples)
+                    peak = std::max(peak, sample < 0 ? -int(sample) : int(sample));
+                  std::printf("spu2_keyon_probe step=%llu iop_pc=%08X core=%u voice=%u ssa=%05X "
+                      "pitch=%04X adsr=%04X/%04X header=%02X flags=%02X decoded=%u raw_peak=%d\n",
+                      static_cast<unsigned long long>(steps), iop.pc, core, voice, ssa,
+                      emulator.memory().iop_read16(base_address + voice * 16u + 4u),
+                      emulator.memory().iop_read16(base_address + voice * 16u + 6u),
+                      emulator.memory().iop_read16(base_address + voice * 16u + 8u),
+                      encoded[0], encoded[1], unsigned(decoded_ok), peak);
+                  // Bounded functional lookahead into current RAM, not timed
+                  // playback: later DMA, envelopes and key-off are not applied.
+                  ps2vita::Spu2AdpcmStream stream;
+                  stream.start(ssa);
+                  unsigned blocks = 0;
+                  int stream_peak = 0;
+                  while (blocks < 8u && stream.decode_next(emulator.memory(), decoded)) {
+                    ++blocks;
+                    for (const auto sample : decoded.samples)
+                      stream_peak = std::max(stream_peak, sample < 0 ? -int(sample) : int(sample));
+                  }
+                  std::printf("spu2_stream_probe core=%u voice=%u blocks=%u raw_peak=%d "
+                      "next_word=%05X end=%u active=%u\n", core, voice, blocks, stream_peak,
+                      stream.next_word_address(), unsigned(stream.encountered_end()),
+                      unsigned(stream.active()));
+                }
+              }
+            }
+          }
+        }
         if (address < 0x2000u) {
           iop_low_store_trace[iop_low_store_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
         }
+        if (census_path && (iop.gpr[source] & 0x01000000u) != 0u) {
+          if (address == 0x1F8010C8u)
+            event_census.record(kSpu0DmaStart, steps);
+          else if (address == 0x1F801508u)
+            event_census.record(kSpu1DmaStart, steps);
+        }
         if (address >= 0x3C0u && address < 0x420u) {
           mailbox_store_trace.push_back({iop.pc, iop_instruction, address,
+              iop.gpr[source], 0u});
+        }
+        if (address >= 0x000A0A00u && address < 0x000A0A30u) {
+          iop_rpc_wait_store_trace.push_back({iop.pc, iop_instruction, address,
               iop.gpr[source], 0u});
         }
         if (address >= 0x1D000000u && address <= 0x1D000060u) {
@@ -455,6 +893,12 @@ int main(int argc, char** argv) {
         }
         if (address >= 0x1F808200u && address < 0x1F808280u) {
           iop_sio2_trace[iop_sio2_cursor++ % kTraceSize] = {
+              iop.pc, iop_instruction, address, iop.gpr[source], 0u};
+        }
+        if ((address >= 0x1F900000u && address < 0x1F900800u) ||
+            (address >= 0x1F8010C0u && address < 0x1F8010D0u) ||
+            (address >= 0x1F801500u && address < 0x1F801510u)) {
+          iop_spu_trace[iop_spu_cursor++ % kTraceSize] = {
               iop.pc, iop_instruction, address, iop.gpr[source], 0u};
         }
         if ((address >= 0x1F801070u && address < 0x1F801080u) ||
@@ -481,6 +925,9 @@ int main(int argc, char** argv) {
     low_stub_word = current_low_stub_word;
   }
 
+  if (host_seconds != 0u)
+    std::printf("host_deadline=%u limit_seconds=%u (checked between EE steps)\n",
+        unsigned(host_deadline), host_seconds);
   const auto& state = emulator.cpu().state();
   const auto& iop_state = emulator.iop().state();
   if (low_clear_triggered)
@@ -515,6 +962,185 @@ int main(int argc, char** argv) {
         static_cast<unsigned long long>(graphics_dma_starts[channel]),
         static_cast<unsigned long long>(graphics_dma_first_step[channel]),
         graphics_dma_first_pc[channel]);
+  }
+  const auto vif1_tadr = emulator.memory().read32(0x10009030u) & 0x0FFFFFF0u;
+  std::printf("EE VIF1 chain at %08X (first 8 qwords):\n", vif1_tadr);
+  for (std::uint32_t qword = 0; qword < 8u; ++qword) {
+    const auto address = vif1_tadr + qword * 16u;
+    std::printf("%08X  %016llX %016llX\n", address,
+        static_cast<unsigned long long>(emulator.memory().read64(address + 8u)),
+        static_cast<unsigned long long>(emulator.memory().read64(address)));
+  }
+  std::uint64_t framebuffer_hash = 1469598103934665603ull;
+  {
+    const auto count = std::min(vif_parameter_store_cursor, kTraceSize);
+    const auto first = vif_parameter_store_cursor < kTraceSize ? 0u :
+        vif_parameter_store_cursor % kTraceSize;
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto& item = vif_parameter_store_trace[(first + i) % kTraceSize];
+      std::printf("vif_parameter_store pc=%08X opcode=%08X address=%08X value=%016llX:%016llX\n",
+          item.pc, item.instruction, item.address,
+          static_cast<unsigned long long>(item.value_hi),
+          static_cast<unsigned long long>(item.value_lo));
+    }
+  }
+  for (const auto& span : emulator.memory().vif_dma_spans())
+    std::printf("vif_dma_span offset=%zu bytes=%zu source=%08X\n",
+        span.stream_offset, span.bytes, span.source);
+  if (vif_path) {
+    const auto& vif = emulator.vif1();
+    if (vif.packet_capture_overflow() || vif.captured_packet().empty()) {
+      std::fprintf(stderr, "first VIF capture unavailable or exceeds 1 MiB\n");
+      return 2;
+    }
+    std::ofstream capture(vif_path, std::ios::binary | std::ios::trunc);
+    const auto& bytes = vif.captured_packet();
+    capture.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    capture.close();
+    if (!capture) { std::fprintf(stderr, "could not write VIF capture\n"); return 2; }
+    std::printf("first VIF capture: %s bytes=%zu\n", vif_path, bytes.size());
+  }
+  std::size_t nonzero_pixels = 0;
+  std::size_t nonzero_rgb_pixels = 0;
+  for (int y = 0; y < ps2vita::Gs::kHeight; ++y) {
+    for (int x = 0; x < ps2vita::Gs::kWidth; ++x) {
+      const auto pixel = emulator.gs().pixel(x, y);
+      if (pixel != 0u) ++nonzero_pixels;
+      if ((pixel & 0xFFFFFFu) != 0u) ++nonzero_rgb_pixels;
+      framebuffer_hash ^= pixel;
+      framebuffer_hash *= 1099511628211ull;
+    }
+  }
+  std::printf("framebuffer_hash=%016llX nonzero_pixels=%llu/%u nonzero_rgb_pixels=%llu\n",
+      static_cast<unsigned long long>(framebuffer_hash),
+      static_cast<unsigned long long>(nonzero_pixels),
+      ps2vita::Gs::kWidth * ps2vita::Gs::kHeight,
+      static_cast<unsigned long long>(nonzero_rgb_pixels));
+  if (framebuffer_path) {
+    std::ofstream snapshot(framebuffer_path, std::ios::binary | std::ios::trunc);
+    const bool written = ps2vita::write_framebuffer_ppm(snapshot, emulator.gs());
+    snapshot.close();
+    if (!written || !snapshot) {
+      std::fprintf(stderr, "could not write framebuffer: %s\n", framebuffer_path);
+      return 2;
+    }
+    std::printf("framebuffer snapshot: %s\n", framebuffer_path);
+  }
+  std::printf("gif_packets=%llu rejected=%llu sprites=%llu tags=%llu/%llu/%llu "
+              "image_bytes=%llu local_bytes=%llu pending=%llu first_unsupported=%016llX\n",
+      static_cast<unsigned long long>(emulator.gif().packets_submitted()),
+      static_cast<unsigned long long>(emulator.gif().packets_rejected()),
+      static_cast<unsigned long long>(emulator.gif().sprites_emitted()),
+      static_cast<unsigned long long>(emulator.gif().packed_tags()),
+      static_cast<unsigned long long>(emulator.gif().reglist_tags()),
+      static_cast<unsigned long long>(emulator.gif().image_tags()),
+      static_cast<unsigned long long>(emulator.gif().image_bytes()),
+      static_cast<unsigned long long>(emulator.gif().local_bytes_written()),
+      static_cast<unsigned long long>(emulator.gif().pending_bytes()),
+      static_cast<unsigned long long>(emulator.gif().first_unsupported_tag()));
+  std::printf("gif_primitives points=%llu lines=%llu triangles=%llu "
+              "first_image_regs=%016llX/%016llX/%016llX/%016llX\n",
+      static_cast<unsigned long long>(emulator.gif().points_emitted()),
+      static_cast<unsigned long long>(emulator.gif().lines_emitted()),
+      static_cast<unsigned long long>(emulator.gif().triangles_emitted()),
+      static_cast<unsigned long long>(emulator.gif().first_image_bitbltbuf()),
+      static_cast<unsigned long long>(emulator.gif().first_image_trxpos()),
+      static_cast<unsigned long long>(emulator.gif().first_image_trxreg()),
+      static_cast<unsigned long long>(emulator.gif().first_image_trxdir()));
+  for (std::size_t index = 0; index < emulator.gif().triangle_records().size(); ++index) {
+    const auto& t = emulator.gif().triangle_records()[index];
+    std::printf("gif_triangle[%zu] prim=%llX xyoffset=%llX scissor=%llX test=%llX zbuf=%llX",
+        index, static_cast<unsigned long long>(t.prim),
+        static_cast<unsigned long long>(t.xyoffset),
+        static_cast<unsigned long long>(t.scissor),
+        static_cast<unsigned long long>(t.test),
+        static_cast<unsigned long long>(t.zbuf));
+    for (const auto& v : t.vertices)
+      std::printf(" vertex=(%d,%d,%u,%08X)", v.x, v.y, v.z, v.color);
+    for (const auto xyz : t.xyz)
+      std::printf(" xyz=%016llX", static_cast<unsigned long long>(xyz));
+    std::putchar('\n');
+  }
+  for (std::size_t index = 0; index < emulator.gif().image_records().size();
+       ++index) {
+    const auto& image = emulator.gif().image_records()[index];
+    std::printf("gif_image[%zu] tag=%016llX regs=%016llX/%016llX/%016llX/%016llX "
+                "bytes=%llu first=%016llX hash=%016llX\n", index,
+        static_cast<unsigned long long>(image.tag),
+        static_cast<unsigned long long>(image.bitbltbuf),
+        static_cast<unsigned long long>(image.trxpos),
+        static_cast<unsigned long long>(image.trxreg),
+        static_cast<unsigned long long>(image.trxdir),
+        static_cast<unsigned long long>(image.bytes),
+        static_cast<unsigned long long>(image.first_qword),
+        static_cast<unsigned long long>(image.hash));
+  }
+  std::printf("vif1_packets=%llu rejected=%llu mpg_instructions=%llu "
+              "unpacked_vectors=%llu first_unsupported=%08X\n",
+      static_cast<unsigned long long>(emulator.vif1().packets_submitted()),
+      static_cast<unsigned long long>(emulator.vif1().packets_rejected()),
+      static_cast<unsigned long long>(
+          emulator.vif1().micro_instructions_loaded()),
+      static_cast<unsigned long long>(emulator.vif1().vectors_unpacked()),
+      emulator.vif1().first_unsupported_code());
+  std::printf("vif1_first_unsupported_packet=%llu stream_offset=%zu packet_bytes=%zu pending_direct_bytes=%zu\n",
+      static_cast<unsigned long long>(emulator.vif1().first_unsupported_packet()),
+      emulator.vif1().first_unsupported_offset(),
+      emulator.vif1().first_unsupported_size(), emulator.vif1().pending_direct_bytes());
+  std::printf("vu1_pairs=%llu running=%u pc=%04X unsupported_lower=%08X "
+              "unsupported_upper=%08X kick_address=%04X kick_tag=%016llX "
+              "path1_tags=%llu/%llu\n",
+      static_cast<unsigned long long>(emulator.vif1().vu1().pairs_executed()),
+      emulator.vif1().vu1().running() ? 1u : 0u,
+      emulator.vif1().vu1().state().pc,
+      emulator.vif1().vu1().first_unsupported_lower(),
+      emulator.vif1().vu1().first_unsupported_upper(),
+      emulator.vif1().vu1().last_kick_address(),
+      static_cast<unsigned long long>(emulator.vif1().vu1().last_kick_tag()),
+      static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_queued()),
+      static_cast<unsigned long long>(emulator.vif1().vu1().path1_tags_rejected()));
+  std::puts("VU1 integer registers:");
+  std::printf("vu1_first_rejected_tag=%016llX address=%04X pc=%04X kick_start=%04X tag_index=%u previous=%016llX\n",
+      static_cast<unsigned long long>(emulator.vif1().vu1().first_rejected_tag()),
+      emulator.vif1().vu1().first_rejected_address(),
+      emulator.vif1().vu1().first_rejected_pc(),
+      emulator.vif1().vu1().first_rejected_kick_start(),
+      emulator.vif1().vu1().first_rejected_tag_index(),
+      static_cast<unsigned long long>(emulator.vif1().vu1().first_rejected_previous_tag()));
+  if (emulator.vif1().vu1().path1_tags_rejected() != 0u) {
+    const auto& vu = emulator.vif1().vu1();
+    const auto& words = vu.first_rejected_data();
+    for (unsigned i = 0; i < words.size(); i += 4u)
+      std::printf("vu1_rejected_snapshot[%04X]=%08X %08X %08X %08X\n",
+          (vu.first_rejected_kick_start() + i * 4u) & 0x3FFFu,
+          words[i], words[i + 1u], words[i + 2u], words[i + 3u]);
+  }
+  for (unsigned index = 0; index < 16u; ++index) {
+    std::printf("vi%-2u=%04X%c", index,
+        emulator.vif1().vu1().state().vi[index],
+        (index & 7u) == 7u ? '\n' : ' ');
+  }
+  std::puts("VU1 data around XGKICK:");
+  const auto kick_address = emulator.vif1().vu1().last_kick_address();
+  for (unsigned qword = 0; qword < 16u; ++qword) {
+    const auto offset = static_cast<std::uint16_t>(kick_address + qword * 16u);
+    const auto address = ps2vita::Memory::kVu1DataBase + (offset & 0x3FFFu);
+    std::printf("%04X  %016llX %016llX\n", offset & 0x3FFFu,
+        static_cast<unsigned long long>(emulator.memory().read64(address)),
+        static_cast<unsigned long long>(emulator.memory().read64(address + 8u)));
+  }
+  if (emulator.vif1().micro_instructions_loaded() != 0u) {
+    std::puts("VU1 microprogram upload:");
+    const auto count = std::min<std::uint64_t>(
+        emulator.vif1().micro_instructions_loaded(), 256u);
+    for (std::uint64_t index = 0; index < count; ++index) {
+      const auto address = ps2vita::Memory::kVu1MicroBase +
+          static_cast<std::uint32_t>(index * 8u);
+      std::printf("%04llX  %08X %08X\n",
+          static_cast<unsigned long long>(index * 8u),
+          emulator.memory().read32(address),
+          emulator.memory().read32(address + 4u));
+    }
   }
   std::printf("ee_sif0 chcr=%08X madr=%08X qwc=%08X tadr=%08X\n",
       emulator.memory().read32(0x1000C000u),
@@ -662,6 +1288,19 @@ int main(int argc, char** argv) {
         event.active ? "start" : "done ", event.tadr, event.source,
         event.words, event.ee_tag, event.destination);
   }
+  std::printf("EE SIF1 activity transitions: %zu\n", sif1_events.size());
+  const auto sif1_begin =
+      sif1_events.size() > 64u ? sif1_events.size() - 64u : 0u;
+  for (std::size_t i = sif1_begin; i < sif1_events.size(); ++i) {
+    const auto& event = sif1_events[i];
+    std::printf("%03zu step=%llu %s tadr=%08X tag_tadr=%08X "
+                "dma_tag=%08X source=%08X destination=%08X words=%05X "
+                "packet=%08X %08X %08X %08X\n",
+        i, static_cast<unsigned long long>(event.step),
+        event.active ? "start" : "done ", event.tadr, event.tag_tadr,
+        event.dma_tag, event.source, event.destination, event.words,
+        event.packet[0], event.packet[1], event.packet[2], event.packet[3]);
+  }
   std::puts("EE RAM 00100000 staging window:");
   for (std::uint32_t offset = 0u; offset < 0x100u; offset += 16u) {
     std::printf("%08X  %08X %08X %08X %08X\n", 0x00100000u + offset,
@@ -716,6 +1355,60 @@ int main(int argc, char** argv) {
         emulator.memory().iop_read32(0x00019874u + offset),
         emulator.memory().iop_read32(0x00019878u + offset),
         emulator.memory().iop_read32(0x0001987Cu + offset));
+  }
+  const auto final_sif1_iop_packet =
+      emulator.memory().read32(sif1_madr) & 0x00FFFFFFu;
+  std::printf("final SIF1 IOP packet at %08X:\n", final_sif1_iop_packet);
+  for (std::uint32_t offset = 0u; offset < 0x40u; offset += 16u) {
+    std::printf("%08X  %08X %08X %08X %08X\n",
+        final_sif1_iop_packet + offset,
+        emulator.memory().iop_read32(final_sif1_iop_packet + offset),
+        emulator.memory().iop_read32(final_sif1_iop_packet + offset + 4u),
+        emulator.memory().iop_read32(final_sif1_iop_packet + offset + 8u),
+        emulator.memory().iop_read32(final_sif1_iop_packet + offset + 12u));
+  }
+  const auto final_rpc_extra =
+      emulator.memory().iop_read32(final_sif1_iop_packet + 4u) & 0x00FFFFFFu;
+  const auto final_rpc_server =
+      emulator.memory().iop_read32(final_sif1_iop_packet + 13u * 4u) &
+      0x00FFFFFFu;
+  const auto final_rpc_queue = emulator.memory().iop_valid(
+      final_rpc_server + 16u * 4u, 4u)
+      ? emulator.memory().iop_read32(final_rpc_server + 16u * 4u) & 0x00FFFFFFu
+      : 0u;
+  for (const auto& item : std::array<std::pair<const char*, std::uint32_t>, 3>{{
+           {"RPC extra", final_rpc_extra},
+           {"RPC server", final_rpc_server},
+           {"RPC queue", final_rpc_queue}}}) {
+    std::printf("final %s at %08X:\n", item.first, item.second);
+    if (!emulator.memory().iop_valid(item.second, 0x50u)) {
+      std::puts("  unavailable");
+      continue;
+    }
+    for (std::uint32_t offset = 0u; offset < 0x50u; offset += 16u) {
+      std::printf("%08X  %08X %08X %08X %08X\n", item.second + offset,
+          emulator.memory().iop_read32(item.second + offset),
+          emulator.memory().iop_read32(item.second + offset + 4u),
+          emulator.memory().iop_read32(item.second + offset + 8u),
+          emulator.memory().iop_read32(item.second + offset + 12u));
+    }
+  }
+  std::puts("IOP RPC caller and wait-state code/data:");
+  for (const auto base : {0x0009CF80u, 0x000A0A00u}) {
+    for (std::uint32_t offset = 0u; offset < 0x180u; offset += 16u) {
+      std::printf("%08X  %08X %08X %08X %08X\n", base + offset,
+          emulator.memory().iop_read32(base + offset),
+          emulator.memory().iop_read32(base + offset + 4u),
+          emulator.memory().iop_read32(base + offset + 8u),
+          emulator.memory().iop_read32(base + offset + 12u));
+    }
+  }
+  std::printf("IOP RPC wait-state stores: %zu\n",
+              iop_rpc_wait_store_trace.size());
+  for (const auto& item : iop_rpc_wait_store_trace) {
+    std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
+        item.instruction, item.address,
+        static_cast<unsigned long long>(item.value_lo));
   }
   std::puts("EE SIF wait, flag-dispatch, and manager routines:");
   for (const auto base : {0x8000FAC8u, 0x8000FC58u, 0x8000FDE8u,
@@ -924,6 +1617,34 @@ int main(int argc, char** argv) {
                   static_cast<unsigned long long>(item.value_lo));
     }
   }
+  for (unsigned core = 0; core < 2u; ++core)
+    std::printf("spu2_core%u keyon_store_attempts=%llu requested_voice_mask=%06X\n", core,
+        static_cast<unsigned long long>(spu_keyon_writes[core]), spu_keyon_masks[core]);
+  unsigned shadow_active = 0, shadow_errors = 0;
+  for (unsigned core = 0; core < 2u; ++core)
+    for (unsigned voice = 0; voice < 24u; ++voice) {
+      const auto& state = emulator.memory().spu2_shadow_voice(core, voice);
+      shadow_active += state.active(); shadow_errors += state.decode_error();
+    }
+  std::printf("spu2_shadow ticks=%llu pre_mix_peak=%u active=%u decode_errors=%u\n",
+      static_cast<unsigned long long>(emulator.memory().spu2_shadow_ticks()),
+      emulator.memory().spu2_shadow_peak(), shadow_active, shadow_errors);
+  std::printf("spu2_shadow_dry core0=%d/%d core1=%d/%d unsupported_sweep_mask=%012llX\n",
+      emulator.memory().spu2_shadow_dry(0, 0), emulator.memory().spu2_shadow_dry(0, 1),
+      emulator.memory().spu2_shadow_dry(1, 0), emulator.memory().spu2_shadow_dry(1, 1),
+      static_cast<unsigned long long>(emulator.memory().spu2_shadow_sweeps()));
+  if (iop_spu_cursor != 0) {
+    std::puts("recent IOP SPU2/DMA register accesses:");
+    const auto spu_count = std::min(iop_spu_cursor, kTraceSize);
+    const auto spu_start = iop_spu_cursor >= kTraceSize
+        ? iop_spu_cursor % kTraceSize : 0u;
+    for (std::size_t i = 0; i < spu_count; ++i) {
+      const auto& item = iop_spu_trace[(spu_start + i) % kTraceSize];
+      std::printf("%08X  %08X  address=%08X value=%08llX\n", item.pc,
+                  item.instruction, item.address,
+                  static_cast<unsigned long long>(item.value_lo));
+    }
+  }
   if (!mailbox_store_trace.empty()) {
     std::puts("EE/IOP low-memory mailbox stores:");
     for (const auto& item : mailbox_store_trace) {
@@ -979,6 +1700,22 @@ int main(int argc, char** argv) {
     std::puts("IOP serial output:");
     std::fwrite(iop_serial_output.data(), 1, iop_serial_output.size(), stdout);
     if (iop_serial_output.back() != '\n') std::putchar('\n');
+  }
+  if (census_path) {
+    std::ofstream census_output(census_path, std::ios::trunc);
+    if (!census_output) {
+      std::fprintf(stderr, "could not write execution census: %s\n",
+                   census_path);
+      return 2;
+    }
+    write_execution_census(census_output, steps, iop_divisor,
+                           ee_census, iop_census, event_census);
+    if (!census_output) {
+      std::fprintf(stderr, "failed while writing execution census: %s\n",
+                   census_path);
+      return 2;
+    }
+    std::printf("execution census: %s\n", census_path);
   }
   return (stop_pc != 0u && state.pc == stop_pc) || iop_stop_triggered ? 0 : 1;
 }

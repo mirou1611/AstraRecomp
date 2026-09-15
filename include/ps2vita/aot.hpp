@@ -116,6 +116,11 @@ struct AotBenchmarkResult {
   std::uint64_t interpreter_checksum = 0;
   std::uint64_t aot_checksum = 0;
   std::uint32_t speedup_x100 = 0;
+  std::uint64_t trace_probe_microseconds = 0;
+  std::uint64_t trace_probe_guest_instructions = 0;
+  std::uint64_t trace_probe_checksum = 0;
+  std::uint64_t trace_entries = 0;
+  std::uint64_t trace_horizon_fallbacks = 0;
 };
 
 // Executes the same generated synthetic guest workload through the portable

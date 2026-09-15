@@ -39,11 +39,10 @@ the expensive preparation; the Vita executes the resulting runtime and generated
 code. This is a research direction, not a promise of universal compatibility or
 full-speed PS2 games.
 
-**Follow active development:**
-[`research/spu2-dma-checkpoint`](https://github.com/mirou1611/AstraRecomp/tree/research/spu2-dma-checkpoint).
-The status below describes that research branch; `main` is an earlier code
-checkpoint with this updated project overview. For the latest implementation,
-switch to the research branch before building.
+**Build from `main`:** the tested research history has been integrated here.
+The former `research/spu2-dma-checkpoint` branch is retained for investigation
+history. `main` contains the current verified checkpoint, not a stable release
+or a claim of playable PS2 games.
 
 The current milestone is intentionally small but real: PS2Recomp analyzes the
 initial MIPS corpora, while an independently written subset backend now reads the
@@ -73,7 +72,7 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 
 ## Project status
 
-Latest verified research checkpoint: **September 5, 2026**. These are development
+Latest verified research checkpoint: **September 15, 2026**. These are development
 results, not a game-compatibility list or a measured completion percentage.
 
 | Area | Current state |
@@ -81,30 +80,33 @@ results, not a game-compatibility list or a measured completion percentage.
 | BIOS bootstrap | Executes through DECI2 startup, multi-tag SIF transfers, relocated EE code, and repeated no-clear restart completion |
 | PC recompiler | Phase-0 analysis, a tested R5900-to-C++ subset, and a generated mixed-workload performance gate |
 | Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
-| Guest graphics | GIF/VIF1/VU1 path connected to a 160×112 software rasterizer; BIOS replay emits 5 triangles and 122 nonzero pixels, not a confirmed intro |
+| Guest graphics | 160×112 software rasterizer; reference-checked PATH3 fixtures cover UV, perspective ST/Q, RGB alpha selection and HIGHLIGHT modes; BIOS output is not a confirmed intro |
 | VU1 | Tested instruction subset, microprogram upload, vector unpacking, XGKICK delivery, and partial MAC-flag latency; full timing remains incomplete |
-| Audio / SPU2 | Sound RAM and tested DMA4/DMA7 transfer timing, status and interrupts; no sound decoding, voice mixing, or Vita speaker output yet |
+| Audio / SPU2 | Tested DMA and shadow ADPCM/voice-envelope/pitch/mixing components; no Vita speaker output; further audio work deferred |
 | Retail games | **Not playable**—IOP devices, GIF/GS, VU, SPU2, media, and compatibility work remain |
 
 ### What the latest graphics milestone actually means
 
-A deterministic host replay executes **248,800,000 EE steps**, with **998 VU1
-instruction pairs**, **5 emitted triangles**, and **122/17,920 nonzero framebuffer
-pixels**. Correct guest depth comparisons changed the previous fully black result.
-The host test suite passes (2/2 CTest targets), and the Vita VPK cross-build passes.
+A completed host replay executes **300,000,000 EE steps**, with **998 VU1
+instruction pairs**, **34,810 emitted triangles**, and **10,028/17,920 nonblack
+RGB pixels**. That ST/Q checkpoint produces textured rectangular regions, not
+the recognizable intro. The subsequent TCC and HIGHLIGHT fixes are verified by
+small guest ELF fixtures against PCSX2 software-renderer captures, with zero RGB
+mismatches in the compared regions. These are reference checks, not PS2 hardware
+validation. Release and UBSan suites pass **8/8 CTest targets** each, and the Vita
+VPK cross-build passes.
 
 This is evidence that part of the guest graphics pipeline reaches the rasterizer,
 **not evidence of a recognizable boot animation, playable games, or acceptable
-speed on physical Vita hardware**. One oversized XGKICK tag remains rejected.
-Texture/fog rendering, GS depth-buffer formats/addressing, other pixel tests, and
-VU timing still need work. See the
-[saved investigation and replay details](https://github.com/mirou1611/AstraRecomp/blob/research/spu2-dma-checkpoint/docs/SESSION_2026-09-05.md).
+speed on physical Vita hardware**. One malformed VU1 PATH1 tag remains rejected.
+Texture addressing/clamping, formats, fog, GS buffer semantics and VU/GIF timing
+still need work. See the [saved investigation and replay details](docs/SESSION_2026-09-15.md).
 
 ### What comes next
 
 - Capture and inspect the BIOS framebuffer and trace the rejected graphics packet.
 - Improve the VU and GS behavior needed for a recognizable startup sequence.
-- Build the missing SPU2 sound-generation and Vita audio-output path.
+- Return to SPU2 sound-generation and Vita audio output after graphics bring-up.
 - Expand native-code coverage while checking it against the interpreter.
 - Measure correctness and performance on a physical Vita before making speed claims.
 
@@ -268,7 +270,9 @@ Use a dump from hardware you own as permitted by your local law.
 See [docs/PS2RECOMP_INTEGRATION.md](docs/PS2RECOMP_INTEGRATION.md) for the
 Phase-0 frontend boundary, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for core
 design boundaries, [docs/BIOS_OPCODE_PROFILE.md](docs/BIOS_OPCODE_PROFILE.md) for
-the measured EE/IOP optimization priorities, and
+the measured EE/IOP optimization priorities,
+[docs/EXECUTION_CENSUS.md](docs/EXECUTION_CENSUS.md) for deterministic dynamic
+block/edge profile capture, and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the route from this milestone to games.
 The benchmark methodology and physical-hardware decision thresholds are in
 [docs/PERFORMANCE_VALIDATION.md](docs/PERFORMANCE_VALIDATION.md).

@@ -24,6 +24,29 @@ then measured five times. Setup, allocation, checksumming, report writing, and
 screen rendering are outside the timed regions; the reported duration is the
 median sample.
 
+## PC-side configuration probe
+
+For quick keep/discard comparisons between generator configurations, use a
+Release build and the host CLI:
+
+```sh
+cmake --build build-trace-release --target aot_benchmark -j2
+./build-trace-release/aot_benchmark 20000 9
+```
+
+It reports exact match status, guest instructions, interpreter/AOT median
+microseconds, and speedup. It also runs the synthetic `0x3000 -> 0x3020` chain
+and reports `trace_probe_us`, `trace_entries`, `trace_horizon_fallbacks`, and a
+deterministic checksum. Compare otherwise identical Release builds with direct
+traces disabled and enabled; physical Vita timing remains authoritative.
+
+The 2026-09-03 x86 Release comparison (three process runs, 20,000 iterations,
+nine samples per run) measured a 10,021 us legacy median and a 9,962 us fused
+median. Both produced checksum `E4F52905FF571383`; fused runs recorded 20,000
+entries and six horizon fallbacks. The approximately 0.6% delta is within likely
+host noise, so this validates trace selection and accounting but is not evidence
+of a material target-device speedup.
+
 ## Vita3K gate
 
 Install and launch the VPK in Vita3K first. A valid run shows `AOT PERF: PASS`

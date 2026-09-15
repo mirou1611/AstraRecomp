@@ -1,0 +1,131 @@
+#include "ps2vita/vif.hpp"
+#include "ps2vita/gif.hpp"
+#include "ps2vita/framebuffer_dump.hpp"
+#include <cstdio>
+#include <fstream>
+#include <vector>
+
+int main(int argc, char** argv) {
+  if (argc != 3) {
+    std::fprintf(stderr, "usage: ps2vif_replay FIRST_VIF_BIN FRAMEBUFFER_PPM\n");
+    return 2;
+  }
+  std::ifstream input(argv[1], std::ios::binary | std::ios::ate);
+  const auto size = input.tellg();
+  if (!input || size <= 0 || size > 1024 * 1024) {
+    std::fprintf(stderr, "VIF input must be 1..1048576 bytes\n"); return 2;
+  }
+  std::vector<std::uint8_t> data(static_cast<std::size_t>(size));
+  input.seekg(0);
+  if (!input.read(reinterpret_cast<char*>(data.data()), data.size())) return 2;
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  vif.enable_provenance_trace(true);
+  vif.vu1().enable_store_trace(true);
+  vif.vu1().enable_causal_trace(true);
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  const bool accepted = vif.submit(data.data(), data.size());
+  std::vector<std::uint8_t> packet;
+  bool gif_ok = true;
+  while (vif.pop_gif_packet(packet))
+    gif_ok = gif.submit(packet.data(), packet.size()) && gif_ok;
+  const auto& vu = vif.vu1();
+  std::printf("accepted=%u pending_direct_bytes=%zu vif_rejected=%llu vu_pairs=%llu path1=%llu/%llu "
+              "reject_pc=%04X kick=%04X bad=%04X tag=%016llX triangles=%llu\n",
+      static_cast<unsigned>(accepted), vif.pending_direct_bytes(),
+      static_cast<unsigned long long>(vif.packets_rejected()),
+      static_cast<unsigned long long>(vu.pairs_executed()),
+      static_cast<unsigned long long>(vu.path1_tags_queued()),
+      static_cast<unsigned long long>(vu.path1_tags_rejected()),
+      vu.first_rejected_pc(), vu.first_rejected_kick_start(), vu.first_rejected_address(),
+      static_cast<unsigned long long>(vu.first_rejected_tag()),
+      static_cast<unsigned long long>(gif.triangles_emitted()));
+  std::ofstream image(argv[2], std::ios::binary | std::ios::trunc);
+  std::printf("vu_exit running=%u pc=%04X unsupported_upper=%08X unsupported_lower=%08X\n",
+      unsigned(vu.running()), vu.state().pc, vu.first_unsupported_upper(),
+      vu.first_unsupported_lower());
+  // Small static window, not an execution trace. Branches may make the actual
+  // E-bit pair nonadjacent to the final PC; do not infer execution from this alone.
+  for (int offset = -24; offset <= 8; offset += 8) {
+    const auto pc = static_cast<unsigned>((int(vu.state().pc) + offset) & 0x3FF8);
+    const auto lower = memory.read32(ps2vita::Memory::kVu1MicroBase + pc);
+    const auto upper = memory.read32(ps2vita::Memory::kVu1MicroBase + pc + 4u);
+    std::printf("vu_exit_micro pc=%04X lower=%08X upper=%08X E=%u I=%u\n",
+        pc, lower, upper, unsigned((upper >> 30) & 1u), unsigned(upper >> 31));
+  }
+  std::printf("vu_timing cycles=%llu vf_stalls=%llu q_stalls=%llu xgkick_stalls=%llu\n",
+      static_cast<unsigned long long>(vu.cycles_executed()),
+      static_cast<unsigned long long>(vu.vf_stall_cycles()),
+      static_cast<unsigned long long>(vu.q_stall_cycles()),
+      static_cast<unsigned long long>(vu.xgkick_stall_cycles()));
+  std::printf("store_trace records=%zu dropped=%llu reject_pair=%llu\n",
+      vu.store_records().size(), static_cast<unsigned long long>(vu.dropped_store_records()),
+      static_cast<unsigned long long>(vu.first_rejected_pair()));
+  if (vu.path1_tags_rejected() != 0u) {
+    std::printf("causal_trace nodes=%zu dropped=%llu (id=0 means unknown; external inputs, VI and Q ancestry incomplete)\n",
+        vu.causes().size(), static_cast<unsigned long long>(vu.dropped_causes()));
+    std::vector<std::uint32_t> pending;
+    std::vector<bool> seen(vu.causes().size() + 1u);
+    for (unsigned lane = 0; lane < 4; ++lane) {
+      const auto root = vu.rejected_causes()[lane];
+      std::printf("tag_cause lane=%u generation=%u\n", lane, root);
+    }
+    // The low lanes contain the tag control word; explain those first when
+    // the bounded walk cannot fit every lane's ancestry.
+    for (unsigned lane = 4; lane-- > 0; )
+      if (vu.rejected_causes()[lane]) pending.push_back(vu.rejected_causes()[lane]);
+    unsigned shown = 0;
+    while (!pending.empty() && shown < 64u) {
+      const auto id = pending.back(); pending.pop_back();
+      if (id == 0 || id > vu.causes().size() || seen[id]) continue;
+      seen[id] = true; ++shown;
+      const auto& c = vu.causes()[id - 1u];
+      const char* kind = c.kind == ps2vita::VuCauseRecord::Kind::VifUpload ? "VIF_UNPACK" :
+          c.kind == ps2vita::VuCauseRecord::Kind::Store ?
+          ((c.instruction >> 25) == 0x40u ? "SQI" : "SQ") :
+          c.kind == ps2vita::VuCauseRecord::Kind::MemoryLoad ?
+          ((c.instruction >> 25) == 0u ? "LQ" : "LQI") :
+          c.kind == ps2vita::VuCauseRecord::Kind::LowerInput ? "lower_input" : "upper";
+      std::printf("cause id=%u kind=%s pc=%04X instruction=%08X pair=%llu cycle=%llu address=%04X reg=%u lane=%u mask=%X value=%08X parents=%u,%u,%u incomplete=%u acc=%u\n",
+          id, kind, c.pc, c.instruction, static_cast<unsigned long long>(c.pair),
+          static_cast<unsigned long long>(c.cycle), c.address, c.reg, c.lane, c.mask,
+          c.value, c.parents[0], c.parents[1], c.parents[2], static_cast<unsigned>(c.incomplete),
+          static_cast<unsigned>(c.accumulator));
+      if (c.kind == ps2vita::VuCauseRecord::Kind::VifUpload)
+        std::printf("  input packet=%llu source_offset=%llX (submitted stream, not EE address)\n",
+            static_cast<unsigned long long>(c.packet), static_cast<unsigned long long>(c.source_offset));
+      for (auto parent : c.parents) if (parent) pending.push_back(parent);
+    }
+    if (!pending.empty()) std::puts("causal_walk truncated at 64 nodes");
+    const unsigned span = ((vu.first_rejected_address() - vu.first_rejected_kick_start()) & 0x3FFFu) + 16u;
+    std::printf("vif_provenance unpack=%zu dropped=%llu runs=%zu dropped_runs=%llu\n",
+        vif.unpack_records().size(), static_cast<unsigned long long>(vif.dropped_unpack_records()),
+        vif.run_records().size(), static_cast<unsigned long long>(vif.dropped_run_records()));
+    for (const auto& record : vif.run_records())
+      std::printf("vif_run packet=%llu offset=%zx command=%08X pairs=%llu..%llu pc=%04X..%04X top=%03X rejects=%llu..%llu\n",
+          static_cast<unsigned long long>(record.packet), record.command_offset, record.command,
+          static_cast<unsigned long long>(record.first_pair), static_cast<unsigned long long>(record.end_pair),
+          record.start_pc, record.end_pc, record.top,
+          static_cast<unsigned long long>(record.rejected_before), static_cast<unsigned long long>(record.rejected_after));
+    for (const auto& record : vif.unpack_records()) {
+      if (((record.address - vu.first_rejected_kick_start()) & 0x3FFFu) >= span) continue;
+      std::printf("vif_upload packet=%llu pair=%llu source=%zx address=%04X value=%08X\n",
+          static_cast<unsigned long long>(record.packet), static_cast<unsigned long long>(record.pair),
+          record.source_offset, record.address, record.value);
+    }
+    for (const auto& record : vu.store_records()) {
+      if (((record.address - vu.first_rejected_kick_start()) & 0x3FFFu) >= span) continue;
+      std::printf("packet_store pair=%llu cycle=%llu pc=%04X address=%04X value=%08X relation=%s\n",
+          static_cast<unsigned long long>(record.pair), static_cast<unsigned long long>(record.cycle), record.pc, record.address, record.value,
+          record.pair < vu.first_rejected_pair() ? "before" : "after_or_same");
+    }
+  }
+  const bool written = ps2vita::write_framebuffer_ppm(image, gs);
+  image.close();
+  if (!written || !image) return 2;
+  // Isolated replay starts with reset GS state, not prior BIOS path-3 uploads.
+  // Its image is diagnostic, not a replacement for a full-BIOS framebuffer.
+  return accepted && gif_ok && vif.pending_direct_bytes() == 0u &&
+      vu.path1_tags_rejected() == 0u ? 0 : 1;
+}

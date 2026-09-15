@@ -1,11 +1,22 @@
 #include "ps2vita/aot.hpp"
 #include "ps2vita/emulator.hpp"
 #include "ps2vita/ee_block.hpp"
+#include "ps2vita/execution_census.hpp"
+#include "ps2vita/gif.hpp"
+#include "ps2vita/framebuffer_dump.hpp"
+#include "ps2vita/vif.hpp"
+#include "ps2vita/vu.hpp"
+#include "ps2vita/spu2_adpcm.hpp"
+#include "ps2vita/spu2_envelope.hpp"
+#include "ps2vita/spu2_voice.hpp"
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
+#include <sstream>
 
 namespace {
 int failures = 0;
@@ -14,8 +25,945 @@ void check(bool condition, const char* label) {
   if (!condition) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
 }
 
+void test_gif_repeated_prim() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  const auto reg = [&](std::uint64_t address, std::uint64_t value) {
+    const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull, 0xEull, value, address}};
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet)),
+          "GIF repeated PRIM fixture accepted");
+  };
+  reg(0, 4); // Triangle strip.
+  reg(5, 0); reg(5, 256); reg(5, 256ull << 16);
+  check(gif.triangles_emitted() == 1, "GIF first strip emits one triangle");
+  reg(0, 4); reg(5, 512);
+  check(gif.triangles_emitted() == 1, "GIF identical PRIM discards strip history");
+  reg(5, 768); reg(5, (256ull << 16) | 512);
+  check(gif.triangles_emitted() == 2, "GIF second independent strip has no connecting triangles");
+  // PRE on a packed tag must take the same reset path.
+  const std::array<std::uint64_t, 4> pre{{0x1000000000008001ull | (1ull << 46) | (4ull << 47),
+                                        0x5ull, 0, 0}};
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(pre.data()), sizeof(pre)) &&
+        gif.triangles_emitted() == 2, "GIF tag PRE restarts identical strip mode");
+  reg(0, 6); reg(5, 0); reg(0, 6); reg(5, (256ull << 16) | 256);
+  check(gif.sprites_emitted() == 0, "GIF identical PRIM discards incomplete sprite");
+  reg(5, (512ull << 16) | 512);
+  check(gif.sprites_emitted() == 1, "GIF sprite assembles after explicit restart");
+}
+
+void test_gs_shared_edges() {
+  for (bool reverse : {false, true}) {
+    for (bool other_diagonal : {false, true}) {
+      ps2vita::Gs gs;
+      gs.set_depth_state(ps2vita::Gs::DepthTest::Always, false);
+      gs.set_blend_state(true, 0x44u, false, true);
+      const ps2vita::GsVertex a{2, 2, 0, 0x40808080u}, b{6, 2, 0, 0x40808080u},
+                              c{6, 6, 0, 0x40808080u}, d{2, 6, 0, 0x40808080u};
+      const auto draw = [&](auto x, auto y, auto z) {
+        if (reverse) gs.triangle(z, y, x); else gs.triangle(x, y, z);
+      };
+      if (other_diagonal) { draw(a, b, d); draw(b, c, d); }
+      else { draw(a, b, c); draw(a, c, d); }
+      bool correct = true;
+      for (int y = 0; y < 9; ++y)
+        for (int x = 0; x < 9; ++x)
+          correct = correct && gs.pixel(x, y) ==
+              (x >= 2 && x < 6 && y >= 2 && y < 6 ? 0x40404040u : 0u);
+      check(correct, "GS shared edges cover rectangle exactly once for either winding/diagonal");
+    }
+  }
+}
+
+void test_spu2_fixed_volume() {
+  std::int32_t output = 123;
+  check(ps2vita::spu2_fixed_volume(32767, 0, output) && output == 0, "SPU2 zero voice volume mutes");
+  check(ps2vita::spu2_fixed_volume(16, 0x2000, output) && output == 8, "SPU2 half voice volume");
+  check(ps2vita::spu2_fixed_volume(16, 0x4000, output) && output == -16, "SPU2 signed voice volume inverts");
+  check(ps2vita::spu2_fixed_volume(-1, 0x2000, output) && output == -1, "SPU2 volume rounds negative products down");
+  check(ps2vita::spu2_fixed_volume(-32768, 0x4000, output) && output == 32768,
+        "SPU2 voice volume retains wide positive endpoint for accumulation");
+  check(!ps2vita::spu2_fixed_volume(100, 0x8000, output) && output == 32768,
+        "SPU2 volume sweep is explicitly unsupported");
+}
+
+void test_spu2_voice() {
+  ps2vita::Memory memory;
+  for (unsigned byte = 0; byte < 16; ++byte) memory.iop_write8(0x2000u + byte, 0x11);
+  memory.iop_write8(0x2000, 8); memory.iop_write8(0x2001, 1); // 28 samples +16, END.
+  memory.iop_write16(0x1F90019A, 0x20);
+  memory.iop_write16(0x1F9001AA, 0x100);
+  memory.iop_write32(0x1F8010C0, 0x2000);
+  memory.iop_write32(0x1F8010C4, 0x10004);
+  memory.iop_write32(0x1F8010C8, 0x01000201);
+  memory.advance(10000);
+  ps2vita::Spu2Voice voice;
+  check(voice.tick(memory) == 0 && !voice.active(), "SPU2 voice starts silent");
+  voice.configure(4096, 15, 0); voice.key_on(0x100);
+  check(voice.tick(memory) == 7 && voice.tick(memory) == 14 && voice.tick(memory) == 15,
+        "SPU2 voice applies attack gain to DMA-backed PCM");
+  for (unsigned i = 3; i < 28; ++i) voice.tick(memory);
+  check(voice.samples_consumed() == 28 && voice.active(), "SPU2 voice drains final block before stopping");
+  check(voice.tick(memory) == 0 && !voice.active() && !voice.decode_error(),
+        "SPU2 voice stops cleanly after terminal block");
+  voice.configure(2048, 15, 0); voice.key_on(0x100);
+  for (unsigned i = 0; i < 10; ++i) voice.tick(memory);
+  check(voice.samples_consumed() == 5, "SPU2 half pitch holds samples");
+  voice.configure(8192, 15, 0); voice.key_on(0x100);
+  for (unsigned i = 0; i < 10; ++i) voice.tick(memory);
+  check(voice.samples_consumed() == 19, "SPU2 double pitch advances source cursor twice");
+  voice.key_off(); voice.tick(memory); voice.tick(memory);
+  check(!voice.active(), "SPU2 voice key off releases envelope");
+  voice.configure(0, 15, 0); voice.key_on(0x100);
+  for (unsigned i = 0; i < 50; ++i) voice.tick(memory);
+  check(voice.samples_consumed() == 1 && voice.active(), "SPU2 zero pitch retains first sample");
+  memory.enable_spu2_shadow(true);
+  memory.iop_write16(0x1F900004, 4096);
+  memory.iop_write16(0x1F900006, 15);
+  memory.iop_write16(0x1F9001C2, 0x100);
+  memory.iop_write16(0x1F900000, 0x3FFF);
+  memory.iop_write16(0x1F900002, 0x4000);
+  memory.iop_write32(0x1F900188, 1);
+  memory.iop_write32(0x1F900190, 1);
+  memory.iop_write16(0x1F9001A0, 1);
+  memory.advance(12288);
+  check(memory.spu2_shadow_peak() == 7 && memory.spu2_shadow_voice(0, 0).samples_consumed() == 1,
+        "SPU2 guest KON drives DMA-backed shadow voice after delay");
+  check(memory.spu2_shadow_dry(0, 0) == 6 && memory.spu2_shadow_dry(0, 1) == -7 &&
+        memory.spu2_shadow_dry(1, 0) == 0, "SPU2 shadow routes signed stereo volumes per core");
+  memory.iop_write32(0x1F900190, 0); memory.advance(6144);
+  check(memory.spu2_shadow_dry(0, 1) == 0 && memory.spu2_shadow_dry(0, 0) > 0,
+        "SPU2 VMIXR disables right channel independently");
+  memory.iop_write16(0x1F900000, 0x8000); memory.advance(6144);
+  check(memory.spu2_shadow_dry(0, 0) == 0 && memory.spu2_shadow_sweeps() == 1,
+        "SPU2 shadow flags unsupported sweep without fixed-gain substitution");
+  memory.enable_spu2_shadow(false);
+  memory.iop_write8(0x2000, 0x50); // Unsupported predictor.
+  memory.iop_write16(0x1F9001AA, 0x100);
+  memory.iop_write32(0x1F8010C0, 0x2000);
+  memory.iop_write32(0x1F8010C4, 0x10004);
+  memory.iop_write32(0x1F8010C8, 0x01000201);
+  memory.advance(10000);
+  voice.key_on(0x100);
+  check(voice.tick(memory) == 0 && !voice.active() && voice.decode_error() &&
+        voice.samples_consumed() == 0, "SPU2 malformed voice data fails silent with diagnostic");
+}
+
+void test_spu2_shadow_bank() {
+  ps2vita::Memory memory;
+  memory.enable_spu2_shadow(true);
+  // Silent RAM is intentional: scheduling must not invent samples.
+  for (unsigned core = 0; core < 2; ++core) {
+    const auto base = 0x1F900000u + core * 0x400u;
+    for (unsigned voice : {0u, 23u}) {
+      memory.iop_write16(base + voice * 16u + 4u, 4096);
+      memory.iop_write16(base + voice * 16u + 6u, 15);
+    }
+    memory.iop_write32(base + 0x1A0u, 0xFF800001u); // Padding byte must be ignored.
+  }
+  memory.advance(6143);
+  check(memory.spu2_shadow_ticks() == 0, "SPU2 shadow waits for sample boundary");
+  memory.advance(1);
+  check(memory.spu2_shadow_ticks() == 1 && !memory.spu2_shadow_voice(0, 0).active(),
+        "SPU2 shadow key on waits two ticks");
+  memory.advance(6144);
+  for (unsigned core = 0; core < 2; ++core) {
+    check(memory.spu2_shadow_voice(core, 0).samples_consumed() == 1 &&
+          memory.spu2_shadow_voice(core, 23).samples_consumed() == 1 &&
+          !memory.spu2_shadow_voice(core, 1).active(), "SPU2 shadow routes KON masks on both cores");
+    check(memory.iop_read16(0x1F90000Au + core * 0x400u) == 0,
+          "SPU2 shadow does not overwrite guest ENVX");
+    memory.iop_write32(0x1F9001A4u + core * 0x400u, 0xFF800001u);
+  }
+  memory.advance(6144);
+  check(!memory.spu2_shadow_voice(0, 0).active() && !memory.spu2_shadow_voice(1, 23).active() &&
+        memory.spu2_shadow_peak() == 0, "SPU2 shadow KOFF releases silent voices");
+  memory.enable_spu2_shadow(false); memory.advance(12288);
+  check(memory.spu2_shadow_ticks() == 0, "SPU2 disabled shadow does not tick");
+}
+
+void test_spu2_shadow_scheduling() {
+  ps2vita::Memory batched, split;
+  for (auto* memory : {&batched, &split}) {
+    memory->enable_spu2_shadow(true);
+    memory->iop_write16(0x1F900004, 2048);
+    memory->iop_write16(0x1F900006, 15);
+    memory->iop_write8(0x1F9001A0, 1);
+  }
+  batched.advance(6144u * 12u + 17u);
+  for (unsigned i = 0; i < 12u; ++i) {
+    split.advance(6143); split.advance(1);
+  }
+  split.advance(17);
+  check(batched.spu2_shadow_ticks() == split.spu2_shadow_ticks() &&
+        batched.spu2_shadow_voice(0, 0).samples_consumed() ==
+            split.spu2_shadow_voice(0, 0).samples_consumed() &&
+        batched.spu2_shadow_voice(0, 0).envelope_level() ==
+            split.spu2_shadow_voice(0, 0).envelope_level(),
+        "SPU2 shadow sample clock is chunk invariant without intervening DMA or writes");
+  batched.advance(6127); split.advance(6127);
+  check(batched.spu2_shadow_ticks() == 13 && split.spu2_shadow_ticks() == 13,
+        "SPU2 shadow preserves fractional clock remainder");
+  split.enable_spu2_shadow(true);
+  split.iop_write16(0x1F9001A0, 1);
+  split.advance(6144);
+  split.iop_write16(0x1F9001A4, 1);
+  split.advance(6144);
+  check(!split.spu2_shadow_voice(0, 0).active() &&
+        split.spu2_shadow_voice(0, 0).samples_consumed() == 0,
+        "SPU2 shadow functional KOFF cancels queued start");
+  split.iop_write16(0x1F9001A0, 1);
+  split.clear(); split.advance(12288);
+  check(split.spu2_shadow_ticks() == 0 && !split.spu2_shadow_voice(0, 0).active(),
+        "SPU2 memory reset clears and disables shadow scheduling");
+}
+
+void test_spu2_envelope() {
+  ps2vita::Spu2Envelope env;
+  using Phase = ps2vita::Spu2Envelope::Phase;
+  env.key_off();
+  check(env.tick() == 0 && env.phase() == Phase::Stopped, "SPU2 inactive envelope is silent");
+  env.configure(0, 0); env.key_on();
+  check(env.tick() == 14336 && env.tick() == 28672 && env.tick() == 32767 &&
+        env.phase() == Phase::Decay, "SPU2 fastest linear attack clips and enters decay");
+  check(env.tick() == 16383 && env.tick() == 8191 && env.tick() == 4095 &&
+        env.tick() == 2047 && env.phase() == Phase::Sustain,
+        "SPU2 exponential decay reaches sustain target");
+  env.key_off();
+  check(env.tick() == 0 && env.phase() == Phase::Stopped, "SPU2 linear release terminates");
+  env.configure(12u << 10, 0); env.key_on();
+  check(env.tick() == 0 && env.tick() == 7 && env.tick() == 7 && env.tick() == 14,
+        "SPU2 slow attack updates at two-sample intervals");
+  env.configure(0x8000u, 0); env.key_on();
+  check(env.tick() == 14336 && env.tick() == 28672, "SPU2 exponential attack starts at linear rate");
+  check(env.tick() == 28672 && env.tick() == 28672 && env.tick() == 28672 &&
+        env.tick() == 32767, "SPU2 exponential attack slows above 6000");
+  env.configure(0, 0x20u); env.key_off();
+  check(env.tick() == 16383 && env.tick() == 8191, "SPU2 exponential release scales by level");
+  for (unsigned i = 0; i < 20; ++i) env.tick();
+  check(env.phase() == Phase::Stopped && env.level() == 0, "SPU2 exponential release reaches silence");
+  env.key_on();
+  check(env.level() == 0 && env.phase() == Phase::Attack, "SPU2 retrigger resets level and phase");
+  env.configure(15u, 0); env.key_on();
+  for (unsigned i = 0; i < 4; ++i) env.tick();
+  check(env.phase() == Phase::Sustain && env.level() == 16383 && env.tick() == 30719 &&
+        env.tick() == 32767 && env.phase() == Phase::Sustain,
+        "SPU2 increasing sustain saturates without leaving sustain");
+  env.configure(15u, 0x4000u); env.key_on();
+  for (unsigned i = 0; i < 4; ++i) env.tick();
+  check(env.tick() == 0 && env.phase() == Phase::Stopped,
+        "SPU2 decreasing sustain terminates at zero");
+}
+
+void test_spu2_dma_stream() {
+  for (unsigned core = 0; core < 2; ++core) {
+    ps2vita::Memory memory;
+    const auto regs = 0x1F900000u + core * 0x400u;
+    const auto dma = core == 0 ? 0x1F8010C0u : 0x1F801500u;
+    // Two blocks straddle the end of 2 MiB sample RAM.
+    for (unsigned byte = 0; byte < 32; ++byte)
+      memory.iop_write8(0x2000u + byte, byte < 16 ? 0x11 : 0);
+    memory.iop_write8(0x2000u, 8); memory.iop_write8(0x2001u, 0);
+    memory.iop_write8(0x2010u, 0x10); memory.iop_write8(0x2011u, 1);
+    memory.iop_write16(regs + 0x19Au, 0x20);
+    memory.iop_write16(regs + 0x1A8u, 0xF);
+    memory.iop_write16(regs + 0x1AAu, 0xFFF8);
+    memory.iop_write32(dma, 0x2000);
+    memory.iop_write32(dma + 4, 0x10008);
+    memory.iop_write32(dma + 8, 0x01000201);
+    memory.advance(10000);
+    ps2vita::Spu2AdpcmStream stream;
+    ps2vita::Spu2AdpcmBlock output;
+    stream.start(0xFFFF8);
+    check(stream.decode_next(memory, output) && output.samples[0] == 16 &&
+          output.samples[27] == 16 && stream.next_word_address() == 0,
+          "SPU2 DMA channel delivers first stream block across RAM boundary");
+    check(stream.decode_next(memory, output) && output.samples[0] == 15 &&
+          output.samples[1] == 14 && stream.encountered_end() && !stream.active(),
+          "SPU2 DMA RAM stream preserves history and ends on wrapped block");
+  }
+}
+
+void test_spu2_adpcm_stream() {
+  ps2vita::Spu2AdpcmStream stream;
+  ps2vita::Spu2AdpcmBlock output;
+  std::array<std::uint8_t, 16> block{};
+  check(!stream.decode_next(block, output), "SPU2 stream initially inactive");
+  stream.start(0x1FFFFFu);
+  check(stream.next_word_address() == 0xFFFF8u, "SPU2 stream masks and aligns word address");
+  block[0] = 8; // +16 on every sample, predictor zero.
+  for (unsigned i = 2; i < block.size(); ++i) block[i] = 0x11;
+  check(stream.decode_next(block, output) && output.samples[27] == 16 &&
+        stream.next_word_address() == 0, "SPU2 stream advances eight words and wraps RAM");
+  block.fill(0); block[0] = 0x10; block[1] = 4;
+  check(stream.decode_next(block, output) && output.samples[0] == 15 &&
+        output.samples[1] == 14 && stream.loop_word_address() == 0 &&
+        stream.next_word_address() == 8, "SPU2 stream carries predictor history and records loop start");
+  block[1] = 3;
+  check(stream.decode_next(block, output) && stream.active() && stream.encountered_end() &&
+        stream.next_word_address() == 0, "SPU2 stream loop-end repeats");
+  stream.set_loop_address(0x127u); block[1] = 7;
+  check(stream.decode_next(block, output) && stream.next_word_address() == 0x120u,
+        "SPU2 explicit loop address overrides encoded loop start");
+  block[1] = 1;
+  check(stream.decode_next(block, output) && !stream.active() && stream.encountered_end(),
+        "SPU2 nonrepeating end stops functional stream");
+  const auto saved = output.samples;
+  check(!stream.decode_next(block, output) && output.samples == saved,
+        "SPU2 stopped stream leaves output intact");
+  stream.start(0x80); block[0] = 0x50; block[1] = 7;
+  check(!stream.decode_next(block, output) && stream.next_word_address() == 0x80 &&
+        stream.loop_word_address() == 0x80 && !stream.encountered_end() && stream.active() &&
+        output.samples == saved, "SPU2 malformed block does not advance stream state");
+  block.fill(0); block[0] = 0x10; block[1] = 4;
+  check(stream.decode_next(block, output) && output.samples[0] == 0 &&
+        stream.loop_word_address() == 0x80, "SPU2 restart clears history and manual loop override");
+}
+
+void test_gs_alpha_test() {
+  ps2vita::Gs gs;
+  for (unsigned mode = 0; mode < 8; ++mode) {
+    for (unsigned alpha : {0u, 63u, 64u, 65u, 255u}) {
+      const bool expected[] = {false, true, alpha < 64u, alpha <= 64u,
+                              alpha == 64u, alpha >= 64u, alpha > 64u, alpha != 64u};
+      gs.clear(0x12345678u);
+      gs.set_alpha_test(1u | (mode << 1) | (64u << 4));
+      gs.point({0, 0, 10, (alpha << 24) | 0xABCDEFu});
+      check(gs.pixel(0, 0) == (expected[mode] ? (alpha << 24) | 0xABCDEFu : 0x12345678u),
+            "GS alpha comparison matrix with KEEP");
+    }
+  }
+  for (unsigned action = 0; action < 4; ++action) {
+    gs.clear(0x12345678u, 100u);
+    gs.set_alpha_test(1u | (action << 12)); // NEVER, selected failure action.
+    gs.point({0, 0, 10u, 0x80ABCDEFu});
+    const std::uint32_t expected[] = {0x12345678u, 0x80ABCDEFu, 0x12345678u, 0x12ABCDEFu};
+    check(gs.pixel(0, 0) == expected[action], "GS alpha failure color/alpha write masks");
+    gs.set_alpha_test(0);
+    gs.point({0, 0, 50u, 0xFF010203u});
+    check(gs.pixel(0, 0) == (action == 2u ? expected[action] : 0xFF010203u),
+          "GS alpha failure depth write mask");
+  }
+  gs.clear(0x12345678u, 5u);
+  gs.set_alpha_test(1u | (1u << 12));
+  gs.point({0, 0, 10u, 0x80ABCDEFu});
+  check(gs.pixel(0, 0) == 0x12345678u, "GS FB_ONLY still respects depth rejection");
+}
+
+void test_gs_blending() {
+  ps2vita::Gs gs;
+  const auto draw = [&](std::uint32_t src, std::uint32_t dst,
+                        std::uint64_t equation, bool pabe = false,
+                        bool clamp = true, bool enabled = true) {
+    gs.clear(dst);
+    gs.set_blend_state(enabled, equation, pabe, clamp);
+    gs.point({0, 0, 0, src});
+    return gs.pixel(0, 0);
+  };
+  // (source - destination) * source alpha / 128 + destination.
+  constexpr std::uint64_t standard = 0x44u;
+  check(draw(0x80402010u, 0x10204080u, standard) == 0x80402010u,
+        "GS blend alpha 128 is unity and preserves source alpha");
+  check(draw(0x40402010u, 0x10204080u, standard) == 0x40303048u,
+        "GS blend alpha 64 averages RGB");
+  check(draw(0x00000000u, 0x80010101u, 0x54u) == 0u,
+        "GS blend selects destination alpha");
+  check(draw(0x40000000u, 0x00010101u, standard) == 0x40000000u,
+        "GS negative blend product rounds down");
+  check(draw(0x40402010u, 0x10204080u, standard, true) == 0x40402010u,
+        "GS PABE bypasses blending below source alpha 128");
+  check(draw(0x80402010u, 0x10204080u, 0x64u | (64ull << 32), true) == 0x80303048u,
+        "GS PABE permits blending with alpha high bit and selects FIX");
+  const auto additive = 0x68u | (128ull << 32);
+  check(draw(0x80F0F0F0u, 0x00202020u, additive) == 0x80FFFFFFu,
+        "GS COLCLAMP saturates overflow");
+  check(draw(0x80F0F0F0u, 0x00202020u, additive, false, false) == 0x80101010u,
+        "GS disabled COLCLAMP wraps overflow");
+  check(draw(0x40402010u, 0x10204080u, standard, false, true, false) == 0x40402010u,
+        "GS disabled ABE copies source");
+}
+
+void test_gif_blend_registers() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  const auto reg = [&](std::uint64_t address, std::uint64_t value) {
+    const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull, 0xEull, value, address}};
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet)),
+          "GIF accepts blend register packet");
+  };
+  reg(0x42, 0x44); // Context 1: source-alpha interpolation.
+  reg(0x43, 0x68 | (128ull << 32)); // Context 2: additive FIX.
+  reg(0x46, 1);
+  reg(0x01, 0x40F0F0F0u);
+  gs.clear(0x00202020u);
+  reg(0x00, 0x40); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40888888u, "GIF routes ALPHA context 1");
+  gs.clear(0x00202020u);
+  reg(0x00, 0x240); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40FFFFFFu, "GIF routes ALPHA context 2 and COLCLAMP");
+  reg(0x46, 0); gs.clear(0x00202020u); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40101010u, "GIF routes disabled COLCLAMP");
+  reg(0x49, 1); gs.clear(0x00202020u); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40F0F0F0u, "GIF routes PABE");
+  reg(0x47, 1); // Context 1 NEVER / KEEP.
+  reg(0x48, 3); // Context 2 ALWAYS.
+  gs.clear(0x00202020u); reg(0x00, 0); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x00202020u, "GIF routes alpha test context 1");
+  reg(0x00, 0x200); reg(0x05, 0);
+  check(gs.pixel(0, 0) == 0x40F0F0F0u, "GIF routes alpha test context 2");
+}
+
+void test_framebuffer_dump() {
+  ps2vita::Gs gs;
+  gs.clear(0xFF000000u);
+  gs.point({0, 0, 0u, 0x80402010u});
+  gs.point({0, 1, 0u, 0x00332211u});
+  std::ostringstream output;
+  check(ps2vita::write_framebuffer_ppm(output, gs), "Framebuffer PPM writes");
+  const auto bytes = output.str();
+  const std::string header = "P6\n160 112\n255\n";
+  check(bytes.size() == header.size() + 160u * 112u * 3u &&
+        bytes.compare(0, header.size(), header) == 0,
+        "Framebuffer PPM header and payload size");
+  check(bytes.substr(header.size(), 6) == std::string("\x10\x20\x40\0\0\0", 6) &&
+        bytes.substr(header.size() + 160u * 3u, 3) == "\x11\x22\x33",
+        "Framebuffer PPM preserves RGB, row order, and omits alpha");
+  std::ostringstream failed;
+  failed.setstate(std::ios::badbit);
+  check(!ps2vita::write_framebuffer_ppm(failed, gs), "Framebuffer PPM reports failure");
+}
+
+void test_spu2_adpcm() {
+  std::array<std::uint8_t, 16> encoded{};
+  encoded[1] = 7u;
+  encoded[2] = 0x87u; // Low nibble first: +7, -8.
+  ps2vita::Spu2AdpcmHistory history;
+  ps2vita::Spu2AdpcmBlock output;
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) &&
+        output.samples[0] == 28672 && output.samples[1] == -32768 && output.flags == 7u,
+        "SPU2 ADPCM decodes low nibble first, signed values and loop flags");
+  constexpr std::int16_t first[] = {0, 938, 2203, 1961, 2375};
+  constexpr std::int16_t second[] = {0, 879, 3146, 2143, 3590};
+  for (unsigned predictor = 0; predictor < 5u; ++predictor) {
+    encoded.fill(0);
+    encoded[0] = static_cast<std::uint8_t>(predictor << 4);
+    history = {1000, -500};
+    check(ps2vita::decode_spu2_adpcm(encoded, history, output) &&
+          output.samples[0] == first[predictor] && output.samples[1] == second[predictor] &&
+          history.previous == output.samples[27] && history.previous2 == output.samples[26],
+          "SPU2 ADPCM predictor golden samples and retained history");
+  }
+  for (unsigned shift = 0; shift < 16u; ++shift) {
+    encoded.fill(0xFFu);
+    encoded[0] = static_cast<std::uint8_t>(shift);
+    history = {};
+    const auto expected = shift <= 12u ? -static_cast<int>(4096u >> shift) : -1;
+    check(ps2vita::decode_spu2_adpcm(encoded, history, output) && output.samples[0] == expected,
+          "SPU2 ADPCM negative sample shifts round down for every shift encoding");
+  }
+  encoded.fill(0x77u);
+  encoded[0] = 0x40u;
+  history = {32767, -32768};
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) && output.samples[0] == 32767,
+        "SPU2 ADPCM clips positive overflow");
+  encoded.fill(0x88u);
+  encoded[0] = 0x40u;
+  history = {-32768, 32767};
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) && output.samples[0] == -32768,
+        "SPU2 ADPCM clips negative overflow");
+  const auto old = output;
+  const auto old_history = history;
+  encoded[0] = 0xF0u;
+  check(!ps2vita::decode_spu2_adpcm(encoded, history, output) && output.samples == old.samples &&
+        output.flags == old.flags && history.previous == old_history.previous &&
+        history.previous2 == old_history.previous2,
+        "Unsupported SPU2 predictor fails without changing decoder state");
+  encoded.fill(0x11u);
+  encoded[0] = 8u;
+  history = {};
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) && history.previous == 16,
+        "SPU2 ADPCM first block seeds voice history");
+  encoded.fill(0u);
+  encoded[0] = 0x10u;
+  check(ps2vita::decode_spu2_adpcm(encoded, history, output) &&
+        output.samples[0] == 15 && output.samples[1] == 14,
+        "SPU2 ADPCM carries predictor history across consecutive blocks");
+}
+
+void test_vu0_broadcast_subtract() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[7] = 0x3F000000u; // X=0.5
+  memory.write32(0x1000u, 0x4A2701C4u); // Captured VSUBx.w vf7,vf0,vf7.
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_vf[7] == 0x3F000000u &&
+        cpu.state().vu0_vf_hi[7] == 0x3F00000000000000ull,
+        "Captured VSUBx preserves masked lanes and snapshots aliased scalar");
+  for (unsigned bc = 0; bc < 4u; ++bc) {
+    cpu.reset(0x1000u);
+    cpu.state().vu0_vf[4] = 0x4080000040800000ull;
+    cpu.state().vu0_vf_hi[4] = 0x4080000040800000ull;
+    cpu.state().vu0_vf[5] = 0x3F8000003F800000ull;
+    cpu.state().vu0_vf_hi[5] = 0x3F8000003F800000ull;
+    memory.write32(0x1000u, 0x4BE52144u | bc); // FD=FT
+    check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+          cpu.state().vu0_vf[5] == 0x4040000040400000ull &&
+          cpu.state().vu0_vf_hi[5] == 0x4040000040400000ull,
+          "VSUB broadcast variants preserve scalar under destination aliasing");
+  }
+}
+
+void test_vu0_broadcast_minmax() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  struct Pair { std::uint32_t left, right, low, high; };
+  const std::array<Pair, 5> pairs{{
+      {0xBF800000u, 0xC0000000u, 0xC0000000u, 0xBF800000u},
+      {0x80000000u, 0u, 0x80000000u, 0u},
+      {1u, 0u, 0u, 1u},
+      {0x7FFFFFFFu, 0x7F800000u, 0x7F800000u, 0x7FFFFFFFu},
+      {0xFFFFFFFFu, 0xFF800000u, 0xFFFFFFFFu, 0xFF800000u}}};
+  for (unsigned fn = 0x10u; fn <= 0x17u; ++fn) {
+    for (const auto& p : pairs) {
+      cpu.reset(0x1000u);
+      cpu.state().vu0_vf[6] = p.left | (std::uint64_t(p.left) << 32);
+      cpu.state().vu0_vf_hi[6] = cpu.state().vu0_vf[6];
+      cpu.state().vu0_vf[4] = p.right | (std::uint64_t(p.right) << 32);
+      cpu.state().vu0_vf_hi[4] = cpu.state().vu0_vf[4];
+      memory.write32(0x1000u, 0x4BE43100u | fn); // FD=FT tests broadcast snapshot.
+      const auto expected = fn < 0x14u ? p.high : p.low;
+      check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+            cpu.state().vu0_vf[4] == (expected | (std::uint64_t(expected) << 32)) &&
+            cpu.state().vu0_vf_hi[4] == cpu.state().vu0_vf[4],
+            "VU min/max broadcasts preserve bit ordering and aliased scalar");
+    }
+  }
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[6] = 0xC0000000BF800000ull;
+  memory.write32(0x1000u, 0x4BE43190u); // Captured VMAXx vf6,vf6,vf4 (VF4=0).
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit && cpu.state().vu0_vf[6] == 0u,
+        "Captured VMAXx clamps negative values to zero");
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[6] = 0xBF800000BF800000ull;
+  cpu.state().vu0_vf_hi[6] = 0xBF800000BF800000ull;
+  cpu.state().vu0_vi[16] = 0x123u;
+  memory.write32(0x1000u, 0x4A243190u); // W-only VMAXx, FD=FS.
+  memory.write32(0x1004u, 0x4BE43010u); // VF0 destination.
+  check(cpu.run(2) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_vf[6] == 0xBF800000BF800000ull &&
+        cpu.state().vu0_vf_hi[6] == 0x00000000BF800000ull &&
+        cpu.state().vu0_vf[0] == 0u && cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull &&
+        cpu.state().vu0_vi[16] == 0x123u,
+        "VU min/max preserves masked lanes, VF0 and STATUS");
+}
+
+void test_gs_perspective_safety() {
+  ps2vita::Gs gs;
+  ps2vita::GsVertex a{0, 0, 0, 0x80808080u}, b{8, 0, 0, 0x80808080u},
+                    c{0, 8, 0, 0x80808080u};
+  a.q = b.q = c.q = 0x3F800000u;
+  b.st = 0x3F800000u; c.st = 0x3F80000000000000ull;
+  const auto sampler = [](unsigned u, unsigned v, std::uint32_t) {
+    return 1u + u + 16u * v;
+  };
+  gs.clear(0u); gs.triangle(a, b, c, sampler, 8u, 8u);
+  const auto pixel = gs.pixel(2, 3);
+  gs.clear(0u); gs.triangle(a, c, b, sampler, 8u, 8u);
+  check(pixel == 51u && gs.pixel(2, 3) == pixel,
+        "Perspective attributes follow reversed winding and texture dimensions");
+  for (const auto bits : {0u, 0x7F800000u, 0x7FC00000u}) {
+    a.q = b.q = c.q = bits;
+    unsigned calls = 0;
+    gs.clear(0x12345678u);
+    gs.triangle(a, b, c, [&](unsigned, unsigned, std::uint32_t) {
+      ++calls; return 1u;
+    }, 8u, 8u);
+    check(calls == 0u && gs.pixel(2, 3) == 0x12345678u,
+          "Zero and nonfinite Q safely skip unsupported fragments");
+  }
+  a.q = b.q = c.q = 0x3F800000u;
+  for (const auto bits : {0xBF800000u, 0x7F800000u, 0x7FC00000u, 0x7F7FFFFFu}) {
+    a.st = b.st = c.st = bits;
+    unsigned calls = 0;
+    gs.triangle(a, b, c, [&](unsigned, unsigned, std::uint32_t) {
+      ++calls; return 1u;
+    }, 8u, 8u);
+    check(calls == 0u, "Unsupported ST range never reaches integer conversion or sampler");
+  }
+}
+
+void test_gif_texture_attribute_latches() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gif.enable_triangle_trace(true);
+  // STQ -> RGBA -> XYZ; another STQ alone must not change RGBAQ.Q.
+  const std::array<std::uint64_t, 18> packet{{
+      1ull | (8ull << 60), 0x5E52512Eull,
+      3u, 0u, // A+D PRIM triangle
+      0x3F0000003E800000ull, 0xDEADBEEF40000000ull,
+      0x8000000080ull, 0x8000000080ull,
+      0u, 0u,
+      0x3F8000003F000000ull, 0x40800000u,
+      128u, 0u,
+      0x4040000080808080ull, 1u, // A+D RGBAQ Q=3 independent of temp Q=4
+      128ull << 32, 0u}};
+  const auto* bytes = reinterpret_cast<const std::uint8_t*>(packet.data());
+  check(gif.submit(bytes, 39u) && gif.triangle_records().empty(),
+        "Partial STQ packet waits for complete payload");
+  check(gif.submit(bytes + 39u, sizeof(packet) - 39u), "STQ packet accepted");
+  check(gif.triangle_records().size() == 1u, "STQ fixture emits triangle");
+  if (gif.triangle_records().size() != 1u) return;
+  const auto first = gif.triangle_records()[0];
+  check(first.vertices[0].st == 0x3F0000003E800000ull &&
+        first.vertices[0].q == 0x40000000u &&
+        first.vertices[1].st == 0x3F8000003F000000ull &&
+        first.vertices[1].q == 0x40000000u && first.vertices[2].q == 0x40400000u,
+        "STQ latches ST immediately but Q only through PACKED RGBA");
+  // Next tag resets temporary Q to one; ST remains unchanged. REGLIST ST
+  // modifies only ST, and UV is independently latched with the next vertex.
+  const std::array<std::uint64_t, 10> next{{
+      1ull | (4ull << 60) | (1ull << 46) | (3ull << 47), 0x5551ull,
+      0x8000000080ull, 0x8000000080ull, 0u, 0u,
+      128u, 0u, 128ull << 32, 0u}};
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(next.data()), sizeof(next)),
+        "Next PACKED tag accepted");
+  check(gif.triangle_records().back().vertices[0].q == 0x3F800000u &&
+        gif.triangle_records().back().vertices[0].st == first.vertices[1].st,
+        "New GIFtag resets temporary Q without clearing ST");
+  const std::array<std::uint64_t, 8> reglist{{
+      1ull | (1ull << 58) | (6ull << 60), 0x555321ull,
+      0x40A0000080808080ull, 0x3E8000003F800000ull, 0x00200010u,
+      0u, 128u, 128ull << 16}};
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(reglist.data()), sizeof(reglist)),
+        "REGLIST texture attributes accepted");
+  const auto& last = gif.triangle_records().back().vertices[0];
+  check(last.q == 0x40A00000u && last.st == 0x3E8000003F800000ull &&
+        last.uv == 0x00200010u, "REGLIST ST and UV preserve explicit RGBAQ Q");
+  gif.reset();
+  gif.submit(reinterpret_cast<const std::uint8_t*>(next.data()), sizeof(next));
+  check(gif.triangle_records().size() == 1u &&
+        gif.triangle_records()[0].vertices[0].st == 0u &&
+        gif.triangle_records()[0].vertices[0].uv == 0u &&
+        gif.triangle_records()[0].vertices[0].q == 0x3F800000u,
+        "Reset clears texture latches and restores PACKED Q default");
+}
+
+void test_triangle_trace() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  const std::array<std::uint64_t, 10> packet{{0x1000000000008004ull, 0xEull,
+      3u, 0u, 0u, 5u, 128u, 5u, 128ull << 16, 5u}};
+  const auto submit = [&]() {
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                     sizeof(packet)), "Triangle trace fixture accepted");
+  };
+  submit();
+  check(gif.triangle_records().empty(), "Triangle tracing disabled by default");
+  gif.enable_triangle_trace(true);
+  for (unsigned i = 0; i < 65; ++i) submit();
+  check(gif.triangle_records().size() == 64u && gif.triangles_emitted() == 66u,
+        "Triangle trace bounded without limiting rendering");
+  const auto& t = gif.triangle_records().front();
+  check(t.prim == 3u && t.vertices[1].x == 2 && t.vertices[2].y == 2 &&
+        t.test == 0u && t.zbuf == 0u && t.xyz[1] == 128u &&
+        t.xyz[2] == (128ull << 16), "Triangle trace records geometry and GS state");
+  gif.reset();
+  check(gif.triangle_records().empty(), "Reset clears triangle records");
+}
+
+void test_vif_packet_capture() {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  std::array<std::uint8_t, 4> nop{};
+  vif.submit(nop.data(), nop.size());
+  check(vif.captured_packet().empty(), "VIF capture disabled by default");
+  vif.reset();
+  vif.enable_packet_capture(true);
+  vif.submit(nop.data(), nop.size());
+  nop[0] = 42u;
+  vif.submit(nop.data(), nop.size());
+  check(vif.captured_packet().size() == 4u && vif.captured_packet()[0] == 0u,
+        "VIF captures an owned copy of only the first submission");
+  vif.reset();
+  std::vector<std::uint8_t> oversized(1024u * 1024u + 4u);
+  vif.submit(oversized.data(), oversized.size());
+  check(vif.packet_capture_overflow() && vif.captured_packet().empty(),
+        "VIF refuses oversized diagnostic capture without truncation");
+  vif.reset();
+  check(!vif.packet_capture_overflow() && vif.captured_packet().empty(),
+        "VIF reset clears diagnostic capture");
+}
+
+void test_vif_unsupported_location() {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  const std::array<std::uint32_t, 3> packet{{0u, 0x01000404u, 0xAE13000Cu}};
+  const auto* bytes = reinterpret_cast<const std::uint8_t*>(packet.data());
+  check(vif.submit(bytes, 4u), "VIF location fixture starts with valid packet");
+  check(!vif.submit(bytes, sizeof(packet)) &&
+        vif.first_unsupported_code() == 0xAE13000Cu &&
+        vif.first_unsupported_packet() == 2u &&
+        vif.first_unsupported_offset() == 8u &&
+        vif.first_unsupported_size() == sizeof(packet),
+        "VIF records first unsupported command's packet and byte offset");
+  vif.submit(bytes + 8u, 4u);
+  check(vif.first_unsupported_packet() == 2u && vif.first_unsupported_offset() == 8u,
+        "VIF preserves original failure location after later rejections");
+  vif.reset();
+  check(vif.first_unsupported_packet() == 0u && vif.first_unsupported_offset() == 0u &&
+        vif.first_unsupported_size() == 0u && vif.first_unsupported_code() == 0u,
+        "VIF reset clears failure location");
+  vif.submit(bytes, 1u); // A truncated stream is not an unsupported command.
+  check(vif.packets_rejected() == 1u && vif.first_unsupported_packet() == 0u,
+        "VIF truncation does not fabricate unsupported-command provenance");
+}
+
+void test_vif_direct() {
+  // Two captured-size DIRECT commands: RGBAQ followed by XYZ2 point.
+  std::array<std::uint32_t, 20> stream{};
+  stream[1] = 0x50000002u;
+  stream[11] = 0x50000002u;
+  const std::array<std::uint64_t, 4> color{{0x1000000000008001ull, 0xEull,
+      0xFF123456u, 1u}};
+  const std::array<std::uint64_t, 4> point{{0x1000000000008001ull, 0xEull, 0u, 5u}};
+  std::memcpy(stream.data() + 2u, color.data(), sizeof(color));
+  std::memcpy(stream.data() + 12u, point.data(), sizeof(point));
+  const auto* bytes = reinterpret_cast<const std::uint8_t*>(stream.data());
+  for (std::size_t split : {8u, 9u, 23u, 39u, 40u, 80u}) {
+    ps2vita::Memory memory;
+    ps2vita::Vif1 vif(memory);
+    ps2vita::Gs gs;
+    ps2vita::Gif gif(gs);
+    check(vif.submit(bytes, split), "DIRECT accepts partial payload without rejecting it");
+    std::vector<std::uint8_t> packet;
+    if (split < 40u)
+      check(!vif.pop_gif_packet(packet) && vif.pending_direct_bytes() == 40u - split,
+            "Incomplete DIRECT is retained and not forwarded prematurely");
+    check(vif.submit(bytes + split, sizeof(stream) - split), "DIRECT resumes across submissions");
+    unsigned count = 0;
+    while (vif.pop_gif_packet(packet)) {
+      ++count;
+      check(gif.submit(packet.data(), packet.size()), "DIRECT payload accepted by GIF");
+    }
+    check(count == 2u && gif.points_emitted() == 1u && gs.pixels()[0] == 0xFF123456u &&
+          vif.pending_direct_bytes() == 0u,
+          "DIRECT preserves command order and changes rendered pixel through GIF");
+    const std::uint32_t zero = 0x50000000u;
+    vif.submit(reinterpret_cast<const std::uint8_t*>(&zero), sizeof(zero));
+    check(vif.pending_direct_bytes() == 1048576u, "DIRECT zero immediate means 65536 qwords");
+    vif.reset();
+    check(vif.pending_direct_bytes() == 0u && !vif.pop_gif_packet(packet),
+          "VIF reset discards pending DIRECT and queued output");
+  }
+  ps2vita::Memory ordered_memory;
+  ps2vita::Vif1 ordered_vif(ordered_memory);
+  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800016FCu);
+  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x400002FFu);
+  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  ordered_memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x2FFu);
+  for (unsigned i = 0; i < color.size(); ++i)
+    ordered_memory.write64(ps2vita::Memory::kVu1DataBase + 64u + i * 8u, color[i]);
+  ordered_vif.vu1().state().vi[2] = 4u;
+  ordered_vif.vu1().start(0u);
+  ordered_vif.vu1().run(2u); // Finish microprogram and its outstanding transfer.
+  check(ordered_vif.submit(bytes + 44u, 36u), "DIRECT accepts payload after earlier PATH1");
+  ps2vita::Gs ordered_gs;
+  ps2vita::Gif ordered_gif(ordered_gs);
+  std::vector<std::uint8_t> ordered_packet;
+  while (ordered_vif.pop_gif_packet(ordered_packet))
+    ordered_gif.submit(ordered_packet.data(), ordered_packet.size());
+  check(ordered_gif.points_emitted() == 1u && ordered_gs.pixels()[0] == 0xFF123456u,
+        "Earlier PATH1 color reaches GIF before later DIRECT vertex");
+  ps2vita::Emulator emulator;
+  emulator.memory().write64(0x2000u, 0x70000005u);
+  for (unsigned i = 0; i < stream.size(); ++i)
+    emulator.memory().write32(0x2010u + i * 4u, stream[i]);
+  emulator.memory().write32(0x10009030u, 0x2000u);
+  emulator.memory().write32(0x10009000u, 0x105u);
+  emulator.memory().advance(1u);
+  emulator.memory().advance(40u);
+  emulator.service_graphics();
+  check(emulator.gif().points_emitted() == 1u && emulator.gs().pixels()[0] == 0xFF123456u,
+        "Emulator routes VIF DMA DIRECT commands to GIF and GS");
+}
+
+void test_gif_shading_modes() {
+  for (unsigned primitive : {1u, 2u, 3u, 4u, 5u}) {
+    for (bool gouraud : {false, true}) {
+      ps2vita::Gs gs;
+      ps2vita::Gif gif(gs);
+      gif.enable_triangle_trace(true);
+      const auto reg = [&](std::uint64_t value, std::uint64_t address) {
+        const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull,
+            0xEull, value, address}};
+        check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                         sizeof(packet)), "Shading fixture register accepted");
+      };
+      reg(primitive | (gouraud ? 8u : 0u), 0u);
+      reg(0xFF0000FFu, 1u);
+      reg(0u, 5u);
+      reg(0xFF00FF00u, 1u);
+      reg(256u, 5u);
+      if (primitive >= 3u) {
+        reg(0xFFFF0000u, 1u);
+        reg(256ull << 16, 5u);
+      }
+      const auto last_color = primitive >= 3u ? 0xFFFF0000u : 0xFF00FF00u;
+      check(gs.pixel(0, 0) == (gouraud ? 0xFF0000FFu : last_color),
+            "IIP selects interpolated or last-vertex flat color");
+      if (primitive == 4u || primitive == 5u) {
+        // The next kick retains source colors in strip/fan assembly even
+        // when the preceding draw used flat shading.
+        gs.clear(0u);
+        reg(0xFFFFFFFFu, 1u);
+        reg(256u | (256ull << 16), 5u);
+        check(gif.triangle_records().back().vertices[0].color ==
+                  (primitive == 4u ? 0xFF00FF00u : 0xFF0000FFu),
+              "Flat draw preserves retained strip/fan vertex color");
+      }
+    }
+  }
+}
+
+void test_gif_primitive_scissor() {
+  for (unsigned primitive : {0u, 1u, 3u}) {
+    ps2vita::Gs gs;
+    ps2vita::Gif gif(gs);
+    const auto reg = [&](std::uint64_t value, std::uint64_t address) {
+      const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull,
+          0xEull, value, address}};
+      check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                       sizeof(packet)), "Scissor fixture accepted");
+    };
+    // Inclusive guest [4,8] maps to host [1,2] on each axis.
+    reg(4ull | (8ull << 16) | (4ull << 32) | (8ull << 48), 0x40u);
+    const auto draw = [&](unsigned context) {
+      reg(primitive | (context << 9), 0u);
+      reg(0xFFFFFFFFu, 1u);
+      reg(0u, 5u);
+      if (primitive == 0u) reg(64ull | (64ull << 16), 5u);
+      else if (primitive == 1u) reg(256ull | (256ull << 16), 5u);
+      else { reg(256u, 5u); reg(256ull << 16, 5u); }
+    };
+    draw(0u);
+    check(gs.pixel(0, 0) == 0u && gs.pixel(1, 1) == 0xFFFFFFFFu &&
+          gs.pixel(3, 3) == 0u, "Guest scissor clips non-sprite primitives");
+    gs.clear(0u);
+    draw(1u);
+    check(gs.pixel(0, 0) == 0xFFFFFFFFu, "Scissor selects independent context");
+    gs.clear(0u);
+    // Inverted bounds remain empty even when quarter-scale division would
+    // collapse both ends to the same host coordinate.
+    reg(7ull | (4ull << 16) | (4ull << 32) | (8ull << 48), 0x40u);
+    draw(0u);
+    check(gs.pixel(1, 1) == 0u, "Inverted guest scissor is empty before scaling");
+  }
+}
+
+void test_degenerate_triangle() {
+  ps2vita::Gs gs;
+  gs.clear(0u);
+  gs.triangle({1, 1, 0u, 0xFFFFFFFFu}, {5, 5, 0u, 0xFFFFFFFFu},
+              {9, 9, 0u, 0xFFFFFFFFu});
+  gs.triangle({3, 3, 0u, 0xFFFFFFFFu}, {3, 3, 0u, 0xFFFFFFFFu},
+              {3, 3, 0u, 0xFFFFFFFFu});
+  bool empty = true;
+  for (int y = 0; y < ps2vita::Gs::kHeight; ++y)
+    for (int x = 0; x < ps2vita::Gs::kWidth; ++x)
+      empty = empty && gs.pixel(x, y) == 0u;
+  check(empty, "Collinear and coincident triangles do not become lines");
+  gs.line({1, 1, 0u, 0xFFFFFFFFu}, {9, 9, 0u, 0xFFFFFFFFu});
+  check(gs.pixel(5, 5) == 0xFFFFFFFFu, "Explicit line primitives still draw");
+}
+
+void test_captured_bios_triangles() {
+  // Host-scaled output from the 248.8M-step trace; a reproducibility fixture,
+  // not a hardware geometry oracle. Two triangles collapse to one point.
+  const ps2vita::GsVertex center{80, 32, 16053920u, 0x80333333u};
+  const std::array<std::array<ps2vita::GsVertex, 3>, 5> triangles{{
+      {{center, center, center}}, {{center, center, center}},
+      {{{115,17,15813920u,0x80B3B3B3u}, {72,34,16053920u,0x80B3B3B3u},
+        {87,29,16053920u,0x80333333u}}},
+      {{{72,29,16053920u,0x80333333u}, {115,46,15813920u,0x80333333u},
+        {87,34,16053920u,0x80333333u}}},
+      {{{115,46,15813920u,0x80333333u}, {87,34,16053920u,0x80333333u},
+        {87,29,16053920u,0x80333333u}}},
+  }};
+  ps2vita::Gs gs;
+  gs.clear(0u, 0u);
+  gs.set_depth_state(ps2vita::Gs::DepthTest::GreaterEqual, true);
+  for (const auto& t : triangles) gs.triangle(t[0], t[1], t[2]);
+  unsigned visible = 0;
+  for (int y = 0; y < ps2vita::Gs::kHeight; ++y)
+    for (int x = 0; x < ps2vita::Gs::kWidth; ++x)
+      visible += (gs.pixel(x, y) & 0xFFFFFFu) != 0u;
+  // Independently counted with scanlines y in [minY,maxY), x in
+  // [ceil(left intersection),ceil(right intersection)): 106 covered pixels.
+  check(visible == 106u, "Captured triangles have 106 pixels with half-open edge coverage");
+}
+
 constexpr std::uint32_t i_type(unsigned op, unsigned rs, unsigned rt, std::uint16_t imm) {
   return (op << 26) | (rs << 21) | (rt << 16) | imm;
+}
+
+void test_execution_census_blocks_and_edges() {
+  ps2vita::ExecutionCensus census;
+  census.record(0x1000u, i_type(0x09u, 0u, 2u, 1u), 0x8000u, 0x4000u);
+  census.record(0x1004u, i_type(0x04u, 2u, 0u, 1u));
+  census.record(0x1008u, 0u); // Branch delay slot.
+  census.record(0x100Cu, i_type(0x09u, 2u, 2u, 1u), 0x7FF0u, 0x4100u);
+  census.record(0x1010u, 0x08000800u); // J 0x2000.
+  census.record(0x1014u, 0u);
+  census.record(0x2000u, 0x03E00008u, 0x7FE0u, 0x4200u, 0x100Cu); // JR ra.
+  census.record(0x2004u, 0u);
+  census.record(0x100Cu, i_type(0x09u, 2u, 2u, 1u), 0x7FD0u, 0x4300u);
+
+  const auto blocks = census.blocks();
+  const auto edges = census.edges();
+  check(census.instruction_count() == 9u && blocks.size() == 3u &&
+        blocks[0].pc == 0x1000u && blocks[0].entries == 1u &&
+        blocks[1].pc == 0x100Cu && blocks[1].entries == 2u &&
+        blocks[1].sp_min == 0x7FD0u && blocks[1].sp_max == 0x7FF0u &&
+        blocks[1].gp_min == 0x4100u && blocks[1].gp_max == 0x4300u &&
+        blocks[2].pc == 0x2000u && blocks[2].entries == 1u,
+        "execution census counts block entries and register ranges");
+  check(edges.size() == 3u &&
+        edges[0].source == 0x1000u && edges[0].target == 0x100Cu &&
+        edges[1].source == 0x100Cu && edges[1].target == 0x2000u &&
+        edges[2].source == 0x2000u && edges[2].target == 0x100Cu,
+        "execution census records sorted dynamic block edges");
+  const auto indirect = census.indirect_targets();
+  check(indirect.size() == 1u && indirect[0].site == 0x2000u &&
+        indirect[0].target == 0x100Cu && indirect[0].transitions == 1u,
+        "execution census records validated indirect branch targets");
+  census.record_mmio_read(0x1004u, 0x1000F000u, 4u);
+  census.record_mmio_read(0x1004u, 0x1000F000u, 4u);
+  census.record_mmio_read(0x1008u, 0x12001000u, 8u);
+  const auto mmio_reads = census.mmio_reads();
+  check(mmio_reads.size() == 2u && mmio_reads[0].site == 0x1004u &&
+        mmio_reads[0].address == 0x1000F000u &&
+        mmio_reads[0].width == 4u && mmio_reads[0].reads == 2u &&
+        mmio_reads[1].site == 0x1008u,
+        "execution census aggregates and sorts MMIO read sites");
+
+  ps2vita::EventCensus events;
+  events.record(2u, 100u);
+  events.record(2u, 140u);
+  events.record(2u, 200u);
+  events.record(1u, 90u);
+  const auto event_stats = events.events();
+  check(event_stats.size() == 2u && event_stats[0].kind == 1u &&
+        event_stats[0].count == 1u && event_stats[0].min_gap == 0u &&
+        event_stats[1].kind == 2u && event_stats[1].count == 3u &&
+        event_stats[1].min_gap == 40u && event_stats[1].max_gap == 60u &&
+        event_stats[1].total_gap == 100u,
+        "event census records deterministic spacing statistics");
+
+  census.clear();
+  census.record(0x3000u, i_type(0x14u, 2u, 0u, 1u)); // Annulled BEQL.
+  census.record(0x3008u, 0u);
+  check(census.blocks().size() == 2u && census.edges().size() == 1u,
+        "execution census handles an annulled branch-likely delay slot");
 }
 
 void test_memory_aliases() {
@@ -489,6 +1437,27 @@ void test_cdvd_reset_status() {
   check(mechacon_matches && memory.iop_read8(0x1F402017u) == 0x40u,
         "CDVD GetMechaVersion returns the four-byte retail response");
 
+  memory.iop_write8(0x1F402016u, 0x15u);
+  check(memory.iop_read8(0x1F402017u) == 0u &&
+        memory.iop_read8(0x1F402018u) == 0x05u &&
+        memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD ForbidDVDP returns the retail completion code");
+
+  memory.iop_write8(0x1F402016u, 0x22u);
+  bool wake_time_is_clear = memory.iop_read8(0x1F402017u) == 0u;
+  for (unsigned index = 0; index < 10u; ++index)
+    wake_time_is_clear = wake_time_is_clear &&
+        memory.iop_read8(0x1F402018u) == 0u;
+  check(wake_time_is_clear && memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD ReadWakeUpTime returns a clear ten-byte record");
+
+  memory.iop_write8(0x1F402017u, 1u);
+  memory.iop_write8(0x1F402016u, 0x24u);
+  check(memory.iop_read8(0x1F402017u) == 0u &&
+        memory.iop_read8(0x1F402018u) == 0u &&
+        memory.iop_read8(0x1F402017u) == 0x40u,
+        "CDVD RCBypassCtrl acknowledges the requested mode");
+
   memory.iop_write8(0x1F402016u, 0x36u);
   const std::array<std::uint8_t, 15> expected_region = {
       0u, 0x08u, 0u, 'E', 'E', 'e', 'n', 'g', 'E', 'E', 0u, 0u, 0u, 0u, 0u};
@@ -542,6 +1511,93 @@ void test_video_vblank_deadlines() {
         (memory.iop_read32(0x1F801070u) & (1u << 11)) != 0u &&
         memory.iop_interrupt_pending(),
         "VBlank end raises both interrupt controllers at its deadline");
+}
+
+void test_spu2_dma7_completion() {
+  ps2vita::Memory memory;
+  check(memory.iop_read16(0x1F900744u) == 0x0080u,
+        "SPU2 core 1 resets ready");
+  memory.iop_write16(0x1F90059Au, 0x0020u);
+  for (std::uint32_t byte = 0; byte < 8u; ++byte)
+    memory.iop_write8(0x1000u + byte, static_cast<std::uint8_t>(0xA0u + byte));
+  memory.iop_write16(0x1F9005A8u, 0u);
+  memory.iop_write16(0x1F9005AAu, 0x2808u);
+  memory.iop_write32(0x1F801500u, 0x1000u);
+  memory.iop_write32(0x1F801504u, 0x00010002u);
+  memory.iop_write32(0x1F801508u, 0x01000201u);
+  check(memory.iop_read16(0x1F900744u) == 0x0400u,
+        "SPU2 DMA7 clears ready and sets busy while active");
+  memory.iop_write32(0x1F801074u, 1u << 3);
+  memory.iop_write32(0x1F801078u, 1u);
+
+  memory.advance(767u);
+  check((memory.iop_read32(0x1F801508u) & 0x01000000u) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 3)) == 0u,
+        "SPU2 DMA7 stays active until its 24-IOP-cycle word deadline");
+  memory.advance(1u);
+
+  bool payload_matches = true;
+  for (std::uint32_t byte = 0; byte < 8u; ++byte)
+    payload_matches = payload_matches &&
+        memory.spu2_ram_read8(0x5010u + byte) == 0xA0u + byte;
+  check(payload_matches && memory.iop_read32(0x1F801500u) == 0x1008u &&
+        memory.iop_read32(0x1F801504u) == 0u &&
+        (memory.iop_read32(0x1F801508u) & 0x01000000u) == 0u &&
+        memory.iop_read16(0x1F9005AAu) == 0x280Cu,
+        "SPU2 DMA7 copies IOP data and advances its source and sound addresses");
+  check(memory.iop_read16(0x1F900744u) == 0x0080u,
+        "SPU2 DMA7 clears busy and restores ready at completion");
+  check((memory.iop_read32(0x1F801574u) & (1u << 24)) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 3)) != 0u &&
+        memory.iop_interrupt_pending(),
+        "SPU2 DMA7 completion raises DICR2 and the shared IOP DMA interrupt");
+}
+
+void test_event_horizon_contract() {
+  ps2vita::Memory memory;
+  check(memory.cycles_until_next_event() == 8u,
+        "event horizon starts at the next conservative IOP clock edge");
+  memory.advance(3u);
+  check(memory.cycles_until_next_event() == 5u,
+        "event horizon preserves the fractional IOP clock phase");
+
+  memory.write32(0x1000C400u, 0x100u);
+  memory.iop_write32(0x1F801538u, 0x01000000u);
+  check(memory.cycles_until_next_event() == 1u,
+        "event horizon exposes an armed unscheduled SIF1 start");
+}
+
+void test_spu2_dma4_completion() {
+  ps2vita::Memory memory;
+  check(memory.iop_read16(0x1F900344u) == 0x0080u,
+        "SPU2 core 0 resets ready");
+  memory.iop_write16(0x1F90019Au, 0x0020u);
+  for (std::uint32_t byte = 0; byte < 8u; ++byte)
+    memory.iop_write8(0x2000u + byte, static_cast<std::uint8_t>(0xB0u + byte));
+  memory.iop_write16(0x1F9001A8u, 0u);
+  memory.iop_write16(0x1F9001AAu, 0x0010u);
+  memory.iop_write32(0x1F8010C0u, 0x2000u);
+  memory.iop_write32(0x1F8010C4u, 0x00010002u);
+  memory.iop_write32(0x1F8010C8u, 0x01000201u);
+  check(memory.iop_read16(0x1F900344u) == 0x0400u,
+        "SPU2 DMA4 clears ready and sets busy while active");
+
+  memory.advance(768u);
+
+  bool payload_matches = true;
+  for (std::uint32_t byte = 0; byte < 8u; ++byte)
+    payload_matches = payload_matches &&
+        memory.spu2_ram_read8(0x20u + byte) == 0xB0u + byte;
+  check(payload_matches && memory.iop_read32(0x1F8010C0u) == 0x2008u &&
+        memory.iop_read32(0x1F8010C4u) == 0u &&
+        (memory.iop_read32(0x1F8010C8u) & 0x01000000u) == 0u &&
+        memory.iop_read16(0x1F9001AAu) == 0x0014u,
+        "SPU2 DMA4 copies IOP data and advances core-0 transfer state");
+  check(memory.iop_read16(0x1F900344u) == 0x0080u,
+        "SPU2 DMA4 clears busy and restores ready at completion");
+  check((memory.iop_read32(0x1F8010F4u) & (1u << 28)) != 0u &&
+        (memory.iop_read32(0x1F801070u) & (1u << 3)) != 0u,
+        "SPU2 DMA4 completion raises DICR and the shared IOP DMA interrupt");
 }
 
 void test_ee_timer3_hblank_clock() {
@@ -764,6 +1820,38 @@ void test_unaligned_memory_ops() {
   memory.write32(0x1300, i_type(0x2E, 0, 8, 0x3001)); // swr
   check(cpu.step() == ps2vita::StopReason::None, "SWR executes");
   check(memory.read32(0x3000) == 0xBBCCDD11, "SWR little-endian merge");
+}
+
+void test_ee_overlapping_backreference_copy() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  // Synthetic forward byte-copy loop: overlapping source bytes must be read
+  // after earlier iterations have written them, as required by LZ backrefs.
+  const std::array<std::uint32_t, 7> code{{
+      (0x24u << 26) | (5u << 21) | (2u << 16), // LBU v0,0(a1)
+      (0x28u << 26) | (16u << 21) | (2u << 16), // SB v0,0(s0)
+      (9u << 26) | (5u << 21) | (5u << 16) | 1u,
+      (9u << 26) | (16u << 21) | (16u << 16) | 1u,
+      (9u << 26) | (4u << 21) | (4u << 16) | 0xFFFFu,
+      (5u << 26) | (4u << 21) | 0xFFFAu, // BNE a0,zero,loop
+      0u,
+  }};
+  for (unsigned i = 0; i < code.size(); ++i) memory.write32(0x1000u + i * 4, code[i]);
+  for (unsigned distance : {1u, 3u}) {
+    for (unsigned i = 0; i < 32; ++i) memory.write8(0x2000u + i, 0);
+    for (unsigned i = 0; i < distance; ++i) memory.write8(0x2000u + i, 0x80u + i);
+    cpu.reset(0x1000u);
+    cpu.state().gpr[4] = 9;
+    cpu.state().gpr[5] = 0x2000;
+    cpu.state().gpr[16] = 0x2000 + distance;
+    check(cpu.run(63) == ps2vita::StopReason::StepLimit && cpu.state().gpr[4] == 0 &&
+          cpu.state().pc == 0x101Cu, "EE overlapping backreference loop terminates exactly");
+    for (unsigned i = 0; i < 9; ++i)
+      check(memory.read8(0x2000u + distance + i) == 0x80u + i % distance,
+            "EE LBU/SB backreference propagates freshly written bytes");
+    check(cpu.state().gpr[2] == 0x80u + 8u % distance,
+          "EE backreference byte load remains unsigned");
+  }
 }
 
 void test_quadword_load_store() {
@@ -1042,24 +2130,70 @@ void test_mmi_pcpyld() {
         cpu.state().gpr_hi[2] == 0x08090A0B0C0D0E0Full,
         "PSUBB wraps eight independent byte lanes per register half");
 
+  cpu.state().gpr[2] = 0x0000000010000000ull;
+  cpu.state().gpr_hi[2] = 0x8000000000000000ull;
+  cpu.state().gpr[3] = 0x0000000120000000ull;
+  cpu.state().gpr_hi[3] = 0x00000001FFFFFFFFull;
+  memory.write32(0x1028u, 0x70433848u); // psubw a3,v0,v1
+  memory.write32(0x102Cu, 0x0000000Du);
+  cpu.state().pc = 0x1028u;
+  check(cpu.run(4) == ps2vita::StopReason::Break, "captured BIOS PSUBW executes");
+  check(cpu.state().gpr[7] == 0xFFFFFFFFF0000000ull &&
+        cpu.state().gpr_hi[7] == 0x7FFFFFFF00000001ull,
+        "PSUBW wraps four independent 32-bit lanes");
+
   cpu.state().gpr[2] = 0xFF00FF00FF00FF00ull;
   cpu.state().gpr_hi[2] = 0xAAAAAAAAAAAAAAAAull;
   cpu.state().gpr[3] = 0x0F0F0F0F0F0F0F0Full;
   cpu.state().gpr_hi[3] = 0xCCCCCCCCCCCCCCCCull;
   cpu.state().gpr[5] = cpu.state().gpr[2];
   cpu.state().gpr_hi[5] = cpu.state().gpr_hi[2];
-  memory.write32(0x1028u, (0x1Cu << 26) | (2u << 21) | (3u << 16) |
+  memory.write32(0x1030u, (0x1Cu << 26) | (2u << 21) | (3u << 16) |
                                 (2u << 11) | (0x12u << 6) | 0x09u);
-  memory.write32(0x102Cu, (0x1Cu << 26) | (5u << 21) | (3u << 16) |
+  memory.write32(0x1034u, (0x1Cu << 26) | (5u << 21) | (3u << 16) |
                                 (4u << 11) | (0x13u << 6) | 0x29u);
-  memory.write32(0x1030u, 0x0000000Du);
-  cpu.state().pc = 0x1028u;
+  memory.write32(0x1038u, 0x0000000Du);
+  cpu.state().pc = 0x1030u;
   check(cpu.run(8) == ps2vita::StopReason::Break, "PAND and PNOR execute");
   check(cpu.state().gpr[2] == 0x0F000F000F000F00ull &&
         cpu.state().gpr_hi[2] == 0x8888888888888888ull &&
         cpu.state().gpr[4] == 0x00F000F000F000F0ull &&
         cpu.state().gpr_hi[4] == 0x1111111111111111ull,
         "PAND and PNOR combine all 128 bits with alias-safe sources");
+}
+
+void test_mmi_pextuw_and_transpose() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  for (unsigned destination : {13u, 9u, 8u, 0u}) {
+    cpu.reset(0x1000u);
+    cpu.state().gpr[9] = 0x2222222211111111ull;
+    cpu.state().gpr[8] = 0x6666666655555555ull;
+    cpu.state().gpr_hi[9] = 0x8888888877777777ull;
+    cpu.state().gpr_hi[8] = 0x4444444433333333ull;
+    memory.write32(0x1000u, 0x712804A8u | (destination << 11));
+    check(cpu.step() == ps2vita::StopReason::None &&
+          cpu.state().gpr[destination] == (destination ? 0x7777777733333333ull : 0u) &&
+          cpu.state().gpr_hi[destination] == (destination ? 0x8888888844444444ull : 0u),
+          "PEXTUW interleaves upper words with alias-safe source snapshots");
+  }
+  cpu.reset(0x1000u);
+  for (unsigned row = 0; row < 4u; ++row) {
+    const std::uint64_t first = row * 4u + 1u;
+    cpu.state().gpr[8u + row] = first | ((first + 1u) << 32);
+    cpu.state().gpr_hi[8u + row] = (first + 2u) | ((first + 3u) << 32);
+  }
+  constexpr std::array<std::uint32_t, 8> code{{0x71286488u, 0x71286CA8u,
+      0x716A7488u, 0x716A7CA8u, 0x71CC4389u, 0x718E4BA9u, 0x71ED5389u, 0x71AF5BA9u}};
+  for (unsigned i = 0; i < code.size(); ++i) memory.write32(0x1000u + i * 4u, code[i]);
+  check(cpu.run(code.size()) == ps2vita::StopReason::StepLimit,
+        "Captured BIOS packed matrix transpose sequence executes");
+  for (unsigned column = 0; column < 4u; ++column) {
+    const std::uint64_t first = column + 1u;
+    check(cpu.state().gpr[8u + column] == (first | ((first + 4u) << 32)) &&
+          cpu.state().gpr_hi[8u + column] == ((first + 8u) | ((first + 12u) << 32)),
+          "Captured packed sequence transposes all four matrix columns");
+  }
 }
 
 void test_mmi_pextlw() {
@@ -1131,6 +2265,24 @@ void test_scalar_fpu() {
   check(cpu.state().fpu_acc == 0x40700000u &&
         cpu.state().fpr[3] == 0x40E40000u,
         "FPU accumulator feeds MADD.S");
+
+  cpu.reset(0x1020u);
+  cpu.state().fpr[0] = 0x3F800000u;
+  cpu.state().fpr[5] = 0x40000000u;
+  memory.write32(0x1020u, 0x46050034u); // c.olt.s f0,f5
+  memory.write32(0x1024u, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break &&
+        (cpu.state().fcr[31] & (1u << 23)) != 0u,
+        "captured BIOS C.OLT.S sets the ordered less-than condition");
+
+  cpu.reset(0x1030u);
+  cpu.state().fpr[4] = 0x40000000u;
+  cpu.state().fpr[3] = 0x40000000u;
+  memory.write32(0x1030u, 0x46032036u); // c.ole.s f4,f3
+  memory.write32(0x1034u, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break &&
+        (cpu.state().fcr[31] & (1u << 23)) != 0u,
+        "captured BIOS C.OLE.S sets the ordered less-or-equal condition");
 }
 
 void test_fpu_memory_transfer() {
@@ -1161,6 +2313,334 @@ void test_vu_memory_windows() {
   }
   check(!memory.valid(0x11001000u, 4) && !memory.valid(0x11005000u, 4),
         "VU address-map holes remain unmapped");
+}
+
+void test_vu0_broadcast_multiply() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  for (unsigned bc = 0; bc < 4; ++bc) {
+    cpu.reset(0x1000u);
+    cpu.state().vu0_vf[4] = 0x400000003F800000ull; // 1,2
+    cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull; // 3,4
+    cpu.state().vu0_vf[5] = 0x4000000040000000ull; // 2,2
+    cpu.state().vu0_vf_hi[5] = 0x4000000040000000ull;
+    // Alias FD=FT to expose reading a modified broadcast lane.
+    memory.write32(0x1000u, 0x4BE52158u | bc);
+    check(cpu.step() == ps2vita::StopReason::None &&
+          cpu.state().vu0_vf[5] == 0x4080000040000000ull &&
+          cpu.state().vu0_vf_hi[5] == 0x4100000040C00000ull,
+          "VMUL broadcast captures scalar across destination aliasing");
+  }
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull;
+  cpu.state().vu0_vf[5] = 0x4000000040000000ull;
+  memory.write32(0x1000u, 0x4BE52198u); // Captured VMULx.xyzw vf6,vf4,vf5.
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vf[6] == 0x4080000040000000ull &&
+        cpu.state().vu0_vf_hi[6] == 0x4100000040C00000ull,
+        "Captured BIOS VMULx produces the expected vector");
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull;
+  cpu.state().vu0_vf_hi[5] = 0x4000000000000000ull;
+  // W-only multiply by VF5.w=2, self alias; other lanes must survive.
+  memory.write32(0x1000u, 0x4A25211Bu);
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vf[4] == 0x400000003F800000ull &&
+        cpu.state().vu0_vf_hi[4] == 0x4100000040400000ull,
+        "VMUL honors destination mask without changing other lanes");
+  cpu.reset(0x1000u);
+  memory.write32(0x1000u, 0x4BE52018u); // FD=0 must not change the constant.
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vf[0] == 0u &&
+        cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull,
+        "VMUL preserves VF0 on destination writes");
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull;
+  cpu.state().vu0_vf_hi[5] = 0x1234567800000000ull;
+  memory.write32(0x1000u, 0x4BC4216Au); // Captured VMUL.xyz VF5,VF4,VF4.
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vf[5] == 0x408000003F800000ull &&
+        cpu.state().vu0_vf_hi[5] == 0x1234567841100000ull,
+        "Captured vector VMUL squares XYZ and preserves W");
+}
+
+void test_vu0_captured_normalization() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  // Arithmetic sequence from BIOS PC 0x273894..0x2738B8, omitting only
+  // the caller's LQC2, return, and SQC2. No synthetic opcode substitution.
+  constexpr std::array<std::uint32_t, 10> code{{
+      0x4BC4216Au, 0x4B052941u, 0x4B052942u, 0x4A2503BDu, 0x4A0003BFu,
+      0x4B000160u, 0x4A6503BCu, 0x4BE001ACu, 0x4A0003BFu, 0x4BC0219Cu}};
+  for (unsigned i = 0; i < code.size(); ++i) memory.write32(0x1000u + i * 4u, code[i]);
+  for (bool zero : {false, true}) {
+    cpu.reset(0x1000u);
+    cpu.state().vu0_vf[4] = zero ? 0u : 0x4080000040400000ull; // 3,4
+    cpu.state().vu0_vf_hi[4] = 0x42C6000000000000ull; // Z=0,W=99 ignored.
+    check(cpu.run(code.size()) == ps2vita::StopReason::StepLimit,
+          "Captured VU0 normalization instruction sequence executes");
+    check(cpu.state().vu0_vf[6] == (zero ? 0u : 0x3F4CCCCD3F19999Aull) &&
+          cpu.state().vu0_vf_hi[6] == 0u,
+          "Captured VU0 normalizes 3,4,0 and safely handles zero vector");
+  }
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[5] = 0xC0800000u; // -4
+  cpu.state().vu0_vi[16] = 0x120u;
+  memory.write32(0x1000u, 0x4A2503BDu);
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vi[22] == 0x40000000u && cpu.state().vu0_vi[16] == 0x110u,
+        "VSQRT uses absolute input and updates invalid/divide status bits");
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[5] = 0x80000000u; // -0
+  memory.write32(0x1000u, 0x4A6503BCu); // VF0.w / VF5.x
+  check(cpu.step() == ps2vita::StopReason::None &&
+        cpu.state().vu0_vi[22] == 0xFF7FFFFFu && (cpu.state().vu0_vi[16] & 0x30u) == 0x20u,
+        "VDIV by negative zero saturates with the correct sign");
+}
+
+void test_vu0_outer_product() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  for (unsigned destination : {6u, 4u, 5u, 0u}) {
+    cpu.reset(0x1000u);
+    cpu.state().vu0_vf[4] = 0x400000003F800000ull; // 1,2,3
+    cpu.state().vu0_vf_hi[4] = 0x42C6000040400000ull;
+    cpu.state().vu0_vf[5] = 0x40A0000040800000ull; // 4,5,6
+    cpu.state().vu0_vf_hi[5] = 0x42C6000040C00000ull;
+    cpu.state().vu0_vf_hi[6] = 0x42C6000000000000ull;
+    cpu.state().vu0_acc[3] = 0x12345678u;
+    memory.write32(0x1000u, 0x4BC522FEu); // captured VOPMULA
+    // Captured VOPMSUB reverses FS/FT to subtract the other cyclic terms.
+    memory.write32(0x1004u, 0x4BC4282Eu | (destination << 6));
+    check(cpu.run(2) == ps2vita::StopReason::StepLimit,
+          "VU0 outer product pair executes");
+    check(cpu.state().vu0_acc == std::array<std::uint32_t, 4>{{
+              0x41400000u, 0x41400000u, 0x40A00000u, 0x12345678u}},
+          "VOPMULA writes cyclic XYZ products and preserves ACC W");
+    check(destination == 0u ?
+          cpu.state().vu0_vf[0] == 0u &&
+              cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull :
+          cpu.state().vu0_vf[destination] == 0x40C00000C0400000ull &&
+              cpu.state().vu0_vf_hi[destination] == 0x42C60000C0400000ull,
+          "VOPMSUB produces cross product with aliases and preserves W/VF0");
+  }
+  cpu.reset(0x1000u);
+  check(cpu.state().vu0_acc == std::array<std::uint32_t, 4>{},
+        "CPU reset clears VU0 accumulator");
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x40400000u;
+  cpu.state().vu0_vf[5] = 0x40A0000040800000ull;
+  cpu.state().vu0_vf_hi[5] = 0x40C00000u;
+  memory.write32(0x1000u, 0x4BC522FEu);
+  memory.write32(0x1004u, 0x4BC521AEu); // Same FS/FT, hence zero XYZ.
+  check(cpu.run(2) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_vf[6] == 0u && cpu.state().vu0_vf_hi[6] == 0u,
+        "VOPMSUB uses the same cyclic product order as VOPMULA");
+  cpu.state().vu0_acc[3] = 0x12345678u;
+  cpu.state().gpr[8] = 2u; // FBRST VU0 reset.
+  memory.write32(0x1008u, (0x12u << 26) | (6u << 21) | (8u << 16) | (28u << 11));
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_acc == std::array<std::uint32_t, 4>{},
+        "FBRST VU0 reset clears accumulator state");
+}
+
+void test_vu0_move() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  cpu.reset(0x1000u);
+  cpu.state().vu0_acc = {{1u, 2u, 3u, 4u}};
+  cpu.state().vu0_vi[16] = 0x123u;
+  memory.write32(0x1000u, 0x4A0002FFu);
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_acc == std::array<std::uint32_t, 4>{{1u, 2u, 3u, 4u}} &&
+        cpu.state().vu0_vi[16] == 0x123u && cpu.state().pc == 0x1004u,
+        "Captured VNOP advances PC without changing accumulator or flags");
+  for (unsigned destination : {5u, 4u, 0u}) {
+    for (unsigned mask : {0u, 5u, 15u}) {
+      cpu.reset(0x1000u);
+      cpu.state().vu0_vf[4] = 0x2222222211111111ull;
+      cpu.state().vu0_vf_hi[4] = 0x4444444433333333ull;
+      memory.write32(0x1000u, 0x4A00233Cu | (mask << 21) | (destination << 16));
+      const auto old_low = cpu.state().vu0_vf[destination];
+      const auto old_high = cpu.state().vu0_vf_hi[destination];
+      check(cpu.run(1) == ps2vita::StopReason::StepLimit, "VMOVE executes");
+      for (unsigned lane = 0; lane < 4u; ++lane) {
+        const auto actual_half = lane < 2u ? cpu.state().vu0_vf[destination] :
+            cpu.state().vu0_vf_hi[destination];
+        const auto prior_half = lane < 2u ? old_low : old_high;
+        const auto expected = destination != 0u && (mask & (8u >> lane)) ?
+            0x11111111u * (lane + 1u) :
+            static_cast<std::uint32_t>(prior_half >> ((lane & 1u) * 32u));
+        check(static_cast<std::uint32_t>(actual_half >> ((lane & 1u) * 32u)) == expected,
+              "VMOVE preserves bits, masked lanes, self aliases and VF0");
+      }
+    }
+  }
+}
+
+void test_vu0_abs() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  const std::array<std::uint32_t, 4> source{{0x80000000u, 0xBF800000u, 0xFFFFFFFFu, 0x7F800001u}};
+  for (unsigned destination : {5u, 4u, 0u}) {
+    for (unsigned mask : {0u, 5u, 15u}) {
+      cpu.reset(0x1000u);
+      cpu.state().vu0_vf[4] = source[0] | (std::uint64_t(source[1]) << 32);
+      cpu.state().vu0_vf_hi[4] = source[2] | (std::uint64_t(source[3]) << 32);
+      const auto old_low = cpu.state().vu0_vf[destination];
+      const auto old_high = cpu.state().vu0_vf_hi[destination];
+      cpu.state().vu0_vi[16] = 0x123u;
+      memory.write32(0x1000u, 0x4A0021FDu | (mask << 21) | (destination << 16));
+      check(cpu.run(1) == ps2vita::StopReason::StepLimit && cpu.state().vu0_vi[16] == 0x123u,
+            "VABS executes without altering STATUS");
+      for (unsigned lane = 0; lane < 4u; ++lane) {
+        const auto half = lane < 2u ? cpu.state().vu0_vf[destination] : cpu.state().vu0_vf_hi[destination];
+        const auto old = lane < 2u ? old_low : old_high;
+        const auto expected = destination != 0u && (mask & (8u >> lane)) ?
+            source[lane] & 0x7FFFFFFFu : static_cast<std::uint32_t>(old >> ((lane & 1u) * 32u));
+        check(static_cast<std::uint32_t>(half >> ((lane & 1u) * 32u)) == expected,
+              "VABS clears only sign bits and preserves masks, aliases, special bits and VF0");
+      }
+    }
+  }
+}
+
+void test_vu0_ftoi() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  constexpr unsigned shifts[] = {0u, 4u, 12u, 15u};
+  for (unsigned variant = 0; variant < 4u; ++variant) {
+    for (unsigned destination : {5u, 4u, 0u}) {
+      cpu.reset(0x1000u);
+      cpu.state().vu0_vf[4] = 0xBFE000003FE00000ull; // +1.75,-1.75
+      cpu.state().vu0_vf_hi[4] = 0xFF8000007F800000ull; // overflow both signs
+      memory.write32(0x1000u, 0x4BE0217Cu | (destination << 16) | variant);
+      check(cpu.run(1) == ps2vita::StopReason::StepLimit, "VFTOI variant executes");
+      const auto positive = static_cast<std::uint32_t>(1.75f * float(1u << shifts[variant]));
+      check(destination == 0u ? cpu.state().vu0_vf[0] == 0u &&
+          cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull :
+          cpu.state().vu0_vf[destination] == (positive | (std::uint64_t(0u - positive) << 32)) &&
+          cpu.state().vu0_vf_hi[destination] == 0x800000007FFFFFFFull,
+          "VFTOI scales, truncates, saturates and preserves aliases/VF0");
+    }
+  }
+  cpu.reset(0x1000u);
+  cpu.state().vu0_vf[4] = 0x4EFFFFFF80000000ull; // -0, largest float below 2^31.
+  cpu.state().vu0_vf_hi[4] = 0xFFFFFFFF7FFFFFFFull; // exceptional bit patterns.
+  cpu.state().vu0_vf[5] = 0x1234567812345678ull;
+  cpu.state().vu0_vf_hi[5] = 0x1234567812345678ull;
+  memory.write32(0x1000u, 0x4BC5217Cu); // VFTOI0.xyz, W preserved.
+  check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+        cpu.state().vu0_vf[5] == 0x7FFFFF8000000000ull &&
+        cpu.state().vu0_vf_hi[5] == 0x123456787FFFFFFFull,
+        "VFTOI handles signed zero, finite boundary, saturation and masked W");
+}
+
+void test_ee_madd() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  struct Case { std::uint32_t a, b; std::uint64_t initial, signed_result, unsigned_result; };
+  const std::array<Case, 5> cases{{
+      {3u, 4u, 5u, 17u, 17u},
+      {0xFFFFFFFFu, 2u, 0u, 0xFFFFFFFFFFFFFFFEull, 0x1FFFFFFFEull},
+      {1u, 1u, 0xFFFFFFFFFFFFFFFFull, 0u, 0u},
+      {0x80000000u, 0xFFFFFFFFu, 0u, 0x80000000ull, 0x7FFFFFFF80000000ull},
+      {1u, 1u, 0x7FFFFFFFFFFFFFFFull, 0x8000000000000000ull, 0x8000000000000000ull}}};
+  const auto extend = [](std::uint32_t word) {
+    return word & 0x80000000u ? 0xFFFFFFFF00000000ull | word : std::uint64_t(word);
+  };
+  for (unsigned fn : {0u, 1u, 0x20u, 0x21u}) {
+    for (unsigned destination : {16u, 20u, 22u, 0u}) {
+      for (const auto& c : cases) {
+        cpu.reset(0x1000u);
+        cpu.state().gpr[20] = 0x1234567800000000ull | c.a;
+        cpu.state().gpr[22] = 0x8765432100000000ull | c.b;
+        cpu.state().gpr_hi[destination] = destination ? 0x12345678u : 0u;
+        auto& low = fn & 0x20u ? cpu.state().lo1 : cpu.state().lo;
+        auto& high = fn & 0x20u ? cpu.state().hi1 : cpu.state().hi;
+        low = 0xAAAAAAAA00000000ull | static_cast<std::uint32_t>(c.initial);
+        high = 0xBBBBBBBB00000000ull | (c.initial >> 32);
+        memory.write32(0x1000u, 0x72960000u | (destination << 11) | fn);
+        const auto result = fn & 1u ? c.unsigned_result : c.signed_result;
+        check(cpu.run(1) == ps2vita::StopReason::StepLimit &&
+              low == extend(static_cast<std::uint32_t>(result)) &&
+              high == extend(static_cast<std::uint32_t>(result >> 32)) &&
+              cpu.state().gpr[destination] == (destination ? low : 0u) &&
+              cpu.state().gpr_hi[destination] == (destination ? 0x12345678u : 0u),
+              "MADD variants handle signedness, wraparound, aliases and upper-half preservation");
+        check((fn & 0x20u ? cpu.state().lo : cpu.state().lo1) == 0u &&
+              (fn & 0x20u ? cpu.state().hi : cpu.state().hi1) == 0u,
+              "MADD leaves other accumulator unchanged");
+      }
+    }
+  }
+}
+
+void test_vu0_matrix_accumulator() {
+  ps2vita::Memory memory;
+  ps2vita::Cpu cpu(memory);
+  // Captured four-column transform at 0x27396C..0x273978.
+  constexpr std::array<std::uint32_t, 4> code{{
+      0x4BE821BCu, 0x4BE828BDu, 0x4BE830BEu, 0x4BE83A4Bu}};
+  const auto bits = [](float value) {
+    std::uint32_t result;
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
+  };
+  for (unsigned destination : {9u, 8u, 7u, 0u}) {
+    cpu.reset(0x1000u);
+    for (unsigned reg = 4; reg <= 8u; ++reg) {
+      const float base = reg == 8u ? 1.0f : float((reg - 4u) * 4u + 1u);
+      cpu.state().vu0_vf[reg] = bits(base) | (std::uint64_t(bits(base + 1)) << 32);
+      cpu.state().vu0_vf_hi[reg] = bits(base + 2) | (std::uint64_t(bits(base + 3)) << 32);
+    }
+    for (unsigned i = 0; i < code.size(); ++i)
+      memory.write32(0x1000u + i * 4u, i == 3u ?
+          (code[i] & ~(31u << 6)) | (destination << 6) : code[i]);
+    check(cpu.run(4) == ps2vita::StopReason::StepLimit,
+          "Captured VU0 matrix accumulator sequence executes");
+    check(cpu.state().vu0_acc == std::array<std::uint32_t, 4>{{
+        bits(38), bits(44), bits(50), bits(56)}},
+        "VMULAx and VMADDAy/z accumulate the first three columns");
+    check(destination == 0u ? cpu.state().vu0_vf[0] == 0u &&
+        cpu.state().vu0_vf_hi[0] == 0x3F80000000000000ull :
+        cpu.state().vu0_vf[destination] == (bits(90) | (std::uint64_t(bits(100)) << 32)) &&
+        cpu.state().vu0_vf_hi[destination] == (bits(110) | (std::uint64_t(bits(120)) << 32)),
+        "VMADDw returns matrix product without changing ACC, including aliases/VF0");
+  }
+  for (unsigned mode = 0; mode < 3u; ++mode) {
+    for (unsigned bc = 0; bc < 4u; ++bc) {
+      for (unsigned mask : {0u, 5u, 15u}) {
+        cpu.reset(0x1000u);
+        cpu.state().vu0_vf[4] = bits(1) | (std::uint64_t(bits(2)) << 32);
+        cpu.state().vu0_vf_hi[4] = bits(3) | (std::uint64_t(bits(4)) << 32);
+        cpu.state().vu0_vf[5] = bits(2) | (std::uint64_t(bits(3)) << 32);
+        cpu.state().vu0_vf_hi[5] = bits(4) | (std::uint64_t(bits(5)) << 32);
+        for (unsigned lane = 0; lane < 4u; ++lane)
+          cpu.state().vu0_acc[lane] = bits(float(10u + lane));
+        const unsigned encoding = mode == 0u ? 0x1BCu : mode == 1u ? 0xBCu :
+            (5u << 6) | 8u;
+        memory.write32(0x1000u, 0x4A052000u | (mask << 21) | encoding | bc);
+        check(cpu.run(1) == ps2vita::StopReason::StepLimit,
+              "VU0 accumulator broadcast variant executes");
+        for (unsigned lane = 0; lane < 4u; ++lane) {
+          const float product = float(lane + 1u) * float(bc + 2u);
+          const bool enabled = (mask & (8u >> lane)) != 0;
+          const auto expected_acc = bits(enabled && mode != 2u ?
+              product + (mode == 0u ? 0.0f : float(10u + lane)) : float(10u + lane));
+          const auto half = lane < 2u ? cpu.state().vu0_vf[5] : cpu.state().vu0_vf_hi[5];
+          const auto expected_vf = bits(enabled && mode == 2u ?
+              float(10u + lane) + product : float(lane + 2u));
+          check(cpu.state().vu0_acc[lane] == expected_acc &&
+                static_cast<std::uint32_t>(half >> ((lane & 1u) * 32u)) == expected_vf,
+                "Accumulator variants honor all broadcasts/masks and FT aliasing");
+        }
+      }
+    }
+  }
 }
 
 void test_vu0_cop2_transfers() {
@@ -1210,22 +2690,44 @@ void test_vu0_cop2_transfers() {
         cpu.state().vu0_vf_hi[4] == 0x40A0000040800000ull,
         "VU0 VSUB updates selected vector lanes");
 
+  cpu.reset(0x10C8);
+  cpu.state().vu0_vf[4] = 0x400000003F800000ull;
+  cpu.state().vu0_vf_hi[4] = 0x4080000040400000ull;
+  memory.write32(0x10C8, 0x4A202128u); // vadd.w vf4,vf4,vf0
+  memory.write32(0x10CC, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break,
+        "captured BIOS VU0 VADD executes");
+  check(cpu.state().vu0_vf[4] == 0x400000003F800000ull &&
+        cpu.state().vu0_vf_hi[4] == 0x40A0000040400000ull,
+        "VU0 VADD honors its W-only destination mask and VF0 constant");
+
   cpu.reset(0x10D0);
+  cpu.state().vu0_vf[4] = 0x2222222211111111ull;
+  cpu.state().vu0_vf_hi[4] = 0x4444444433333333ull;
+  memory.write32(0x10D0, 0x4BE5233Du); // vmr32.xyzw vf5,vf4
+  memory.write32(0x10D4, 0x0000000Du);
+  check(cpu.run(4) == ps2vita::StopReason::Break,
+        "captured BIOS VU0 VMR32 executes");
+  check(cpu.state().vu0_vf[5] == 0x3333333322222222ull &&
+        cpu.state().vu0_vf_hi[5] == 0x1111111144444444ull,
+        "VU0 VMR32 rotates XYZW lanes and honors the destination mask");
+
+  cpu.reset(0x10E0);
   cpu.state().vu0_vi[2] = 7;
   cpu.state().vu0_vi[3] = 9;
-  memory.write32(0x10D0, (0x12u << 26) | (0x10u << 21) | (3u << 16) |
+  memory.write32(0x10E0, (0x12u << 26) | (0x10u << 21) | (3u << 16) |
                               (2u << 11) | (4u << 6) | 0x30u);
-  memory.write32(0x10D4, 0x0000000Du);
+  memory.write32(0x10E4, 0x0000000Du);
   check(cpu.run(4) == ps2vita::StopReason::Break &&
         (cpu.state().vu0_vi[4] & 0xFFFFu) == 16u,
         "VU0 VIADD writes a 16-bit integer register result");
 
-  cpu.reset(0x10E0);
+  cpu.reset(0x10F0);
   cpu.state().vu0_vi[1] = 0x101u;
   cpu.state().vu0_vf[2] = 0x0123456789ABCDEFull;
   cpu.state().vu0_vf_hi[2] = 0xFEDCBA9876543210ull;
-  memory.write32(0x10E0, 0x4BE1137Du); // vsqi.xyzw vf2,(vi1++)
-  memory.write32(0x10E4, 0x0000000Du);
+  memory.write32(0x10F0, 0x4BE1137Du); // vsqi.xyzw vf2,(vi1++)
+  memory.write32(0x10F4, 0x0000000Du);
   check(cpu.run(4) == ps2vita::StopReason::Break, "VU0 VSQI executes");
   check(memory.read32(ps2vita::Memory::kVu0DataBase + 16u) == 0x89ABCDEFu &&
         memory.read32(ps2vita::Memory::kVu0DataBase + 28u) == 0xFEDCBA98u &&
@@ -1260,6 +2762,1388 @@ void test_quarter_scale_gs() {
   gs.line({0, 0, 0, 0xFFFFFFFFu}, {159, 111, 0, 0xFFFFFFFFu});
   check(gs.pixel(0, 0) == 0xFFFFFFFFu && gs.pixel(159, 111) == 0xFFFFFFFFu,
         "GS line includes endpoints");
+}
+
+void test_gif_normal_dma_completion() {
+  ps2vita::Memory memory;
+  for (std::uint32_t byte = 0; byte < 32u; ++byte)
+    memory.write8(0x2000u + byte, static_cast<std::uint8_t>(0x80u + byte));
+  memory.write32(0x1000A010u, 0x2000u);
+  memory.write32(0x1000A020u, 2u);
+  memory.write32(0x1000A000u, 0x101u);
+
+  memory.advance(1u); // Discover the armed normal-mode transfer.
+  memory.advance(15u);
+  check((memory.read32(0x1000A000u) & 0x100u) != 0u,
+        "GIF DMA remains active before its QWC deadline");
+  memory.advance(1u);
+
+  std::vector<std::uint8_t> packet;
+  const bool queued = memory.pop_gif_packet(packet);
+  bool payload_matches = queued && packet.size() == 32u;
+  for (std::uint32_t byte = 0; payload_matches && byte < 32u; ++byte)
+    payload_matches = packet[byte] == static_cast<std::uint8_t>(0x80u + byte);
+  check(payload_matches, "GIF DMA queues an exact snapshot of its payload");
+  check(memory.read32(0x1000A010u) == 0x2020u &&
+        memory.read32(0x1000A020u) == 0u &&
+        (memory.read32(0x1000A000u) & 0x100u) == 0u &&
+        (memory.read32(0x1000E010u) & (1u << 2)) != 0u,
+        "GIF DMA retires registers and raises channel 2 completion");
+  check(!memory.pop_gif_packet(packet),
+        "GIF DMA completion payload is consumed exactly once");
+}
+
+void test_vif1_source_chain_completion() {
+  ps2vita::Memory memory;
+  // CNT with one inline qword, followed by END with one inline qword. TTE
+  // contributes each tag's upper 64 bits to the VIF command stream.
+  memory.write64(0x2000u, 0x10000001ull);
+  memory.write64(0x2008u, 0x1111222233334444ull);
+  memory.write64(0x2010u, 0xAAAABBBBCCCCDDDDull);
+  memory.write64(0x2018u, 0x0123456789ABCDEFull);
+  memory.write64(0x2020u, 0x70000001ull);
+  memory.write64(0x2028u, 0x5555666677778888ull);
+  memory.write64(0x2030u, 0x1020304050607080ull);
+  memory.write64(0x2038u, 0xFFEEDDCCBBAA0099ull);
+  memory.write32(0x10009030u, 0x2000u);
+  memory.write32(0x10009000u, 0x145u);
+
+  memory.advance(1u);
+  memory.advance(15u);
+  check((memory.read32(0x10009000u) & 0x100u) != 0u,
+        "VIF1 source chain remains active before its QWC deadline");
+  memory.advance(1u);
+  std::vector<std::uint8_t> packet;
+  check(memory.pop_vif1_packet(packet) && packet.size() == 48u,
+        "VIF1 source chain queues TTE tag data and inline payloads");
+  const auto& spans = memory.vif_dma_spans();
+  check(spans.size() == 4u && spans[0].source == 0x2008u &&
+        spans[0].stream_offset == 0u && spans[0].bytes == 8u &&
+        spans[1].source == 0x2010u && spans[1].stream_offset == 8u &&
+        spans[1].bytes == 16u && spans[2].source == 0x2028u &&
+        spans[2].stream_offset == 24u && spans[3].source == 0x2030u &&
+        spans[3].stream_offset == 32u,
+        "VIF provenance maps inline payload and TTE bytes without offset gaps");
+  check(memory.read32(0x10009030u) == 0x2040u &&
+        memory.read32(0x10009020u) == 0u &&
+        (memory.read32(0x10009000u) & 0x100u) == 0u &&
+        (memory.read32(0x1000E010u) & (1u << 1)) != 0u,
+        "VIF1 source chain retires and raises DMAC channel 1 completion");
+  std::uint64_t first = 0;
+  std::uint64_t second_tag = 0;
+  std::memcpy(&first, packet.data(), sizeof(first));
+  std::memcpy(&second_tag, packet.data() + 24u, sizeof(second_tag));
+  check(first == 0x1111222233334444ull &&
+        second_tag == 0x5555666677778888ull,
+        "VIF1 TTE data is interleaved at each source-chain boundary");
+  memory.clear();
+  check(memory.vif_dma_spans().empty(), "Memory reset clears VIF source mapping");
+  memory.write64(0x2000u, (0x3000ull << 32) | 1u); // REFE, one external qword.
+  memory.write32(0x10009030u, 0x2000u);
+  memory.write32(0x10009000u, 0x105u); // No TTE.
+  memory.advance(1u);
+  memory.advance(8u);
+  check(memory.vif_dma_spans().size() == 1u &&
+        memory.vif_dma_spans()[0].source == 0x3000u &&
+        memory.vif_dma_spans()[0].stream_offset == 0u &&
+        memory.vif_dma_spans()[0].bytes == 16u,
+        "VIF source mapping records referenced payload without TTE");
+}
+
+void test_vif1_mpg_upload() {
+  constexpr std::array<std::uint32_t, 5> words{{
+      0x00000000u, 0x01000404u, 0x4A010002u,
+      0x89ABCDEFu, 0x01234567u,
+  }};
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(words.data()),
+                   sizeof(words)) &&
+        vif.micro_instructions_loaded() == 1u && vif.cycle() == 0x0404u,
+        "VIF1 frontend accepts STCYCL followed by a one-instruction MPG upload");
+  check(memory.read32(ps2vita::Memory::kVu1MicroBase + 16u) == 0x89ABCDEFu &&
+        memory.read32(ps2vita::Memory::kVu1MicroBase + 20u) == 0x01234567u,
+        "VIF1 MPG writes both halves of a VU1 microinstruction");
+}
+
+void test_vif1_v4_32_unpack() {
+  constexpr std::array<std::uint32_t, 10> words{{
+      0x01000404u, 0x6C020001u,
+      0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u,
+      0xAAAAAAA1u, 0xAAAAAAA2u, 0xAAAAAAA3u, 0xAAAAAAA4u,
+  }};
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(words.data()),
+                   sizeof(words)) && vif.vectors_unpacked() == 2u,
+        "VIF1 frontend accepts contiguous V4-32 UNPACK data");
+  check(memory.read32(ps2vita::Memory::kVu1DataBase + 16u) == 0x11111111u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 44u) == 0xAAAAAAA4u,
+        "VIF1 V4-32 UNPACK writes complete vectors at the encoded address");
+}
+
+void test_vif_provenance() {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  const std::array<std::uint32_t, 9> unpack{{0x6C0203FFu, 1, 2, 3, 4, 5, 6, 7, 8}};
+  const auto submit = [&]() { return vif.submit(
+      reinterpret_cast<const std::uint8_t*>(unpack.data()), sizeof(unpack)); };
+  check(submit() && vif.unpack_records().empty(), "VIF provenance disabled by default");
+  vif.enable_provenance_trace(true);
+  check(submit() && vif.unpack_records().size() == 8, "VIF traces complete unpack words");
+  const auto& first = vif.unpack_records().front();
+  const auto& last = vif.unpack_records().back();
+  check(first.packet == 2 && first.pair == 0 && first.source_offset == 4 &&
+        first.address == 0x3FF0 && first.value == 1 && last.address == 12 &&
+        last.source_offset == 32 && last.value == 8,
+        "VIF provenance records source offsets and wrapped destinations");
+  memory.write32(ps2vita::Memory::kVu1DataBase + 12, 99);
+  check(vif.unpack_records().back().value == 8, "VIF provenance owns original input values");
+  for (unsigned i = 0; i < 512; ++i) submit();
+  check(vif.unpack_records().size() == 4096 && vif.dropped_unpack_records() == 8,
+        "VIF unpack provenance is bounded with explicit truncation count");
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4, 0x400002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12, 0x2FFu);
+  const std::array<std::uint32_t, 2> run{{0, 0x14000000u}};
+  for (unsigned i = 0; i < 129; ++i)
+    check(vif.submit(reinterpret_cast<const std::uint8_t*>(run.data()), sizeof(run)),
+          "VIF run provenance fixture completes");
+  check(vif.run_records().size() == 128 && vif.dropped_run_records() == 1,
+        "VIF run provenance is bounded");
+  const auto& r = vif.run_records().front();
+  check(r.command_offset == 4 && r.command == 0x14000000u && r.first_pair == 0 &&
+        r.end_pair == 2 && r.start_pc == 0 && r.end_pc == 16 &&
+        r.rejected_before == 0 && r.rejected_after == 0,
+        "VIF run provenance brackets actual VU execution");
+  vif.enable_provenance_trace(false); submit();
+  check(vif.dropped_unpack_records() == 8, "Disabled VIF provenance stops recording");
+  vif.reset();
+  check(vif.unpack_records().empty() && vif.run_records().empty() &&
+        vif.dropped_unpack_records() == 0 && vif.dropped_run_records() == 0,
+        "VIF reset clears provenance and truncation counters");
+}
+
+void test_vif_causal_input() {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  auto& vu = vif.vu1();
+  vu.enable_causal_trace(true);
+  std::array<std::uint32_t, 5> upload{{0x6C0103FFu, 64u, 0, 0, 0}};
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()), sizeof(upload)),
+        "Causal VIF input fixture uploads");
+  check(vu.causes().size() == 4 && vu.causes()[0].packet == 1 &&
+        vu.causes()[0].source_offset == 4 && vu.causes()[0].address == 0x3FF0 &&
+        vu.causes()[0].pc == 0xFFFF && vu.causes()[0].incomplete,
+        "VIF causal input owns stream origin without inventing a VU PC or EE ancestry");
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  const std::array<std::uint32_t, 5> lower{{
+      (15u << 21) | (12u << 16) | (2u << 11),
+      0x81E3637Du, 0x800026FCu, 0x8000033Cu, 0x8000033Cu}};
+  for (unsigned i = 0; i < lower.size(); ++i) {
+    memory.write32(micro + 8 * i, lower[i]);
+    memory.write32(micro + 8 * i + 4, i == 3 ? 0x400002FFu : 0x2FFu);
+  }
+  vu.state().vi[2] = 0x3FF; vu.state().vi[3] = vu.state().vi[4] = 0x10;
+  vu.start(0); vu.run(5);
+  const auto root = vu.rejected_causes()[0];
+  check(root != 0, "Uploaded input reaches rejected tag through load and store");
+  if (root) {
+    const auto load = vu.causes()[root - 1].parents[0];
+    check(load != 0 && vu.causes()[load - 1].parents[0] == 1,
+          "Rejected tag slice reaches original VIF input generation");
+  }
+  upload[1] = 65;
+  vif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()), sizeof(upload));
+  check(vu.causes()[0].value == 64 && vu.causes().back().packet == 2 &&
+        vu.rejected_causes()[0] == root,
+        "Later VIF upload preserves immutable earlier input and rejected roots");
+}
+
+void test_vu1_captured_prologue() {
+  ps2vita::Memory memory;
+  constexpr std::array<std::uint32_t, 5> lower{{
+      0x10010000u, 0x10020004u, 0x10030016u, 0x420F00C5u,
+      0x8000033Cu,
+  }};
+  for (std::size_t index = 0; index < lower.size(); ++index) {
+    memory.write32(ps2vita::Memory::kVu1MicroBase +
+                   static_cast<std::uint32_t>(index * 8u), lower[index]);
+    memory.write32(ps2vita::Memory::kVu1MicroBase +
+                   static_cast<std::uint32_t>(index * 8u + 4u), 0x000002FFu);
+  }
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 0x648u, 0x81E8137Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 0x64Cu, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1DataBase + 4u * 16u, 0xDEADBEEFu);
+
+  ps2vita::Vu1 vu(memory);
+  vu.start(0u);
+  vu.run(6u);
+  check(vu.state().vi[1] == 0u && vu.state().vi[2] == 5u &&
+        vu.state().vi[3] == 0x16u && vu.state().vi[15] == 5u,
+        "VU1 executes captured IADDIU/BAL prologue and its delay slot");
+  check(vu.state().vf[8][0] == 0xDEADBEEFu && vu.state().pc == 0x650u,
+        "VU1 BAL reaches the captured routine and LQI loads masked data");
+}
+
+void test_vu1_captured_matrix_pair() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01E821BCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x01E828BDu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 16u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 20u, 0x01E830BEu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 24u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 28u, 0x01E83B0Bu);
+
+  ps2vita::Vu1 vu(memory);
+  auto& state = vu.state();
+  state.vf[4] = {{0x3F800000u, 0x40000000u, 0x40400000u, 0x40800000u}};
+  state.vf[5] = state.vf[4];
+  state.vf[6] = state.vf[4];
+  state.vf[7] = state.vf[4];
+  state.vf[8] = {{0x40000000u, 0x40400000u, 0x40800000u, 0x3F800000u}};
+  vu.start(0u);
+  vu.run(4u);
+  check(vu.pairs_executed() == 4u &&
+        state.vf[12][0] == 0x41200000u && // 1*2 + 1*3 + 1*4 + 1*1
+        state.vf[12][3] == 0x42200000u,   // 4*2 + 4*3 + 4*4 + 4*1
+        "VU1 executes the captured MULAx/MADDAy/MADDAz/MADDw dot product");
+}
+
+void test_vu1_vector_scoreboard() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  memory.write32(micro, 0x8000033Cu); memory.write32(micro + 8, 0x8000033Cu);
+  memory.write32(micro + 4, (8u << 21) | (1u << 6) | 0x28u); // ADD.x VF1,VF0,VF0
+  memory.write32(micro + 12, (4u << 21) | (1u << 11) | (2u << 6) | 0x28u);
+  vu.start(0); vu.run(2);
+  check(vu.cycles_executed() == 2 && vu.vf_stall_cycles() == 0,
+        "VU1 scoreboard does not stall disjoint vector lanes");
+  vu.reset();
+  memory.write32(micro + 12, (8u << 21) | (1u << 11) | (2u << 6) | 0x28u);
+  vu.start(0); vu.run(2);
+  check(vu.cycles_executed() == 5 && vu.vf_stall_cycles() == 3 && vu.pairs_executed() == 2,
+        "VU1 dependent vector read waits four-cycle result latency");
+  vu.reset();
+  memory.write32(micro + 8, (1u << 25) | (8u << 21) | (1u << 11)); // SQ.x VF1,0(VI0)
+  memory.write32(micro + 12, 0x2FF);
+  vu.start(0); vu.run(2);
+  check(vu.cycles_executed() == 5 && vu.vf_stall_cycles() == 3,
+        "VU1 lower stores participate in vector dependency stalls");
+}
+
+void test_vu1_pair_dependencies() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  const auto data = ps2vita::Memory::kVu1DataBase + 7u * 16u;
+  vu.state().vi[3] = 7;
+  vu.state().vf[12] = {{0x3F800000u, 0x40000000u, 0x40400000u, 0x40800000u}};
+  vu.state().vf[1].fill(0x3F800000u);
+  memory.write32(micro, 0x81E3637Du); // SQI VF12,(VI3++)
+  memory.write32(micro + 4, 0x01E00000u | (1u << 16) | (12u << 11) | (12u << 6) | 0x28u);
+  vu.start(0); vu.run(1);
+  check(memory.read32(data) == 0x3F800000u && memory.read32(data + 12) == 0x40800000u &&
+        vu.state().vf[12][0] == 0x40000000u && vu.state().vf[12][3] == 0x40A00000u &&
+        vu.state().vi[3] == 8, "VU1 lower store reads pre-pair VF while upper result commits");
+  vu.state().vi[3] = 7;
+  memory.write32(micro, 0x81E00000u | (12u << 16) | (3u << 11) | (0xDu << 6) | 0x3Cu);
+  vu.start(0); vu.run(1);
+  check(vu.state().vf[12][0] == 0x40400000u && vu.state().vi[3] == 7,
+        "VU1 upper VF write discards conflicting LQI including address increment");
+  memory.write32(micro, 0x81E00000u | (13u << 16) | (3u << 11) | (0xDu << 6) | 0x3Cu);
+  vu.start(0); vu.run(1);
+  check(vu.state().vf[12][0] == 0x40800000u && vu.state().vf[13][0] == 0x3F800000u &&
+        vu.state().vi[3] == 8, "VU1 disjoint upper/lower VF writes both commit");
+}
+
+void test_vu1_sqi() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x81E3637Du);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  ps2vita::Vu1 vu(memory);
+  vu.enable_store_trace(true);
+  vu.state().vi[3] = 7u;
+  vu.state().vf[12] = {{1u, 2u, 3u, 4u}};
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vi[3] == 8u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 7u * 16u) == 1u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 7u * 16u + 12u) == 4u,
+        "VU1 SQI stores selected lanes and increments its address register");
+  check(vu.store_records().size() == 4 && vu.store_records()[0].pair == 0 &&
+        vu.store_records()[0].pc == 0 && vu.store_records()[0].address == 0x70 &&
+        vu.store_records()[0].value == 1 && vu.dropped_store_records() == 0,
+        "VU1 store trace records issue pair, PC, wrapped address and value");
+  vu.reset();
+  check(vu.store_records().empty() && vu.dropped_store_records() == 0,
+        "VU1 reset clears store provenance");
+  for (unsigned pair = 0; pair < 1025; ++pair) { vu.start(0); vu.run(1); }
+  check(vu.store_records().size() == 4096 && vu.dropped_store_records() == 4,
+        "VU1 store trace is bounded and reports truncation");
+  vu.enable_store_trace(false); vu.start(0); vu.run(1);
+  check(vu.dropped_store_records() == 4, "VU1 disabled store trace stays unchanged");
+}
+
+void test_vu1_causal_slice() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  const std::array<std::uint32_t, 6> lower{{0x8000033Cu, 0x8000033Cu,
+      0x81E3637Du, 0x800016FCu, 0x8000033Cu, 0x8000033Cu}};
+  const std::array<std::uint32_t, 6> upper{{
+      (15u << 21) | (2u << 16) | (1u << 11) | (3u << 6) | 0x28u,
+      (15u << 21) | (12u << 16) | (3u << 11) | (5u << 6) | 0x3Du,
+      0x2FFu, 0x2FFu, 0x400002FFu, 0x2FFu}};
+  for (unsigned i = 0; i < lower.size(); ++i) {
+    memory.write32(micro + i * 8, lower[i]); memory.write32(micro + i * 8 + 4, upper[i]);
+  }
+  vu.enable_causal_trace(true);
+  vu.state().vf[1][0] = vu.state().vf[2][0] = 0x40000000u;
+  vu.state().vi[2] = vu.state().vi[3] = 0x10;
+  vu.start(0); vu.run(6);
+  const auto root = vu.rejected_causes()[0];
+  check(vu.path1_tags_rejected() == 1 && root != 0 && vu.dropped_causes() == 0,
+        "Causal debugger preserves rejected tag's store generation");
+  if (root) {
+    const auto& store = vu.causes()[root - 1];
+    check(store.kind == ps2vita::VuCauseRecord::Kind::Store && store.pc == 16 &&
+          store.address == 0x100 && store.reg == 12 && store.value == 64 && store.mask == 15,
+          "Tag cause identifies source VF lane, instruction, mask and value");
+    check(store.parents[0] != 0, "Tag store links to VF producer");
+    if (store.parents[0]) {
+      const auto& convert = vu.causes()[store.parents[0] - 1];
+      check(convert.pc == 8 && convert.parents[0] != 0,
+            "Causal slice walks backward through conversion");
+      if (convert.parents[0]) {
+        const auto& add = vu.causes()[convert.parents[0] - 1];
+        check(add.pc == 0 && add.incomplete, "Causal slice stops explicitly at unknown initial inputs");
+      }
+    }
+    vu.invalidate_data_cause(ps2vita::Memory::kVu1DataBase + 0x100);
+    check(vu.rejected_causes()[0] == root, "Rejected cause snapshot survives later memory invalidation");
+  }
+  vu.reset();
+  check(vu.causes().empty() && vu.rejected_causes()[0] == 0, "VU reset clears causal generations");
+  vu.state().vf[1][0] = vu.state().vf[2][0] = 0x40000000u;
+  vu.state().vi[2] = vu.state().vi[3] = 0x10;
+  vu.start(0); vu.run(3);
+  vu.invalidate_data_cause(ps2vita::Memory::kVu1DataBase + 0x100);
+  vu.run(3);
+  check(vu.path1_tags_rejected() == 1 && vu.rejected_causes()[0] == 0,
+        "External data write invalidation prevents attributing stale VU ownership");
+  vu.reset();
+  vu.state().vf[1][0] = vu.state().vf[2][0] = 0x40000000u;
+  vu.state().vi[2] = vu.state().vi[3] = 0x10;
+  vu.start(0); vu.run(3);
+  // Bypass the observer deliberately, modifying only one byte of the tag.
+  memory.write8(ps2vita::Memory::kVu1DataBase + 0x100, 65);
+  vu.run(3);
+  check(vu.path1_tags_rejected() == 1 && vu.first_rejected_tag() == 65 &&
+        vu.rejected_causes()[0] == 0 && vu.rejected_causes()[1] != 0,
+        "Rejected tag drops mismatched byte ancestry while retaining unchanged lanes");
+  memory.write8(ps2vita::Memory::kVu1DataBase + 0x100, 64);
+  check(vu.rejected_causes()[0] == 0,
+        "Later tag restoration does not rewrite frozen rejection ancestry");
+  vu.reset();
+  memory.write32(micro, 0x8000033Cu);
+  memory.write32(micro + 4, (8u << 21) | (2u << 16) | (1u << 11) | (3u << 6) | 0x28u);
+  for (unsigned i = 0; i < 8200; ++i) { vu.start(0); vu.run(1); }
+  check(vu.causes().size() == 8192 && vu.dropped_causes() == 8,
+        "Causal storage is bounded without reusing generation IDs");
+  vu.enable_causal_trace(false); vu.start(0); vu.run(1);
+  check(vu.causes().empty(), "Disabled causal tracing has no retained or new nodes");
+  vu.reset(); vu.enable_causal_trace(true);
+  memory.write32(micro, 0x81E3637Du);
+  memory.write32(micro + 4, (8u << 21) | (2u << 16) | (12u << 11) | (12u << 6) | 0x28u);
+  vu.state().vf[12][0] = vu.state().vf[2][0] = 0x3F800000u;
+  vu.start(0); vu.run(1);
+  check(vu.causes().size() == 5 && vu.causes()[1].kind == ps2vita::VuCauseRecord::Kind::Store &&
+        vu.causes()[1].value == 0x3F800000u && vu.causes()[1].parents[0] == 0,
+        "Same-pair SQI ancestry uses old VF, not the paired upper producer");
+}
+
+void test_vu1_causal_memory_loads() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  for (bool increment : {false, true}) {
+    for (unsigned external = 0; external < 3; ++external) {
+      vu.reset(); vu.enable_causal_trace(true);
+      const auto load = increment ?
+          0x8000037Cu | (15u << 21) | (13u << 16) | (2u << 11) :
+          (15u << 21) | (13u << 16) | (2u << 11) | 0x7FFu;
+      const std::array<std::uint32_t, 6> lower{{
+          0x81E3637Du, load, 0x81E36B7Du, 0x800026FCu, 0x8000033Cu, 0x8000033Cu}};
+      for (unsigned i = 0; i < lower.size(); ++i) {
+        memory.write32(micro + 8 * i, lower[i]);
+        memory.write32(micro + 8 * i + 4, i == 4 ? 0x400002FFu : 0x2FFu);
+      }
+      vu.state().vf[12][0] = 64;
+      vu.state().vi[2] = increment ? 0x10 : 0x11;
+      vu.state().vi[3] = 0x10; vu.state().vi[4] = 0x11;
+      vu.start(0); vu.run(1);
+      if (external == 1) vu.invalidate_data_cause(ps2vita::Memory::kVu1DataBase + 0x100);
+      if (external == 2) memory.write32(ps2vita::Memory::kVu1DataBase + 0x100, 65);
+      vu.run(5);
+      const auto root = vu.rejected_causes()[0];
+      check(root != 0, "Memory-load causal fixture reaches rejected tag");
+      if (!root) continue;
+      const auto parent = vu.causes()[root - 1].parents[0];
+      check(parent != 0, "SQI links to preceding loaded VF value");
+      if (!parent) continue;
+      const auto& load_record = vu.causes()[parent - 1];
+      check(load_record.kind == ps2vita::VuCauseRecord::Kind::MemoryLoad &&
+            load_record.address == 0x100 && load_record.pc == 8,
+            "LQ signed offset and LQI pre-increment use the consumed address");
+      if (external == 0) {
+        check(load_record.parents[0] == 1 && !load_record.incomplete &&
+              vu.causes()[0].kind == ps2vita::VuCauseRecord::Kind::Store,
+              "Load slice follows the earlier memory store generation");
+      } else {
+        check(load_record.parents[0] == 0 && load_record.incomplete,
+              "Invalidated or mismatched memory input is not assigned stale ancestry");
+      }
+    }
+  }
+}
+
+void test_vu1_xgkick_packet() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800016FCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x400002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x2FFu);
+  const auto packet_address = ps2vita::Memory::kVu1DataBase + 4u * 16u;
+  memory.write64(packet_address, (1ull << 60) | (1ull << 15) | 1ull);
+  memory.write64(packet_address + 8u, 0xEull);
+  memory.write64(packet_address + 16u, 0x0123456789ABCDEFull);
+  memory.write64(packet_address + 24u, 0xFEDCBA9876543210ull);
+
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[2] = 4u;
+  vu.start(0u);
+  vu.run(1u);
+  std::vector<std::uint8_t> packet;
+  check(vu.path1_active() && !vu.pop_path1_packet(packet),
+        "VU1 XGKICK does not snapshot the packet on issue");
+  vu.run(1u);
+  std::uint64_t payload = 0;
+  check(vu.pop_path1_packet(packet) && packet.size() == 32u,
+        "VU1 program end drains one complete EOP GIF packet");
+  if (packet.size() == 32u) std::memcpy(&payload, packet.data() + 16u, 8u);
+  check(payload == 0x0123456789ABCDEFull,
+        "VU1 XGKICK preserves path-1 GIF payload bytes");
+  const auto oversized = (1ull << 60) | (1ull << 15) | 0x400ull;
+  memory.write64(packet_address, oversized);
+  vu.start(0u);
+  vu.run(2u);
+  check(vu.path1_tags_rejected() == 1u && vu.first_rejected_tag() == oversized &&
+        vu.first_rejected_address() == 64u,
+        "XGKICK records the exact tag and address exceeding its capture limit");
+  vu.reset();
+  memory.write64(packet_address, 1ull << 60); // Empty non-EOP tag.
+  memory.write64(packet_address + 16u, oversized);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x800016FCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x400002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 16u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 20u, 0x2FFu);
+  vu.state().vi[2] = 4u;
+  vu.start(8u);
+  vu.run(2u);
+  check(vu.first_rejected_address() == 80u && vu.first_rejected_kick_start() == 64u &&
+        vu.first_rejected_tag_index() == 1u && vu.first_rejected_pc() == 8u &&
+        vu.first_rejected_previous_tag() == (1ull << 60),
+        "XGKICK rejection distinguishes kick origin from later chain tag");
+  memory.write64(packet_address, 0u);
+  check(vu.first_rejected_data()[1] == 0x10000000u &&
+        vu.first_rejected_data()[4] == static_cast<std::uint32_t>(oversized),
+        "Rejected packet snapshot survives later VU data writes");
+  vu.reset();
+  check(vu.first_rejected_kick_start() == 0u && vu.first_rejected_previous_tag() == 0u,
+        "VU reset clears rejection provenance");
+
+  // Transfer a wrapped packet while its producer modifies unread RAM. The
+  // already-read header must remain immutable, but payload is sampled later.
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  const auto data = ps2vita::Memory::kVu1DataBase;
+  for (unsigned pair = 0; pair < 8; ++pair) {
+    memory.write32(micro + pair * 8, 0x8000033Cu);
+    memory.write32(micro + pair * 8 + 4, 0x2FFu);
+  }
+  memory.write32(micro, 0x800016FCu);
+  memory.write64(data + 0x3FF0, (1ull << 60) | 0x8001u);
+  memory.write64(data + 0x3FF8, 0xE);
+  memory.write64(data, 0x1111u);
+  vu.state().vi[2] = 0x3FF;
+  vu.start(0); vu.run(3);
+  check(vu.path1_active() && !vu.pop_path1_packet(packet),
+        "XGKICK two-cycle reads leave payload pending after header");
+  memory.write64(data + 0x3FF0, oversized);
+  memory.write64(data, 0x2222u);
+  vu.run(2);
+  check(!vu.path1_active() && vu.pop_path1_packet(packet) && packet.size() == 32,
+        "XGKICK wraps data RAM and completes without program termination");
+  payload = 0;
+  if (packet.size() == 32) std::memcpy(&payload, packet.data() + 16, 8);
+  check(payload == 0x2222u && packet.size() == 32 && packet[0] == 1 && vu.path1_tags_rejected() == 0,
+        "XGKICK samples late payload writes but retains consumed header");
+  vu.start(0); vu.run(1);
+  vu.reset(); vu.start(8); vu.run(6);
+  check(!vu.path1_active() && !vu.pop_path1_packet(packet),
+        "VU reset cancels pending XGKICK without leaking packets");
+
+  vu.reset();
+  memory.write32(micro + 8, 0x800016FCu); // A second kick drains the first.
+  memory.write64(data + 64, (1ull << 60) | 0x8001u);
+  memory.write64(data + 72, 0xE);
+  memory.write64(data + 80, 0x3333u);
+  vu.state().vi[2] = 4;
+  vu.start(0); vu.run(2);
+  check(vu.pop_path1_packet(packet) && vu.path1_active() && vu.xgkick_stall_cycles() == 3,
+        "Second XGKICK drains prior transfer before starting a new one");
+  memory.write64(data + 80, 0x4444u);
+  vu.run(4);
+  check(vu.pop_path1_packet(packet) && !vu.path1_active(),
+        "Second XGKICK completes its own transfer");
+  payload = 0;
+  if (packet.size() == 32) std::memcpy(&payload, packet.data() + 16, 8);
+  check(payload == 0x4444u, "Second XGKICK samples its own later payload");
+
+  vu.reset();
+  memory.write32(micro + 8, 0x8000033Cu);
+  memory.write64(data + 64, 1ull << 60); // Empty tag, next header not ready yet.
+  memory.write64(data + 80, oversized);
+  vu.state().vi[2] = 4;
+  vu.start(0); vu.run(3);
+  check(vu.pop_path1_packet(packet) && packet.size() == 16 && vu.path1_active(),
+        "XGKICK emits empty non-EOP tag without reading the next header early");
+  memory.write64(data + 80, 0x8000u); // Producer supplies an empty EOP header.
+  vu.run(2);
+  check(vu.pop_path1_packet(packet) && packet.size() == 16 &&
+        !vu.path1_active() && vu.path1_tags_rejected() == 0,
+        "XGKICK reads chained headers at transfer time");
+
+  vu.reset();
+  memory.write64(data + 64, (1ull << 60) | 0x8001u);
+  memory.write64(data + 80, 0);
+  memory.write32(micro + 16, 0x81E3637Du); // SQI vf12,(vi3++) after header read.
+  vu.state().vi[2] = 4;
+  vu.state().vi[3] = 5;
+  vu.state().vf[12] = {{0x1234u, 0, 0, 0}};
+  vu.start(0); vu.run(5);
+  check(vu.pop_path1_packet(packet) && packet.size() == 32,
+        "XGKICK completes concurrently with guest SQI producer");
+  payload = 0;
+  if (packet.size() == 32) std::memcpy(&payload, packet.data() + 16, 8);
+  check(payload == 0x1234u && vu.state().vi[3] == 6,
+        "XGKICK payload includes guest store issued after kick");
+
+  vu.reset();
+  memory.write32(micro + 4, 0x400002FFu);
+  memory.write32(micro + 8, 0x8000033Cu);
+  for (unsigned qword = 0; qword <= 256; ++qword)
+    memory.write64(data + qword * 16, 0); // Unterminated empty-tag chain.
+  vu.start(0); vu.run(2);
+  check(!vu.path1_active() && vu.path1_tags_queued() == 256 &&
+        vu.path1_tags_rejected() == 1 && vu.first_rejected_tag_index() == 256,
+        "Unterminated XGKICK remains bounded during end drain");
+}
+
+void test_vif1_scratchpad_dma() {
+  for (unsigned mode = 0; mode < 3u; ++mode) {
+    ps2vita::Memory memory;
+    const auto scratch = ps2vita::Memory::kScratchBase;
+    const auto tag = mode == 0u ? scratch + 0x100u :
+        mode == 2u ? scratch + 0x3FF0u : 0x2000u;
+    const auto payload = mode == 0u ? scratch + 0x110u : scratch;
+    memory.write64(tag, mode == 1u ? (0x80000000ull << 32) | 1u : 0x70000001u);
+    memory.write64(payload, 0x1122334455667788ull);
+    memory.write64(payload + 8u, 0x99AABBCCDDEEFF00ull);
+    memory.write32(0x10009030u, mode == 0u ? 0x80000100u :
+        mode == 2u ? 0x80003FF0u : 0x2000u);
+    memory.write32(0x10009000u, 0x105u);
+    memory.advance(1u);
+    memory.advance(8u);
+    std::vector<std::uint8_t> packet;
+    std::uint64_t first = 0;
+    std::uint64_t second = 0;
+    if (memory.pop_vif1_packet(packet) && packet.size() == 16u) {
+      std::memcpy(&first, packet.data(), sizeof(first));
+      std::memcpy(&second, packet.data() + 8u, sizeof(second));
+    }
+    check(first == 0x1122334455667788ull && second == 0x99AABBCCDDEEFF00ull,
+          "VIF DMA SPR selects scratchpad for tags, references and wrapped inline data");
+    check(!memory.vif_dma_spans().empty() && memory.vif_dma_spans()[0].source == payload,
+          "VIF scratchpad source spans report CPU-visible scratchpad addresses");
+    check((memory.read32(0x10009010u) & 0x80000000u) != 0u &&
+          (memory.read32(0x10009000u) & 0x100u) == 0u,
+          "VIF scratchpad completion preserves MADR SPR bit and clears STR");
+  }
+  ps2vita::Memory memory;
+  const auto scratch = ps2vita::Memory::kScratchBase;
+  memory.write64(0x2000u, (0x80003FF0ull << 32) | 0x20000000u); // NEXT to SPR.
+  memory.write64(scratch + 0x3FF0u, 0x70000001u); // END, wrapped inline qword.
+  memory.write64(0x2008u, 0x1111111111111111ull);
+  memory.write64(scratch + 0x3FF8u, 0x2222222222222222ull);
+  memory.write64(scratch, 0x3333333333333333ull);
+  memory.write64(scratch + 8u, 0x4444444444444444ull);
+  memory.write32(0x10009030u, 0x2000u);
+  memory.write32(0x10009000u, 0x145u); // TTE.
+  memory.advance(1u);
+  memory.advance(8u);
+  std::vector<std::uint8_t> packet;
+  std::array<std::uint64_t, 4> actual{};
+  if (memory.pop_vif1_packet(packet) && packet.size() == sizeof(actual))
+    std::memcpy(actual.data(), packet.data(), sizeof(actual));
+  check(actual == std::array<std::uint64_t, 4>{{0x1111111111111111ull,
+        0x2222222222222222ull, 0x3333333333333333ull, 0x4444444444444444ull}},
+        "VIF NEXT preserves SPR target and interleaves RAM/scratchpad TTE data");
+}
+
+void test_vu1_end_and_resume() {
+  ps2vita::Memory memory;
+  for (unsigned pair = 0; pair < 3u; ++pair) {
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pair * 8u, 0x8000033Cu);
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pair * 8u + 4u,
+                   pair == 0u ? 0x400002FFu : 0x000002FFu);
+  }
+  ps2vita::Vu1 vu(memory);
+  vu.start(0u);
+  vu.run(10u);
+  check(!vu.running() && vu.pairs_executed() == 2u && vu.state().pc == 0x10u,
+        "VU1 E bit stops after exactly one delay pair");
+  vu.resume();
+  vu.run(1u);
+  check(vu.running() && vu.pairs_executed() == 3u && vu.state().pc == 0x18u,
+        "VU1 MSCNT-style resume continues at the retained TPC");
+  // Minimal captured termination/resume sequence (not the BIOS program).
+  for (unsigned pc = 0x2F8u; pc <= 0x310u; pc += 8u) {
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pc,
+                   pc == 0x308u ? 0x400007BFu : 0x8000033Cu);
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pc + 4u,
+                   pc == 0x2F8u ? 0x400002FFu : 0x000002FFu);
+  }
+  vu.reset(); vu.start(0x2F8u); vu.run(2000000u);
+  check(!vu.running() && vu.pairs_executed() == 2u && vu.state().pc == 0x308u,
+        "Captured E-bit tail terminates at 0308 without exhausting run budget");
+  vu.resume(); vu.run(2u);
+  check(vu.running() && vu.pairs_executed() == 4u && vu.state().pc == 0x108u,
+        "Captured MSCNT entry branches back to 0108 after its delay pair");
+}
+
+void test_vu1_mtir_xtop() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8001FBFCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x800106BCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[31][0] = 0x12345678u;
+  vu.set_top(0x155u);
+  vu.start(0u);
+  vu.run(2u);
+  check(vu.state().vi[1] == 0x155u && vu.pairs_executed() == 2u,
+        "VU1 MTIR and XTOP feed the captured continuation integer register");
+}
+
+void test_vu1_integer_branch_and_load() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x52010001u); // ibne vi1,vi0,+1
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 16u, 0x810A0BFEu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 20u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1DataBase + 3u * 16u, 0x1234ABCDu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[1] = 3u;
+  vu.start(0u);
+  vu.run(3u);
+  check(vu.state().pc == 0x18u && vu.state().vi[10] == 0xABCDu,
+        "VU1 IBNE executes its delay pair then reaches masked ILWR");
+}
+
+void test_vu1_lq_sq() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x01EF0800u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x03E27800u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  for (unsigned lane = 0; lane < 4u; ++lane)
+    memory.write32(ps2vita::Memory::kVu1DataBase + 5u * 16u + lane * 4u,
+                   0xA0u + lane);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[1] = 5u;
+  vu.state().vi[2] = 9u;
+  vu.start(0u);
+  vu.run(2u);
+  check(memory.read32(ps2vita::Memory::kVu1DataBase + 9u * 16u) == 0xA0u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 9u * 16u + 12u) == 0xA3u,
+        "VU1 captured LQ/SQ pair copies all selected lanes between qwords");
+}
+
+void test_vu1_q_latency() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  memory.write32(micro, 0x81F803BCu); memory.write32(micro + 4, 0x2FFu);
+  memory.write32(micro + 8, 0x8000033Cu);
+  memory.write32(micro + 12, (8u << 21) | (24u << 11) | (25u << 6) | 0x1Cu);
+  memory.write32(micro + 16, 0x800003BFu);
+  memory.write32(micro + 20, (8u << 21) | (24u << 11) | (26u << 6) | 0x1Cu);
+  vu.state().q = 0x3F800000u;
+  vu.state().vf[24] = {{0x40800000u, 0, 0, 0x40000000u}};
+  vu.start(0); vu.run(1);
+  check(vu.state().q == 0x3F800000u && vu.cycles_executed() == 1,
+        "VU1 DIV does not immediately overwrite Q");
+  vu.run(1);
+  check(vu.state().vf[25][0] == 0x40800000u && vu.q_stall_cycles() == 0,
+        "VU1 early MULq reads old Q without implicit wait");
+  vu.run(1);
+  check(vu.state().vf[26][0] == 0x40000000u && vu.state().q == 0x3F000000u &&
+        vu.cycles_executed() == 8 && vu.q_stall_cycles() == 5,
+        "VU1 WAITQ stalls pair until seven-cycle DIV result is visible");
+  vu.reset();
+  check(vu.q_stall_cycles() == 0 && vu.state().q == 0, "VU1 reset clears pending Q timing");
+  vu.state().vf[24][3] = 0x40000000u;
+  memory.write32(micro + 8, 0x81F803BCu); memory.write32(micro + 12, 0x2FFu);
+  vu.start(0); vu.run(2);
+  check(vu.cycles_executed() == 8 && vu.q_stall_cycles() == 6 && vu.state().q == 0x3F000000u,
+        "VU1 consecutive DIV waits for previous division before issuing");
+  for (unsigned div_pair = 0; div_pair < 2; ++div_pair) {
+    vu.reset();
+    vu.state().q = 0x3F800000u;
+    vu.state().vf[24][3] = 0x40000000u;
+    memory.write32(micro, div_pair == 0 ? 0x81F803BCu : 0x8000033Cu);
+    memory.write32(micro + 4, 0x400002FFu);
+    memory.write32(micro + 8, div_pair == 1 ? 0x81F803BCu : 0x8000033Cu);
+    memory.write32(micro + 12, 0x2FFu);
+    vu.start(0); vu.run(1);
+    check(vu.running() && vu.state().q == 0x3F800000u && vu.cycles_executed() == 1,
+          "VU1 E bit and host budget do not retire Q before delay pair");
+    vu.run(1);
+    check(!vu.running() && vu.state().q == 0x3F000000u &&
+          vu.pairs_executed() == 2 && vu.cycles_executed() == 7 + div_pair &&
+          vu.q_stall_cycles() == 5 + div_pair,
+          "VU1 program end retires DIV from E pair or its delay pair");
+    memory.write32(micro + 16, 0x800003BFu);
+    memory.write32(micro + 20, 0x2FFu);
+    vu.resume(); vu.run(1);
+    check(vu.cycles_executed() == 8 + div_pair && vu.q_stall_cycles() == 5 + div_pair,
+          "VU1 resume does not wait again for retired division");
+  }
+}
+
+void test_vu1_div_mulq() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x81F803BCu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x800003BFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x01C0C61Cu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[24] = {{0x40800000u, 0x40800000u, 0x40800000u, 0x40000000u}};
+  vu.start(0u);
+  vu.run(2u);
+  check(vu.state().q == 0x3F000000u &&
+        vu.state().vf[24][0] == 0x40000000u &&
+        vu.state().vf[24][2] == 0x40000000u &&
+        vu.state().vf[24][3] == 0x40000000u,
+        "VU1 DIV/WAITQ/MULq normalizes captured XYZ lanes and preserves W");
+}
+
+void test_vu1_captured_max_sub() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01E06B50u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x01B897ACu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[13] = {{0xBF800000u, 0xC0000000u, 0xC0400000u, 0xC0800000u}};
+  vu.state().vf[18] = {{0x40A00000u, 0x40A00000u, 0x40A00000u, 0x40A00000u}};
+  vu.state().vf[24] = {{0x3F800000u, 0x40000000u, 0x40400000u, 0x40800000u}};
+  vu.start(0u);
+  vu.run(2u);
+  check(vu.state().vf[13][0] == 0u && vu.state().vf[13][3] == 0u &&
+        vu.state().vf[30][0] == 0x40800000u &&
+        vu.state().vf[30][1] == 0x40400000u &&
+        vu.state().vf[30][2] == 0u &&
+        vu.state().vf[30][3] == 0x3F800000u,
+        "VU1 captured MAXx/SUB sequence applies scalar, vector, and lane masks");
+}
+
+void test_vu1_ftoi4() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01D3C17Du);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[24] = {{0x3FC00000u, 0xBFC00000u, 0x3F000000u, 0x41200000u}};
+  vu.state().vf[19][3] = 0xDEADBEEFu;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vf[19][0] == 24u &&
+        vu.state().vf[19][1] == static_cast<std::uint32_t>(-24) &&
+        vu.state().vf[19][2] == 8u && vu.state().vf[19][3] == 0xDEADBEEFu,
+        "VU1 captured FTOI4 converts and masks scaled integer lanes");
+}
+
+void test_vu1_captured_ftoi0() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01F9D17Cu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[26] = {{0x40200000u, 0xC0200000u, 0x7F800000u, 0x3F000000u}};
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vf[25][0] == 2u &&
+        vu.state().vf[25][1] == static_cast<std::uint32_t>(-2) &&
+        vu.state().vf[25][2] == 0x7FFFFFFFu,
+        "VU1 captured FTOI0 truncates normal lanes and saturates overflow");
+}
+
+void test_vu1_captured_iaddi() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x800A57F2u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[10] = 3u;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vi[10] == 2u,
+        "VU1 captured IADDI sign-extends its five-bit negative immediate");
+}
+
+void test_vu1_unsigned_immediate_mask() {
+  ps2vita::Memory memory;
+  // Captured BIOS IADDIU vi11,vi0,0x7FFF followed by IAND vi10,vi11,vi10.
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x11EB07FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x000002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x800A5AB4u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().vi[10] = 0x8004u;
+  vu.start(0u);
+  vu.run(2u);
+  check(vu.state().vi[11] == 0x7FFFu && vu.state().vi[10] == 4u,
+        "VU1 IADDIU zero-extends the BIOS mask and removes the count flag");
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x13EB07FFu);
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vi[11] == 0x8001u,
+        "VU1 ISUBIU subtracts the unsigned 15-bit immediate");
+}
+
+void test_vu1_broadcast_alias_and_max_flags() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  // ADDx.xy vf2,vf1,vf2x: writing vf2.x must not change the y-lane operand.
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u,
+      (0x18u << 20) | (2u << 16) | (1u << 11) | (2u << 6));
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[1] = {{0x3F800000u, 0x40000000u, 0u, 0u}};
+  vu.state().vf[2][0] = 0x40400000u;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vf[2][0] == 0x40800000u &&
+        vu.state().vf[2][1] == 0x40A00000u,
+        "VU broadcast reads its scalar before an aliased destination write");
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u,
+      (0x10u << 20) | (2u << 16) | (1u << 11) | (3u << 6) | 0x10u);
+  vu.state().mac = 0xA5C3u;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().mac == 0xA5C3u && vu.state().vf[3][0] == 0x40800000u,
+        "VU MAX preserves all MAC flags, including masked lanes");
+}
+
+void test_vu1_fmand_prior_pair_flags() {
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x34016000u);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x01ED49BCu);
+  ps2vita::Vu1 vu(memory);
+  vu.state().mac = 0x00F0u;
+  vu.state().vi[12] = 0x0050u;
+  vu.state().vf[9][0] = 0x40000000u;
+  vu.state().vf[13][0] = 0x40400000u;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.state().vi[1] == 0x0050u,
+        "VU1 FMAND reads the prior MAC flags from its paired upper instruction");
+}
+
+void test_vu1_fmand_four_issue_latency() {
+  ps2vita::Memory memory;
+  // SUB.x vf3,vf1,vf2 sets a negative-x MAC flag. Following FMANDs see
+  // the old flags for three intervening slots, then this result in slot 4.
+  for (unsigned pair = 0; pair < 5; ++pair) {
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pair * 8u,
+        pair == 0 ? 0x8000033Cu : 0x34016000u);
+    memory.write32(ps2vita::Memory::kVu1MicroBase + pair * 8u + 4u,
+        pair == 0 ? (1u << 24) | (2u << 16) | (1u << 11) | (3u << 6) | 0x2Cu
+                  : 0x000002FFu);
+  }
+  ps2vita::Vu1 vu(memory);
+  vu.state().vf[1][0] = 0x3F800000u;
+  vu.state().vf[2][0] = 0x40000000u;
+  vu.state().vi[12] = 0xFFFFu;
+  vu.start(0u);
+  vu.run(4u);
+  check(vu.state().vi[1] == 0u,
+        "FMAND cannot observe an FMAC result before four issue slots");
+  vu.run(1u);
+  check(vu.state().vi[1] == 0x80u,
+        "FMAND sees the negative-x MAC result at its fourth issue slot");
+}
+
+void test_vif1_top_relative_unpack() {
+  std::array<std::uint32_t, 8> words{{
+      0x03000020u, 0x02000010u, 0x14000000u, 0x6C018000u,
+      1u, 2u, 3u, 4u,
+  }};
+  ps2vita::Memory memory;
+  memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x400002FFu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 8u, 0x8000033Cu);
+  memory.write32(ps2vita::Memory::kVu1MicroBase + 12u, 0x000002FFu);
+  ps2vita::Vif1 vif(memory);
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(words.data()),
+                   sizeof(words)) && vif.top() == 0x20u,
+        "VIF1 MSCAL exposes the current double-buffer TOP to VU1");
+  check(memory.read32(ps2vita::Memory::kVu1DataBase + 0x30u * 16u) == 1u &&
+        memory.read32(ps2vita::Memory::kVu1DataBase + 0x30u * 16u + 12u) == 4u,
+        "VIF1 top-relative UNPACK targets the post-MSCAL TOPS buffer");
+}
+
+void test_captured_bios_gif_sprite() {
+  // First packet emitted by the retail BIOS after CDVD/SIF initialization.
+  constexpr std::array<std::array<std::uint64_t, 2>, 15> qwords{{
+      {{0x100000000000800Eull, 0x000000000000000Eull}},
+      {{0x00000000000A0050ull, 0x000000000000004Cull}},
+      {{0x00000000000000A0ull, 0x000000000000004Eull}},
+      {{0x0000780000006C00ull, 0x0000000000000018ull}},
+      {{0x00FF0000027F0000ull, 0x0000000000000040ull}},
+      {{0x0000000000000001ull, 0x000000000000001Aull}},
+      {{0x0000000000000001ull, 0x0000000000000046ull}},
+      {{0x0000000000000000ull, 0x0000000000000045ull}},
+      {{0x0000000000050000ull, 0x0000000000000047ull}},
+      {{0x0000000000030000ull, 0x0000000000000047ull}},
+      {{0x0000000000000006ull, 0x0000000000000000ull}},
+      {{0x3F80000000000000ull, 0x0000000000000001ull}},
+      {{0x0000000078006C00ull, 0x0000000000000005ull}},
+      {{0x0000000088009400ull, 0x0000000000000005ull}},
+      {{0x0000000000050000ull, 0x0000000000000047ull}},
+  }};
+  std::vector<std::uint8_t> packet(sizeof(qwords));
+  std::memcpy(packet.data(), qwords.data(), packet.size());
+
+  ps2vita::Gs gs;
+  gs.clear(0xFFFF00FFu);
+  ps2vita::Gif gif(gs);
+  check(gif.submit(packet.data(), packet.size()),
+        "GIF frontend accepts the captured packed A+D packet");
+  check(gs.pixel(0, 0) == 0u && gs.pixel(159, 63) == 0u &&
+        gs.pixel(80, 64) == 0xFFFF00FFu,
+        "captured BIOS sprite clears exactly the quarter-scale 640x256 region");
+}
+
+void test_gif_reglist_sprite() {
+  // One REGLIST tag: PRIM, RGBAQ, XYZ2, XYZ2. Four 64-bit values consume two
+  // qwords and exercise the format's different NLOOP accounting.
+  constexpr std::array<std::uint64_t, 6> words{{
+      0x4400000000008001ull, 0x0000000000005510ull,
+      0x0000000000000006ull, 0xFF332211ull,
+      0x0000000000100010ull, 0x0000000001100110ull,
+  }};
+  std::vector<std::uint8_t> packet(sizeof(words));
+  std::memcpy(packet.data(), words.data(), packet.size());
+  ps2vita::Gs gs;
+  gs.clear(0u);
+  ps2vita::Gif gif(gs);
+  check(gif.submit(packet.data(), packet.size()) &&
+        gif.reglist_tags() == 1u && gif.packets_rejected() == 0u,
+        "GIF frontend consumes a complete REGLIST tag");
+  check(gs.pixel(0, 0) == 0xFF332211u && gs.pixel(3, 3) == 0xFF332211u &&
+        gs.pixel(4, 4) == 0u,
+        "GIF REGLIST registers emit a masked quarter-scale sprite");
+}
+
+void test_gif_image_continues_to_pre_primitive() {
+  // One IMAGE qword followed by a PRE=1 packed point tag. Raw image data has
+  // no descriptors and must not terminate parsing of the enclosing DMA packet.
+  constexpr std::array<std::array<std::uint64_t, 2>, 4> qwords{{
+      {{0x0800000000008001ull, 0u}},
+      {{0x0123456789ABCDEFull, 0xFEDCBA9876543210ull}},
+      {{0x1000400000008001ull, 0x0000000000000005ull}},
+      {{0x0000001000000010ull, 0u}},
+  }};
+  std::vector<std::uint8_t> packet(sizeof(qwords));
+  std::memcpy(packet.data(), qwords.data(), packet.size());
+  ps2vita::Gs gs;
+  gs.clear(0u);
+  ps2vita::Gif gif(gs);
+  check(gif.submit(packet.data(), 24u) && gif.image_tags() == 0u &&
+        gif.submit(packet.data() + 24u, packet.size() - 24u) &&
+        gif.image_tags() == 1u && gif.image_bytes() == 16u &&
+        gif.packets_rejected() == 0u,
+        "GIF IMAGE traversal spans DMA bursts and reaches a following tag");
+  check(gs.pixel(0, 0) == 0x80808080u,
+        "GIF PRE field selects the primitive before packed XYZ2");
+}
+
+void test_gif_psmct32_host_to_local_transfer() {
+  constexpr std::array<std::array<std::uint64_t, 2>, 7> qwords{{
+      {{0x1000000000008004ull, 0xEull}},
+      {{0x0001000100000000ull, 0x50ull}}, // DBP=1, DBW=1, PSMCT32
+      {{0u, 0x51ull}},
+      {{0x0000000200000002ull, 0x52ull}}, // 2x2 rectangle
+      {{0u, 0x53ull}},
+      {{0x0800000000008001ull, 0u}},
+      {{0x2222222211111111ull, 0x4444444433333333ull}},
+  }};
+  std::vector<std::uint8_t> packet(sizeof(qwords));
+  std::memcpy(packet.data(), qwords.data(), packet.size());
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  check(gif.submit(packet.data(), packet.size()) &&
+        gif.local_bytes_written() == 16u,
+        "GIF PSMCT32 IMAGE writes a host-to-local rectangle");
+  check(gif.read_local32(0x100u) == 0x11111111u &&
+        gif.read_local32(0x104u) == 0x22222222u &&
+        gif.read_local32(0x200u) == 0x33333333u &&
+        gif.read_local32(0x204u) == 0x44444444u,
+        "GS local-memory oracle applies DBP, DBW, and row stride");
+}
+
+void test_gif_textured_sprite_from_local_memory() {
+  constexpr std::array<std::array<std::uint64_t, 2>, 7> upload{{
+      {{0x1000000000008004ull, 0xEull}},
+      {{0x0001000100000000ull, 0x50ull}},
+      {{0u, 0x51ull}},
+      {{0x0000000200000002ull, 0x52ull}},
+      {{0u, 0x53ull}},
+      {{0x0800000000008001ull, 0u}},
+      {{0xFF00FF00FF0000FFull, 0xFFFFFFFFFFFF0000ull}},
+  }};
+  constexpr std::uint64_t tex0 = 1ull | (1ull << 14) | (1ull << 26) |
+      (1ull << 30) | (1ull << 34) | (1ull << 35);
+  constexpr std::array<std::array<std::uint64_t, 2>, 8> draw{{
+      {{0x1000000000008002ull, 0xEull}},
+      {{tex0, 0x06ull}},
+      {{0x116ull, 0x00ull}}, // SPRITE + TME + FST
+      {{0x2000000000008002ull, 0x53ull}},
+      {{0u, 0u}},
+      {{0u, 0u}},
+      {{0x0000002000000020ull, 0u}},
+      {{0x0000008000000080ull, 0u}},
+  }};
+  ps2vita::Gs gs;
+  gs.clear(0u);
+  ps2vita::Gif gif(gs);
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()),
+                   sizeof(upload)) &&
+        gif.submit(reinterpret_cast<const std::uint8_t*>(draw.data()),
+                   sizeof(draw)),
+        "GIF textured-sprite fixture uploads and draws");
+  check(gs.pixel(0, 0) == 0xFF0000FFu &&
+        gs.pixel(1, 0) == 0xFF00FF00u &&
+        gs.pixel(0, 1) == 0xFFFF0000u &&
+        gs.pixel(1, 1) == 0xFFFFFFFFu,
+        "GIF UV sprite samples the logical PSMCT32 surface");
+}
+
+void gif_depth_register(ps2vita::Gif& gif, std::uint64_t value,
+                        std::uint64_t address = 0x47u) {
+  const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull,
+      0xEull, value, address}};
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                   sizeof(packet)), "GIF depth register accepted");
+}
+
+void test_gif_texture_color_component() {
+  const std::array<std::uint64_t, 14> upload{{
+      0x1000000000008004ull, 0xEull,
+      0x0001000100000000ull, 0x50u, 0u, 0x51u,
+      0x0000000200000002ull, 0x52u, 0u, 0x53u,
+      0x0800000000008001ull, 0u,
+      0x20FF804020FF8040ull, 0x20FF804020FF8040ull}};
+  for (unsigned context = 0; context < 2; ++context)
+    for (unsigned tfx = 0; tfx < 4; ++tfx)
+      for (unsigned tcc = 0; tcc < 2; ++tcc)
+        for (unsigned alpha : {0u, 64u, 128u, 255u}) {
+          ps2vita::Gs gs;
+          ps2vita::Gif gif(gs);
+          check(gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()),
+                           sizeof(upload)), "TCC texture upload accepted");
+          gif_depth_register(gif, 1ull | (1ull << 14) | (1ull << 26) |
+              (1ull << 30) | (std::uint64_t{tcc} << 34) |
+              (std::uint64_t{tfx} << 35), 6u + context);
+          gif_depth_register(gif, (alpha << 24) | 0x00C04020u, 1u);
+          gif_depth_register(gif, 0u, 3u);
+          const unsigned expected_alpha = !tcc ? alpha : tfx == 0u ? alpha / 4u :
+              tfx == 2u ? std::min(255u, 32u + alpha) : 32u;
+          const auto highlight_rgb = 0x00FF0000u |
+              (std::min(255u, 64u + alpha) << 8) | std::min(255u, 16u + alpha);
+          const std::uint32_t expected = (expected_alpha << 24) |
+              (tfx == 0u ? 0x00FF4010u : tfx == 1u ? 0x00FF8040u : highlight_rgb);
+          const auto triangle = [&] {
+            gif_depth_register(gif, 0x113u | (context << 9), 0u);
+            gif_depth_register(gif, 0u, 5u);
+            gif_depth_register(gif, 128u, 5u);
+            gif_depth_register(gif, 128ull << 16, 5u);
+          };
+          gif_depth_register(gif, 1u | (4u << 1) | (expected_alpha << 4),
+                             0x47u + context);
+          triangle();
+          check(gs.pixel(0, 0) == expected,
+                "All four texture functions select RGB/RGBA alpha in both contexts");
+          gs.clear(0x12345678u);
+          gif_depth_register(gif, 1u | (4u << 1) | ((expected_alpha ^ 1u) << 4),
+                             0x47u + context);
+          triangle();
+          check(gs.pixel(0, 0) == 0x12345678u,
+                "TCC-selected alpha reaches alpha test before framebuffer write");
+        }
+}
+
+void test_gif_textured_uv_triangles() {
+  const std::array<std::uint64_t, 14> upload{{
+      0x1000000000008004ull, 0xEull,
+      0x0001000100000000ull, 0x50u, 0u, 0x51u,
+      0x0000000200000002ull, 0x52u, 0u, 0x53u,
+      0x0800000000008001ull, 0u,
+      0xFF00FF00FF0000FFull, 0xFFFFFFFFFFFF0000ull}};
+  for (unsigned context = 0; context < 2; ++context) {
+    for (bool reverse : {false, true}) {
+      ps2vita::Gs gs;
+      ps2vita::Gif gif(gs);
+      check(gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()),
+                       sizeof(upload)), "UV triangle texture upload accepted");
+      gif_depth_register(gif, 1ull | (1ull << 14) | (1ull << 26) |
+          (1ull << 30) | (1ull << 34) | (1ull << 35), 6u + context);
+      gif_depth_register(gif, 0x113u | (context << 9), 0u);
+      const auto vertex = [&](unsigned x, unsigned y) {
+        gif_depth_register(gif, (x * 16u) | (std::uint64_t{y * 16u} << 16), 3u);
+        gif_depth_register(gif, (x * 64u) | (std::uint64_t{y * 64u} << 16), 5u);
+      };
+      vertex(0, 0);
+      if (reverse) { vertex(0, 2); vertex(2, 0); }
+      else { vertex(2, 0); vertex(0, 2); }
+      vertex(2, 2);
+      if (reverse) { vertex(2, 0); vertex(0, 2); }
+      else { vertex(0, 2); vertex(2, 0); }
+      check(gs.pixel(0, 0) == 0xFF0000FFu && gs.pixel(1, 0) == 0xFF00FF00u &&
+            gs.pixel(0, 1) == 0xFFFF0000u && gs.pixel(1, 1) == 0xFFFFFFFFu &&
+            gs.pixel(2, 1) == 0u,
+            "UV triangles sample texture across winding, shared edge and contexts");
+    }
+  }
+  ps2vita::Gs gs;
+  gs.set_alpha_test(1u); // NEVER + KEEP: texture alpha/color goes through write().
+  ps2vita::GsVertex a{0, 0, 0, 0x80808080u}, b{4, 0, 0, 0x80808080u},
+                    c{0, 4, 0, 0x80808080u};
+  b.uv = 24u; // 1.5 texels: interior x=2 must sample floor(0.75)=0.
+  unsigned calls = 0;
+  gs.triangle(a, b, c, [&](unsigned u, unsigned, std::uint32_t color) {
+    ++calls;
+    check(u <= 1u && color == 0x80808080u, "UV sampler gets bounded coordinates and color");
+    return 0xFFFFFFFFu;
+  });
+  check(calls != 0u && gs.pixel(1, 1) == 0u,
+        "Textured fragments still obey GS alpha test");
+  gs.set_alpha_test(0u);
+  gs.triangle(a, b, c, [](unsigned u, unsigned, std::uint32_t) {
+    return u + 1u;
+  });
+  check(gs.pixel(2, 0) == 1u && gs.pixel(3, 0) == 2u,
+        "UV fractions are retained until after interpolation");
+}
+
+void test_gif_depth_state() {
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  const auto point = [&](std::uint32_t z, std::uint32_t color, unsigned context) {
+    const std::array<std::uint64_t, 8> packet{{0x1000000000008003ull, 0xEull,
+        static_cast<std::uint64_t>(context) << 9, 0u, color, 1u,
+        static_cast<std::uint64_t>(z) << 32, 5u}};
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()),
+                     sizeof(packet)), "GIF depth point accepted");
+  };
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    gif_depth_register(gif, (1u << 16) | (mode << 17));
+    for (unsigned z : {6u, 7u, 8u}) {
+      gs.clear(0u, 7u);
+      point(z, 1u, 0u);
+      const bool pass = mode == 1 || (mode == 2 && z >= 7) ||
+                        (mode == 3 && z > 7);
+      check(gs.pixel(0, 0) == (pass ? 1u : 0u), "GS guest ZTST comparison");
+    }
+  }
+  gs.clear(0u, 7u);
+  gif_depth_register(gif, 0x50000u);
+  gif_depth_register(gif, 1ull << 32, 0x4Eu);
+  point(9u, 1u, 0u);
+  point(8u, 2u, 0u);
+  check(gs.pixel(0, 0) == 2u, "ZMSK prevents depth writes");
+  point(6u, 3u, 0u);
+  check(gs.pixel(0, 0) == 2u, "ZMSK preserves depth comparison");
+  gif_depth_register(gif, 0u, 0x4Eu);
+  point(100u, 4u, 1u); // Reset context 1 has ZTE=0.
+  point(8u, 5u, 0u);
+  check(gs.pixel(0, 0) == 5u, "ZTE=0 bypasses test without updating depth");
+  gif_depth_register(gif, 0x30000u, 0x48u); // Context 1 ALWAYS.
+  gif_depth_register(gif, 1ull << 32, 0x4Fu);
+  point(100u, 6u, 1u);
+  point(8u, 7u, 0u);
+  check(gs.pixel(0, 0) == 7u, "TEST_2 and ZBUF_2 use independent context state");
+  gif_depth_register(gif, 0u, 0x4Fu);
+  point(100u, 8u, 1u);
+  point(9u, 9u, 0u);
+  check(gs.pixel(0, 0) == 8u, "Unmasked context 1 updates the host depth surface");
+  gif.reset();
+  point(0u, 6u, 0u);
+  check(gs.pixel(0, 0) == 6u, "GIF reset clears guest depth state");
+}
+
+void test_gif_packed_color_position_depth_and_adc() {
+  // Deliberately distinct lanes: R/G/B/A occupy four 32-bit slots, X/Y two
+  // slots, and Z comes from the upper qword. Padding must not become color.
+  constexpr std::array<std::array<std::uint64_t, 2>, 3> packet{{
+      {{0x2000400000008001ull, 0x51ull}}, // PRE point, RGBA then XYZ2
+      {{0xDEADBE22DEADBE11ull, 0xDEADBE80DEADBE33ull}},
+      {{0xFFFF00C0FFFF0080ull, 7ull}}, // host point (2,3), depth 7
+  }};
+  ps2vita::Gs gs;
+  gs.clear(0u, 8u);
+  ps2vita::Gif gif(gs);
+  gif_depth_register(gif, 0x50000u);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0u, "PACKED XYZ2 decodes Z from the upper qword");
+  gs.clear(0u, 0u);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0x80332211u && gs.pixel(2, 0) == 0u,
+        "PACKED RGBA and XYZ2 decode independent lanes and ignore padding");
+  auto suppressed = packet;
+  suppressed[2][1] |= 1ull << 47;
+  gs.clear(0u);
+  const auto before = gif.points_emitted();
+  gif.submit(reinterpret_cast<const std::uint8_t*>(suppressed.data()), sizeof(suppressed));
+  check(gs.pixel(2, 3) == 0u && gif.points_emitted() == before,
+        "PACKED XYZ2 ADC suppresses the drawing kick");
+}
+
+void test_gif_pre_ignored_outside_nonempty_packed() {
+  constexpr std::array<std::array<std::uint64_t, 2>, 4> packet{{
+      {{0x1000000000008001ull, 0xEull}},
+      {{6u, 0u}}, // establish SPRITE through A+D
+      {{0x1000400000008000ull, 0x5ull}}, // empty PACKED PRE point: ignored
+      {{0x1400400000008001ull, 0x5ull}}, // REGLIST PRE point: ignored
+  }};
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  const std::array<std::uint64_t, 2> xyz{{0u, 0u}};
+  gif.submit(reinterpret_cast<const std::uint8_t*>(xyz.data()), sizeof(xyz));
+  check(gif.points_emitted() == 0u && gif.pending_bytes() == 0u,
+        "PRE cannot change primitive state on empty PACKED or REGLIST tags");
+}
+
+void test_gif_xyzf_depth_and_adc() {
+  std::array<std::array<std::uint64_t, 2>, 2> packet{{
+      {{0x1000400000008001ull, 0x4ull}},
+      {{0x000000C000000080ull, (0xABull << 36) | (7ull << 4)}},
+  }};
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gif_depth_register(gif, 0x50000u);
+  gs.clear(0u, 7u);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0x80808080u,
+        "PACKED XYZF2 extracts 24-bit Z without fog or padding");
+  gs.clear(0u, 8u);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0u, "XYZF2 depth participates in raster rejection");
+  gs.clear(0u);
+  packet[1][1] |= 1ull << 47;
+  const auto before = gif.points_emitted();
+  gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet));
+  check(gs.pixel(2, 3) == 0u && gif.points_emitted() == before,
+        "XYZF2 ADC suppresses the drawing kick");
+}
+
+void test_vif_stops_after_unsupported_vu() {
+  for (const auto command : {0x14000000u, 0x17000000u}) {
+    ps2vita::Memory memory;
+    memory.write32(ps2vita::Memory::kVu1MicroBase, 0x8000033Cu);
+    memory.write32(ps2vita::Memory::kVu1MicroBase + 4u, 0x7FFFFFFFu);
+    ps2vita::Vif1 vif(memory);
+    const std::array<std::uint32_t, 6> words{{command, 0x6C010000u, 1u, 2u, 3u, 4u}};
+    check(!vif.submit(reinterpret_cast<const std::uint8_t*>(words.data()), sizeof(words)) &&
+          vif.packets_rejected() == 1u && vif.vectors_unpacked() == 0u &&
+          memory.read32(ps2vita::Memory::kVu1DataBase) == 0u,
+          "VIF MSCAL/MSCNT does not execute trailing UNPACK after unsupported VU");
+  }
+}
+
+void test_image_cursor_across_tags() {
+  const std::array<std::array<std::uint64_t, 2>, 4> setup{{
+      {{0x1000000000008003ull, 0xEull}},
+      {{0x0001000100000000ull, 0x50ull}},
+      {{0x0000000400000002ull, 0x52ull}},
+      {{0u, 0x53ull}},
+  }};
+  const std::array<std::uint64_t, 4> image1{{0x0800000000008001ull, 0u,
+      0x2222222211111111ull, 0x4444444433333333ull}};
+  const std::array<std::uint64_t, 4> image2{{0x0800000000008001ull, 0u,
+      0x6666666655555555ull, 0x8888888877777777ull}};
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(setup.data()), sizeof(setup));
+  gif.submit(reinterpret_cast<const std::uint8_t*>(image1.data()), sizeof(image1));
+  gif.submit(reinterpret_cast<const std::uint8_t*>(image2.data()), sizeof(image2));
+  check(gif.read_local32(0x100u) == 0x11111111u &&
+        gif.read_local32(0x300u) == 0x55555555u &&
+        gif.read_local32(0x404u) == 0x88888888u && gif.local_bytes_written() == 32u,
+        "Multiple IMAGE tags advance within one TRXDIR transfer");
+  gif.submit(reinterpret_cast<const std::uint8_t*>(image1.data()), sizeof(image1));
+  check(gif.local_bytes_written() == 32u && gif.read_local32(0x100u) == 0x11111111u,
+        "IMAGE data beyond the rectangle does not restart or overwrite it");
+  gif.submit(reinterpret_cast<const std::uint8_t*>(setup.data()), sizeof(setup));
+  gif.submit(reinterpret_cast<const std::uint8_t*>(image2.data()), sizeof(image2));
+  check(gif.read_local32(0x100u) == 0x55555555u,
+        "Writing TRXDIR starts a new transfer cursor");
+}
+
+void test_textured_sprite_scissor_preserves_uv() {
+  const std::array<std::array<std::uint64_t, 2>, 6> upload{{
+      {{0x1000000000008003ull, 0xEull}},
+      {{0x0001000100000000ull, 0x50ull}},
+      {{0x0000000100000004ull, 0x52ull}},
+      {{0u, 0x53ull}},
+      {{0x0800000000008001ull, 0u}},
+      {{0xFF222222FF111111ull, 0xFF444444FF333333ull}},
+  }};
+  const std::array<std::array<std::uint64_t, 2>, 9> draw{{
+      {{0x1000000000008008ull, 0xEull}},
+      {{1ull | (1ull << 14) | (1ull << 34) | (1ull << 35), 6u}}, // DECAL RGBA
+      {{0x116u, 0u}},
+      {{0x00030000000F0008ull, 0x40u}}, // host scissor X=2..3, Y=0
+      {{0u, 3u}},
+      {{0u, 5u}},
+      {{0x00100040u, 3u}},
+      {{0x00400100u, 5u}}, // host rectangle X=0..4, Y=0..1
+      {{0u, 0xFu}},
+  }};
+  ps2vita::Gs gs;
+  ps2vita::Gif gif(gs);
+  gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()), sizeof(upload));
+  gif.submit(reinterpret_cast<const std::uint8_t*>(draw.data()), sizeof(draw));
+  check(gs.pixel(0, 0) == 0u && gs.pixel(1, 0) == 0u &&
+        gs.pixel(2, 0) == 0xFF333333u && gs.pixel(3, 0) == 0xFF444444u,
+        "Scissor clips textured sprites without restarting or stretching UV");
 }
 
 void put16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
@@ -1361,9 +4245,28 @@ void test_phase0_aot_contract() {
   bounded_state.pc = 0x3000u;
   const auto bounded =
       ps2vita::dispatch_phase0_aot(bounded_memory, bounded_state, 1u);
+#if defined(PS2VITA_ASTRART_DIRECT_TRACES)
+  check(bounded.kind == ps2vita::AotExitKind::Interpreter &&
+            bounded.target == 0x3008u && bounded.instructions == 5u &&
+            bounded_state.aot_trace_entries == 1u &&
+            bounded_state.aot_trace_horizon_fallbacks == 0u,
+        "direct trace batches proven blocks within one dispatch budget");
+  ps2vita::Memory boundary_memory;
+  boundary_memory.advance(3u);
+  ps2vita::CpuState boundary_state{};
+  boundary_state.pc = 0x3000u;
+  const auto boundary =
+      ps2vita::dispatch_phase0_aot(boundary_memory, boundary_state, 1u);
+  check(boundary.kind == ps2vita::AotExitKind::Interpreter &&
+            boundary.target == 0x3020u && boundary.instructions == 2u &&
+            boundary_state.aot_trace_entries == 1u &&
+            boundary_state.aot_trace_horizon_fallbacks == 1u,
+        "direct trace falls back before crossing the event horizon");
+#else
   check(bounded.kind == ps2vita::AotExitKind::Interpreter &&
             bounded.target == 0x3020u && bounded.instructions == 2u,
         "AOT dispatch budget yields safely to interpreter");
+#endif
 
   const auto result = ps2vita::run_phase0_aot_probe();
   check(result.matched, "Phase-0 interpreter/AOT contract matches");
@@ -1386,8 +4289,17 @@ void test_phase0_aot_contract() {
   check(benchmark.interpreter_stop == ps2vita::StopReason::Break &&
             benchmark.aot_stop == ps2vita::StopReason::Break &&
             benchmark.guest_instructions > 1000u &&
-            benchmark.interpreter_checksum == benchmark.aot_checksum,
+            benchmark.interpreter_checksum == benchmark.aot_checksum &&
+            benchmark.trace_probe_guest_instructions == 128u &&
+            benchmark.trace_probe_checksum != 0u,
         "performance workload covers a substantial deterministic guest trace");
+#if defined(PS2VITA_ASTRART_DIRECT_TRACES)
+  check(benchmark.trace_entries == 16u,
+        "trace benchmark records one fused entry per chain iteration");
+#else
+  check(benchmark.trace_entries == 0u,
+        "legacy benchmark reports no fused trace entries");
+#endif
 
   // Generated load/store and signed-arithmetic semantics are compared over a
   // deterministic spread of inputs rather than a single friendly value.
@@ -1597,6 +4509,23 @@ void test_phase0_aot_contract() {
 }
 
 int main() {
+  test_ee_overlapping_backreference_copy();
+  test_vu1_q_latency();
+  test_vu1_vector_scoreboard();
+  test_vu1_pair_dependencies();
+  test_gif_repeated_prim();
+  test_gs_shared_edges();
+  test_spu2_fixed_volume();
+  test_spu2_shadow_scheduling();
+  test_spu2_shadow_bank();
+  test_spu2_voice();
+  test_spu2_envelope();
+  test_spu2_dma_stream();
+  test_spu2_adpcm_stream();
+  test_gs_alpha_test();
+  test_gs_blending();
+  test_gif_blend_registers();
+  test_execution_census_blocks_and_edges();
   test_memory_aliases();
   test_bios_mapping_and_boot();
   test_iop_memory_and_cpu();
@@ -1606,9 +4535,12 @@ int main() {
   test_sif0_dma_reply();
   test_sif0_iop_side_completes_first();
   test_iop_timer5_deadlines();
+  test_event_horizon_contract();
   test_cdvd_reset_status();
   test_sio2_disconnected_transfer();
   test_video_vblank_deadlines();
+  test_spu2_dma4_completion();
+  test_spu2_dma7_completion();
   test_ee_timer3_hblank_clock();
   test_exception_entry_and_eret();
   test_cop0_count_advances();
@@ -1632,13 +4564,77 @@ int main() {
   test_mmi_packed_accumulator_moves();
   test_mmi_pcpyld();
   test_mmi_pextlw();
+  test_mmi_pextuw_and_transpose();
   test_r5900_shift_amount_moves();
   test_r5900_three_operand_multiply();
   test_scalar_fpu();
   test_fpu_memory_transfer();
   test_vu_memory_windows();
   test_vu0_cop2_transfers();
+  test_vu0_broadcast_multiply();
+  test_vu0_captured_normalization();
+  test_vu0_outer_product();
+  test_vu0_move();
+  test_vu0_abs();
+  test_vu0_ftoi();
+  test_ee_madd();
+  test_vu0_matrix_accumulator();
   test_quarter_scale_gs();
+  test_gif_normal_dma_completion();
+  test_vif1_source_chain_completion();
+  test_vif1_mpg_upload();
+  test_vif1_scratchpad_dma();
+  test_vif1_v4_32_unpack();
+  test_vif_provenance();
+  test_vif_causal_input();
+  test_vu1_causal_slice();
+  test_vu1_causal_memory_loads();
+  test_vu1_captured_prologue();
+  test_vu1_captured_matrix_pair();
+  test_vu1_sqi();
+  test_vu1_xgkick_packet();
+  test_vu1_end_and_resume();
+  test_vu1_mtir_xtop();
+  test_vu1_integer_branch_and_load();
+  test_vu1_lq_sq();
+  test_vu1_div_mulq();
+  test_vu1_captured_max_sub();
+  test_vu1_ftoi4();
+  test_vu1_captured_ftoi0();
+  test_vu1_captured_iaddi();
+  test_vu1_unsigned_immediate_mask();
+  test_vu1_broadcast_alias_and_max_flags();
+  test_vu1_fmand_prior_pair_flags();
+  test_vu1_fmand_four_issue_latency();
+  test_vif1_top_relative_unpack();
+  test_captured_bios_gif_sprite();
+  test_gif_reglist_sprite();
+  test_gif_image_continues_to_pre_primitive();
+  test_gif_psmct32_host_to_local_transfer();
+  test_gif_textured_sprite_from_local_memory();
+  test_gif_packed_color_position_depth_and_adc();
+  test_gif_pre_ignored_outside_nonempty_packed();
+  test_gif_xyzf_depth_and_adc();
+  test_gif_depth_state();
+  test_framebuffer_dump();
+  test_spu2_adpcm();
+  test_vu0_broadcast_subtract();
+  test_vu0_broadcast_minmax();
+  test_triangle_trace();
+  test_gif_texture_attribute_latches();
+  test_gs_perspective_safety();
+  test_gif_textured_uv_triangles();
+  test_gif_texture_color_component();
+  test_vif_packet_capture();
+  test_vif_unsupported_location();
+  test_vif_direct();
+  test_gif_shading_modes();
+  test_gif_primitive_scissor();
+  test_degenerate_triangle();
+  test_captured_bios_triangles();
+  test_vif_stops_after_unsupported_vu();
+  test_image_cursor_across_tags();
+  test_textured_sprite_scissor_preserves_uv();
   test_elf_and_emulator();
   test_phase0_aot_contract();
   if (failures) return EXIT_FAILURE;

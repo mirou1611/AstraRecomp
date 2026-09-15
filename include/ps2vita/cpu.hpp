@@ -32,6 +32,7 @@ struct CpuState {
   std::array<std::uint64_t, 32> vu0_vf{};
   std::array<std::uint64_t, 32> vu0_vf_hi{};
   std::array<std::uint32_t, 32> vu0_vi{};
+  std::array<std::uint32_t, 4> vu0_acc{};
   std::uint64_t hi = 0;
   std::uint64_t lo = 0;
   std::uint64_t hi1 = 0;
@@ -42,6 +43,9 @@ struct CpuState {
   // Guest instructions completed by verified native semantic fast paths.
   // They are included in cycles; this counter is diagnostic only.
   std::uint64_t fast_path_instructions = 0;
+  // Profile-guided AOT telemetry. These do not affect architectural state.
+  std::uint64_t aot_trace_entries = 0;
+  std::uint64_t aot_trace_horizon_fallbacks = 0;
 };
 
 class Cpu {
