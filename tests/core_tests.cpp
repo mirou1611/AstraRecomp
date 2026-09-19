@@ -3354,6 +3354,33 @@ void test_vu1_xgkick_packet() {
         "Unterminated XGKICK remains bounded during end drain");
 }
 
+void test_vu1_empty_tag_continuation() {
+  ps2vita::Memory memory;
+  ps2vita::Vu1 vu(memory);
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  const auto data = ps2vita::Memory::kVu1DataBase + 0x120u;
+  memory.write32(micro, 0x800016FCu); // XGKICK vi2
+  memory.write32(micro + 4u, 0x400002FFu); // E + upper NOP
+  memory.write32(micro + 8u, 0x8000033Cu);
+  memory.write32(micro + 12u, 0x000002FFu);
+  memory.write64(data, 0u); // NLOOP=0, EOP=0: empty, not end-of-packet.
+  memory.write64(data + 8u, 0u);
+  memory.write64(data + 16u, 0x8000u); // Empty EOP tag.
+  memory.write64(data + 24u, 0u);
+  vu.state().vi[2] = 0x12u;
+  vu.start(0u);
+  vu.run(2u);
+  std::vector<std::uint8_t> packet;
+  check(!vu.running() && !vu.path1_active() && vu.path1_tags_queued() == 2u &&
+        vu.path1_tags_rejected() == 0u,
+        "Empty non-EOP tag continues through E-bit drain to the next tag");
+  check(vu.pop_path1_packet(packet) && packet.size() == 16u && packet[1] == 0u,
+        "Empty non-EOP tag remains in the delivered stream");
+  check(vu.pop_path1_packet(packet) && packet.size() == 16u && packet[1] == 0x80u,
+        "Following empty EOP terminates the transfer");
+  check(!vu.pop_path1_packet(packet), "Empty-tag continuation emits no extra packet");
+}
+
 void test_vif1_scratchpad_dma() {
   for (unsigned mode = 0; mode < 3u; ++mode) {
     ps2vita::Memory memory;
@@ -4593,6 +4620,7 @@ int main() {
   test_vu1_captured_matrix_pair();
   test_vu1_sqi();
   test_vu1_xgkick_packet();
+  test_vu1_empty_tag_continuation();
   test_vu1_end_and_resume();
   test_vu1_mtir_xtop();
   test_vu1_integer_branch_and_load();
