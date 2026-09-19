@@ -1,5 +1,5 @@
 param([Parameter(Mandatory=$true)][string]$ImagePath, [switch]$Perspective,
-      [switch]$Highlight)
+      [switch]$Highlight, [switch]$RegionRepeat)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 $bitmap = [System.Drawing.Bitmap]::new((Resolve-Path -LiteralPath $ImagePath).Path)
@@ -19,6 +19,9 @@ try {
                 0x00FF00
             } elseif ($blue) { 0x0000FF } else { 0xFF0000 }
             if ($Highlight -and $x + $y -lt 128) { $expected = $expected -bor 0x404040 }
+            if ($RegionRepeat -and $x + $y -lt 128) {
+                $expected = if (([Math]::Floor($y / 32) % 2) -eq 1) { 0xFFFFFF } else { 0x00FF00 }
+            }
             $actual = $bitmap.GetPixel($x, $y).ToArgb() -band 0xFFFFFF
             if ($actual -ne $expected) {
                 $mismatches++

@@ -15,9 +15,10 @@ int main(int argc, char** argv) {
   const bool rgb_modulate = argc > 1 && std::strcmp(argv[1], "--rgb-modulate") == 0;
   const bool highlight1 = argc > 1 && std::strcmp(argv[1], "--highlight") == 0;
   const bool highlight2 = argc > 1 && std::strcmp(argv[1], "--highlight2") == 0;
+  const bool region_repeat = argc > 1 && std::strcmp(argv[1], "--region-repeat") == 0;
   const bool highlight = highlight1 || highlight2;
   const bool rgb = rgb_decal || rgb_modulate;
-  if (perspective || rgb || highlight) { --argc; ++argv; }
+  if (perspective || rgb || highlight || region_repeat) { --argc; ++argv; }
   const unsigned expected_alpha = highlight1 ? 0x60u : highlight2 ? 0x20u :
                                   rgb ? 0x40u : 0xFFu;
   ps2vita::Emulator emulator;
@@ -41,7 +42,7 @@ int main(int argc, char** argv) {
   ad(128u | (1ull << 32), 0x4Eu); // Mask depth writes.
   ad(1u, 0x46u); // COLCLAMP
   ad(0u, 0x14u); // TEX1: nearest filtering, no mip selection.
-  ad(0u, 0x08u); // CLAMP: repeat.
+  ad(region_repeat ? 3ull | (1ull << 14) : 0ull, 0x08u); // U=(U&0)|1, V repeat.
   ad(0u, 0x3Fu); // TEXFLUSH after the upload.
   ad(1ull | (1ull << 14) | (1ull << 26) | (1ull << 30) |
       (rgb ? 0ull : (1ull << 34)) |
@@ -70,8 +71,8 @@ int main(int argc, char** argv) {
   } else {
     ad(rgb || highlight ? 0x40808080u : 0x80808080u, 1u);
     ad(0u, 3u); ad(0u, 5u);
-    ad(32u, 3u); ad(2048u, 5u);
-    ad(32ull << 16, 3u); ad(2048ull << 16, 5u);
+    ad(region_repeat ? 64u : 32u, 3u); ad(2048u, 5u);
+    ad((region_repeat ? 64ull : 32ull) << 16, 3u); ad(2048ull << 16, 5u);
   }
   // An off-scissor point changes primitive class and submits the pending
   // triangle batch in the reference renderer without needing display scanout.
@@ -138,9 +139,11 @@ int main(int argc, char** argv) {
       // helpers or captured output are used to generate the expectation.
       const bool green = perspective ? 3 * x >= 32 : x >= 16;
       const bool blue = perspective ? 2 * y >= 32 + x : y >= 16;
-      const std::uint32_t expected = x + y < 32 ?
+      std::uint32_t expected = x + y < 32 ?
           ((expected_alpha << 24) | (highlight ? 0x00404040u : 0u) |
            (green ? 0x0000FF00u : blue ? 0x00FF0000u : 0x000000FFu)) : 0u;
+      if (region_repeat && x + y < 32)
+        expected = ((y / 8) % 2) ? 0xFFFFFFFFu : 0xFF00FF00u;
       if (emulator.gs().pixel(x, y) != expected) ++mismatches;
     }
   ok = ok && mismatches == 0u;
