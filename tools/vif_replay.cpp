@@ -28,8 +28,26 @@ int main(int argc, char** argv) {
   const bool accepted = vif.submit(data.data(), data.size());
   std::vector<std::uint8_t> packet;
   bool gif_ok = true;
-  while (vif.pop_gif_packet(packet))
+  unsigned delivered = 0;
+  while (vif.pop_gif_packet(packet)) {
+    if (packet.size() >= 16u && delivered < 16u) {
+      // Bytes delivered by VIF (PATH1 or DIRECT), not a later VU RAM snapshot.
+      const auto word = [&](unsigned offset) {
+        std::uint64_t value = 0;
+        for (unsigned byte = 0; byte < 8u; ++byte)
+          value |= std::uint64_t{packet[offset + byte]} << (8u * byte);
+        return value;
+      };
+      const auto tag = word(0);
+      const unsigned nreg = (tag >> 60) & 15u;
+      std::printf("gif_delivered index=%u bytes=%zu tag=%016llX regs=%016llX nloop=%u nreg=%u flg=%u eop=%u\n",
+          delivered, packet.size(), static_cast<unsigned long long>(tag),
+          static_cast<unsigned long long>(word(8)), unsigned(tag & 0x7FFFu),
+          nreg ? nreg : 16u, unsigned((tag >> 58) & 3u), unsigned((tag >> 15) & 1u));
+    }
+    ++delivered;
     gif_ok = gif.submit(packet.data(), packet.size()) && gif_ok;
+  }
   const auto& vu = vif.vu1();
   std::printf("accepted=%u pending_direct_bytes=%zu vif_rejected=%llu vu_pairs=%llu path1=%llu/%llu "
               "reject_pc=%04X kick=%04X bad=%04X tag=%016llX triangles=%llu\n",
