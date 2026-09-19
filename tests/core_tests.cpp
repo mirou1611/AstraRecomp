@@ -3936,6 +3936,42 @@ void test_gif_texture_color_component() {
         }
 }
 
+void test_gif_texture_address_modes() {
+  const std::array<std::uint64_t, 14> upload{{
+      0x1000000000008004ull, 0xEull,
+      0x0001000100000000ull, 0x50u, 0u, 0x51u,
+      0x0000000200000002ull, 0x52u, 0u, 0x53u,
+      0x0800000000008001ull, 0u,
+      0xFF00FF00FF0000FFull, 0xFFFFFFFFFFFF0000ull}};
+  // Sample (2,2) in a 2x2 texture. Test independent U/V mode selection.
+  const unsigned expected_axis[4] = {0u, 1u, 1u, 0u};
+  const std::uint32_t colors[4] = {0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u, 0xFFFFFFFFu};
+  for (unsigned context = 0; context < 2u; ++context)
+    for (unsigned u_mode = 0; u_mode < 4u; ++u_mode)
+      for (unsigned v_mode = 0; v_mode < 4u; ++v_mode) {
+        ps2vita::Gs gs;
+        ps2vita::Gif gif(gs);
+        gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()), sizeof(upload));
+        gif_depth_register(gif, 1ull | (1ull << 14) | (1ull << 26) |
+            (1ull << 30) | (1ull << 34) | (1ull << 35), 6u + context);
+        const auto axis = [](unsigned mode, unsigned min_shift, unsigned max_shift) {
+          return mode == 2u ? (1ull << min_shift) | (1ull << max_shift) :
+                 mode == 3u ? 1ull << min_shift : 0ull;
+        };
+        // Poison the inactive context to detect accidentally shared state.
+        gif_depth_register(gif, 5u, 8u + (context ^ 1u));
+        gif_depth_register(gif, u_mode | (v_mode << 2) |
+            axis(u_mode, 4u, 14u) | axis(v_mode, 24u, 34u), 8u + context);
+        gif_depth_register(gif, 0x113u | (context << 9), 0u);
+        gif_depth_register(gif, 32u | (32ull << 16), 3u);
+        gif_depth_register(gif, 0u, 5u);
+        gif_depth_register(gif, 128u, 5u);
+        gif_depth_register(gif, 128ull << 16, 5u);
+        check(gs.pixel(0, 0) == colors[expected_axis[u_mode] + 2u * expected_axis[v_mode]],
+              "Texture addressing honors independent U/V modes and GS contexts");
+      }
+}
+
 void test_gif_textured_uv_triangles() {
   const std::array<std::uint64_t, 14> upload{{
       0x1000000000008004ull, 0xEull,
@@ -4155,7 +4191,7 @@ void test_textured_sprite_scissor_preserves_uv() {
   }};
   const std::array<std::array<std::uint64_t, 2>, 9> draw{{
       {{0x1000000000008008ull, 0xEull}},
-      {{1ull | (1ull << 14) | (1ull << 34) | (1ull << 35), 6u}}, // DECAL RGBA
+      {{1ull | (1ull << 14) | (2ull << 26) | (1ull << 34) | (1ull << 35), 6u}}, // 4x1 DECAL RGBA
       {{0x116u, 0u}},
       {{0x00030000000F0008ull, 0x40u}}, // host scissor X=2..3, Y=0
       {{0u, 3u}},
@@ -4653,6 +4689,7 @@ int main() {
   test_gs_perspective_safety();
   test_gif_textured_uv_triangles();
   test_gif_texture_color_component();
+  test_gif_texture_address_modes();
   test_vif_packet_capture();
   test_vif_unsupported_location();
   test_vif_direct();

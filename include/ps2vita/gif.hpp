@@ -76,6 +76,7 @@ private:
   std::uint64_t st_ = 0;
   std::uint32_t packed_q_ = 0x3F800000u;
   std::uint64_t tex0_[2]{};
+  std::uint64_t clamp_[2]{};
   std::uint64_t test_[2]{};
   std::uint64_t zbuf_[2]{};
   std::uint64_t alpha_[2]{};

@@ -31,6 +31,7 @@ void Gif::reset() {
   st_ = 0;
   packed_q_ = 0x3F800000u;
   tex0_[0] = tex0_[1] = 0;
+  clamp_[0] = clamp_[1] = 0;
   test_[0] = test_[1] = 0;
   zbuf_[0] = zbuf_[1] = 0;
   alpha_[0] = alpha_[1] = 0;
@@ -229,6 +230,20 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
   const auto width = static_cast<unsigned>((tex0 >> 14) & 0x3Fu) * 64u;
   const auto format = static_cast<unsigned>((tex0 >> 20) & 0x3Fu);
   if (width == 0u) return vertex_color;
+  const auto clamp = clamp_[context & 1u];
+  const auto address_coordinate = [](unsigned coordinate, unsigned mode,
+                                     unsigned size, unsigned minimum, unsigned maximum) {
+    switch (mode) {
+    case 0: return coordinate & (size - 1u); // REPEAT
+    case 1: return std::min(coordinate, size - 1u); // CLAMP
+    case 2: return std::min(std::max(coordinate, minimum), maximum); // REGION_CLAMP
+    default: return (coordinate & minimum) | maximum; // REGION_REPEAT
+    }
+  };
+  u = address_coordinate(u, clamp & 3u, 1u << ((tex0 >> 26) & 15u),
+                         (clamp >> 4) & 0x3FFu, (clamp >> 14) & 0x3FFu);
+  v = address_coordinate(v, (clamp >> 2) & 3u, 1u << ((tex0 >> 30) & 15u),
+                         (clamp >> 24) & 0x3FFu, (clamp >> 34) & 0x3FFu);
   std::uint32_t color = 0;
   if (format == 0u) {
     color = read_local32(base + static_cast<std::uint32_t>(
@@ -290,6 +305,8 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   case 0x03: uv_ = value; break;
   case 0x06: tex0_[0] = value; break;
   case 0x07: tex0_[1] = value; break;
+  case 0x08: clamp_[0] = value; break;
+  case 0x09: clamp_[1] = value; break;
   case 0x05: emit_xyz2(value); break;
   case 0x04: emit_xyz2(value & 0x00FFFFFFFFFFFFFFull); break;
   case 0x0C: emit_xyz2(value & 0x00FFFFFFFFFFFFFFull, false); break;
