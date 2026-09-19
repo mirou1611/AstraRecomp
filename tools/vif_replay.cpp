@@ -92,6 +92,19 @@ int main(int argc, char** argv) {
           static_cast<unsigned long long>(c.cycle), c.address, c.reg, c.lane, c.mask,
           c.value, c.parents[0], c.parents[1], c.parents[2], static_cast<unsigned>(c.incomplete),
           static_cast<unsigned>(c.accumulator));
+      if (c.kind == ps2vita::VuCauseRecord::Kind::Upper) {
+        // Resolve recorded generations, never final live registers: aliases
+        // and later writes can otherwise make an arithmetic comparison false.
+        for (unsigned operand = 0; operand < c.parents.size(); ++operand) {
+          const auto parent = c.parents[operand];
+          if (parent != 0u && parent <= vu.causes().size())
+            std::printf("  operand slot=%u generation=%u bits=%08X\n",
+                operand, parent, vu.causes()[parent - 1u].value);
+          else
+            std::printf("  operand slot=%u generation=%u unavailable_or_unused\n",
+                operand, parent);
+        }
+      }
       if (c.kind == ps2vita::VuCauseRecord::Kind::VifUpload)
         std::printf("  input packet=%llu source_offset=%llX (submitted stream, not EE address)\n",
             static_cast<unsigned long long>(c.packet), static_cast<unsigned long long>(c.source_offset));
