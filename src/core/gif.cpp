@@ -26,12 +26,14 @@ Gif::Gif(Gs& gs) : gs_(gs), local_memory_(4u * 1024u * 1024u) {}
 
 void Gif::reset() {
   triangle_records_.clear();
+  nondegenerate_triangle_records_.clear();
   prim_ = 0;
   rgbaq_ = 0x8000000080808080ull;
   st_ = 0;
   packed_q_ = 0x3F800000u;
   tex0_[0] = tex0_[1] = 0;
   clamp_[0] = clamp_[1] = 0;
+  frame_[0] = frame_[1] = 0;
   test_[0] = test_[1] = 0;
   zbuf_[0] = zbuf_[1] = 0;
   alpha_[0] = alpha_[1] = 0;
@@ -323,6 +325,8 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   case 0x48: test_[1] = value; break;
   case 0x4E: zbuf_[0] = value; break;
   case 0x4F: zbuf_[1] = value; break;
+  case 0x4C: frame_[0] = value; break;
+  case 0x4D: frame_[1] = value; break;
   case 0x50: bitbltbuf_ = value; break;
   case 0x51: trxpos_ = value; break;
   case 0x52: trxreg_ = value; break;
@@ -391,11 +395,23 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
       return;
     }
     if (draw) {
-      if (trace_triangles_ && triangle_records_.size() < 64u)
-        triangle_records_.push_back({{vertices_[0], vertices_[1], vertex},
+      if (trace_triangles_ && (triangle_records_.size() < 64u ||
+                              nondegenerate_triangle_records_.size() < 64u)) {
+        const GifTriangleRecord record{{vertices_[0], vertices_[1], vertex},
             {triangle_xyz_[0], triangle_xyz_[1], value},
             prim_, xyoffset_[context], scissor_[context], test_[context],
-            zbuf_[context]});
+            zbuf_[context], tex0_[context], clamp_[context], frame_[context],
+            alpha_[context], triangles_emitted_};
+        if (triangle_records_.size() < 64u) triangle_records_.push_back(record);
+        // Host-space area only: this selects useful raster inputs, not proof
+        // of visibility or native GS coverage. Keep the original prefix too.
+        const auto area = std::int64_t{vertices_[1].x - vertices_[0].x} *
+                            (vertex.y - vertices_[0].y) -
+                          std::int64_t{vertices_[1].y - vertices_[0].y} *
+                            (vertex.x - vertices_[0].x);
+        if (area != 0 && nondegenerate_triangle_records_.size() < 64u)
+          nondegenerate_triangle_records_.push_back(record);
+      }
       auto first = vertices_[0];
       auto second = vertices_[1];
       // Flat shading uses the drawing kick's color. Keep the assembly

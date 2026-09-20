@@ -1047,20 +1047,32 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(emulator.gif().first_image_trxpos()),
       static_cast<unsigned long long>(emulator.gif().first_image_trxreg()),
       static_cast<unsigned long long>(emulator.gif().first_image_trxdir()));
-  for (std::size_t index = 0; index < emulator.gif().triangle_records().size(); ++index) {
-    const auto& t = emulator.gif().triangle_records()[index];
-    std::printf("gif_triangle[%zu] prim=%llX xyoffset=%llX scissor=%llX test=%llX zbuf=%llX",
-        index, static_cast<unsigned long long>(t.prim),
+  const auto print_triangles = [](const char* label, const auto& records) {
+  for (std::size_t index = 0; index < records.size(); ++index) {
+    const auto& t = records[index];
+    std::printf("%s[%zu] sequence=%llu prim=%llX xyoffset=%llX scissor=%llX test=%llX zbuf=%llX",
+        label, index, static_cast<unsigned long long>(t.sequence),
+        static_cast<unsigned long long>(t.prim),
         static_cast<unsigned long long>(t.xyoffset),
         static_cast<unsigned long long>(t.scissor),
         static_cast<unsigned long long>(t.test),
         static_cast<unsigned long long>(t.zbuf));
+    std::printf(" tex0=%016llX clamp=%016llX frame=%016llX alpha=%016llX",
+        static_cast<unsigned long long>(t.tex0),
+        static_cast<unsigned long long>(t.clamp),
+        static_cast<unsigned long long>(t.frame),
+        static_cast<unsigned long long>(t.alpha));
     for (const auto& v : t.vertices)
-      std::printf(" vertex=(%d,%d,%u,%08X)", v.x, v.y, v.z, v.color);
+      std::printf(" vertex=(%d,%d,%u,%08X) st=%016llX uv=%016llX q=%08X",
+          v.x, v.y, v.z, v.color, static_cast<unsigned long long>(v.st),
+          static_cast<unsigned long long>(v.uv), v.q);
     for (const auto xyz : t.xyz)
       std::printf(" xyz=%016llX", static_cast<unsigned long long>(xyz));
     std::putchar('\n');
   }
+  };
+  print_triangles("gif_triangle", emulator.gif().triangle_records());
+  print_triangles("gif_nondegenerate", emulator.gif().nondegenerate_triangle_records());
   for (std::size_t index = 0; index < emulator.gif().image_records().size();
        ++index) {
     const auto& image = emulator.gif().image_records()[index];

@@ -659,16 +659,53 @@ void test_triangle_trace() {
   };
   submit();
   check(gif.triangle_records().empty(), "Triangle tracing disabled by default");
+  check(gif.nondegenerate_triangle_records().empty(),
+        "Area-selected tracing disabled by default");
   gif.enable_triangle_trace(true);
   for (unsigned i = 0; i < 65; ++i) submit();
   check(gif.triangle_records().size() == 64u && gif.triangles_emitted() == 66u,
         "Triangle trace bounded without limiting rendering");
+  check(gif.nondegenerate_triangle_records().size() == 64u,
+        "Area-selected trace is independently bounded");
   const auto& t = gif.triangle_records().front();
   check(t.prim == 3u && t.vertices[1].x == 2 && t.vertices[2].y == 2 &&
         t.test == 0u && t.zbuf == 0u && t.xyz[1] == 128u &&
         t.xyz[2] == (128ull << 16), "Triangle trace records geometry and GS state");
   gif.reset();
   check(gif.triangle_records().empty(), "Reset clears triangle records");
+  check(gif.nondegenerate_triangle_records().empty(), "Reset clears area-selected records");
+  const auto reg = [&](std::uint64_t value, std::uint64_t address) {
+    const std::array<std::uint64_t, 4> p{{0x1000000000008001ull, 0xEull, value, address}};
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(p.data()), sizeof(p)),
+          "Draw-state trace register accepted");
+  };
+  for (unsigned context = 0; context < 2; ++context) {
+    reg(0x1234u + context, 0x06u + context);
+    reg(0x5678u + context, 0x08u + context);
+    reg(0x9ABCu + context, 0x4Cu + context);
+    reg(0xDEF0u + context, 0x42u + context);
+  }
+  // Fill the old prefix with degenerate draws before a useful context-2 draw.
+  for (unsigned i = 0; i < 70; ++i) {
+    reg(3u, 0u);
+    reg(0u, 5u); reg(0u, 5u); reg(0u, 5u);
+  }
+  reg(3u | (1u << 9), 0u);
+  reg(0u, 5u); reg(128u, 5u); reg(128ull << 16, 5u);
+  check(gif.triangle_records().size() == 64u &&
+        gif.nondegenerate_triangle_records().size() == 1u,
+        "Area-selected trace survives a full degenerate prefix");
+  const auto& selected = gif.nondegenerate_triangle_records().front();
+  check(selected.sequence == 70u && selected.tex0 == 0x1235u &&
+        selected.clamp == 0x5679u && selected.frame == 0x9ABDu &&
+        selected.alpha == 0xDEF1u && gif.triangle_records()[0].frame == 0x9ABCu,
+        "Trace snapshots selected context state and original draw sequence");
+  gif.reset();
+  submit();
+  const auto& cleared = gif.triangle_records().front();
+  check(cleared.tex0 == 0u && cleared.clamp == 0u && cleared.frame == 0u &&
+        cleared.alpha == 0u && cleared.sequence == 0u,
+        "Reset clears diagnostic draw state and sequence");
 }
 
 void test_vif_packet_capture() {

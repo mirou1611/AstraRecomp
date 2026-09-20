@@ -24,6 +24,8 @@ struct GifTriangleRecord {
   std::array<GsVertex, 3> vertices{};
   std::array<std::uint64_t, 3> xyz{};
   std::uint64_t prim = 0, xyoffset = 0, scissor = 0, test = 0, zbuf = 0;
+  std::uint64_t tex0 = 0, clamp = 0, frame = 0, alpha = 0;
+  std::uint64_t sequence = 0;
 };
 
 // GIF packet frontend. It owns guest GS register state while Gs remains the
@@ -35,6 +37,9 @@ public:
   void enable_triangle_trace(bool enabled) { trace_triangles_ = enabled; }
   const std::vector<GifTriangleRecord>& triangle_records() const {
     return triangle_records_;
+  }
+  const std::vector<GifTriangleRecord>& nondegenerate_triangle_records() const {
+    return nondegenerate_triangle_records_;
   }
   bool submit(const std::uint8_t* data, std::size_t size);
   std::uint64_t packets_submitted() const { return packets_submitted_; }
@@ -70,6 +75,7 @@ private:
   Gs& gs_;
   bool trace_triangles_ = false;
   std::vector<GifTriangleRecord> triangle_records_;
+  std::vector<GifTriangleRecord> nondegenerate_triangle_records_;
   std::vector<std::uint8_t> local_memory_;
   std::uint64_t prim_ = 0;
   std::uint64_t rgbaq_ = 0x8000000080808080ull;
@@ -77,6 +83,8 @@ private:
   std::uint32_t packed_q_ = 0x3F800000u;
   std::uint64_t tex0_[2]{};
   std::uint64_t clamp_[2]{};
+  // Retained for diagnostics; framebuffer addressing is not implemented yet.
+  std::uint64_t frame_[2]{};
   std::uint64_t test_[2]{};
   std::uint64_t zbuf_[2]{};
   std::uint64_t alpha_[2]{};
