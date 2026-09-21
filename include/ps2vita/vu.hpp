@@ -24,6 +24,10 @@ struct Vu1StoreRecord {
   std::uint16_t pc = 0, address = 0;
   std::uint32_t value = 0;
 };
+struct Vu1FlagReadRecord {
+  std::uint64_t pair = 0, cycle = 0;
+  std::uint16_t pc = 0, mac = 0, mask = 0, result = 0;
+};
 struct VuCauseRecord {
   enum class Kind { Upper, LowerInput, Store, MemoryLoad, VifUpload } kind = Kind::Upper;
   std::uint64_t packet = 0, source_offset = 0;
@@ -56,6 +60,7 @@ public:
   const std::array<std::uint32_t, 4>& rejected_causes() const { return rejected_causes_; }
   std::uint64_t dropped_causes() const { return dropped_causes_; }
   const std::vector<Vu1StoreRecord>& store_records() const { return store_records_; }
+  const std::vector<Vu1FlagReadRecord>& flag_read_records() const { return flag_read_records_; }
   std::uint64_t dropped_store_records() const { return dropped_store_records_; }
   std::uint64_t first_rejected_pair() const { return first_rejected_pair_; }
   std::uint64_t cycles_executed() const { return cycles_; }
@@ -107,6 +112,7 @@ private:
   bool q_pending_ = false;
   bool trace_stores_ = false;
   std::vector<Vu1StoreRecord> store_records_;
+  std::vector<Vu1FlagReadRecord> flag_read_records_;
   std::uint64_t dropped_store_records_ = 0, first_rejected_pair_ = 0;
   std::array<std::array<std::uint32_t, 4>, 32> lower_vf_snapshot_{};
   bool running_ = false;

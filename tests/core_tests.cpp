@@ -3737,6 +3737,23 @@ void test_vu1_fmand_prior_pair_flags() {
   vu.run(1u);
   check(vu.state().vi[1] == 0x0050u,
         "VU1 FMAND reads the prior MAC flags from its paired upper instruction");
+  check(vu.flag_read_records().empty(), "VU flag-read diagnostics disabled by default");
+  vu.reset();
+  vu.enable_store_trace(true);
+  vu.state().mac = 0x00D0u;
+  vu.state().vi[12] = 0x00C0u;
+  vu.start(0u);
+  vu.run(1u);
+  check(vu.flag_read_records().size() == 1u &&
+        vu.flag_read_records()[0].pc == 0u &&
+        vu.flag_read_records()[0].mac == 0x00D0u &&
+        vu.flag_read_records()[0].mask == 0x00C0u &&
+        vu.flag_read_records()[0].result == 0x00C0u,
+        "FMAND trace snapshots actual delayed flags and pre-write mask");
+  for (unsigned n = 0; n < 130u; ++n) { vu.start(0u); vu.run(1u); }
+  check(vu.flag_read_records().size() == 128u, "FMAND diagnostics bounded to 128 reads");
+  vu.reset();
+  check(vu.flag_read_records().empty(), "VU reset clears flag-read diagnostics");
 }
 
 void test_vu1_fmand_four_issue_latency() {

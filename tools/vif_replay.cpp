@@ -30,6 +30,7 @@ int main(int argc, char** argv) {
   bool gif_ok = true;
   unsigned delivered = 0;
   while (vif.pop_gif_packet(packet)) {
+    const auto triangles_before = gif.triangles_emitted();
     if (packet.size() >= 16u && delivered < 16u) {
       // Bytes delivered by VIF (PATH1 or DIRECT), not a later VU RAM snapshot.
       const auto word = [&](unsigned offset) {
@@ -44,11 +45,59 @@ int main(int argc, char** argv) {
           delivered, packet.size(), static_cast<unsigned long long>(tag),
           static_cast<unsigned long long>(word(8)), unsigned(tag & 0x7FFFu),
           nreg ? nreg : 16u, unsigned((tag >> 58) & 3u), unsigned((tag >> 15) & 1u));
+      // Inspect only the complete leading PACKED tag, not arbitrary payload
+      // bytes or a later VU-memory snapshot. ADC suppresses a drawing kick;
+      // it does not mean the XYZ vertex was absent from the stream.
+      const unsigned count = nreg ? nreg : 16u;
+      const auto loops = unsigned(tag & 0x7FFFu);
+      const auto regs = word(8);
+      if (((tag >> 58) & 3u) == 0u &&
+          std::size_t{loops} * count <= (packet.size() - 16u) / 16u) {
+        unsigned vertices = 0, suppressed = 0, shown = 0;
+        for (unsigned loop = 0; loop < loops; ++loop)
+          for (unsigned r = 0; r < count; ++r) {
+            const unsigned descriptor = (regs >> (r * 4u)) & 15u;
+            if (descriptor != 4u && descriptor != 5u &&
+                descriptor != 12u && descriptor != 13u) continue;
+            const unsigned offset = 16u + (loop * count + r) * 16u;
+            const auto lo = word(offset), hi = word(offset + 8u);
+            const bool adc = (hi & (1ull << 47)) != 0u || descriptor >= 12u;
+            ++vertices; suppressed += adc;
+            if (shown++ < 8u)
+              std::printf("  packed_xyz vertex=%u descriptor=%X x=%04X y=%04X z=%08X adc=%u raw=%016llX/%016llX\n",
+                  vertices - 1u, descriptor, unsigned(lo & 0xFFFFu),
+                  unsigned((lo >> 32) & 0xFFFFu),
+                  descriptor == 4u || descriptor == 12u ? unsigned((hi >> 4) & 0xFFFFFFu) : unsigned(hi),
+                  unsigned(adc), static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi));
+          }
+        std::printf("  packed_xyz_summary vertices=%u suppressed_kicks=%u (leading tag only)\n",
+                    vertices, suppressed);
+      }
     }
     ++delivered;
     gif_ok = gif.submit(packet.data(), packet.size()) && gif_ok;
+    if (delivered <= 16u)
+      std::printf("  delivered_triangles=%llu\n",
+          static_cast<unsigned long long>(gif.triangles_emitted() - triangles_before));
   }
   const auto& vu = vif.vu1();
+  for (const auto& f : vu.flag_read_records())
+    std::printf("fmand pc=%04X pair=%llu cycle=%llu mac=%04X mask=%04X result=%04X\n",
+        f.pc, static_cast<unsigned long long>(f.pair), static_cast<unsigned long long>(f.cycle),
+        f.mac, f.mask, f.result);
+  unsigned adc_causes = 0;
+  for (const auto& c : vu.causes()) {
+    if (c.kind != ps2vita::VuCauseRecord::Kind::Store || c.lane != 3u ||
+        c.value != 0xFFFF8000u || adc_causes++ >= 8u) continue;
+    std::printf("adc_store pc=%04X pair=%llu address=%04X reg=%u parent=%u\n",
+        c.pc, static_cast<unsigned long long>(c.pair), c.address, c.reg, c.parents[0]);
+    const auto parent = c.parents[0];
+    if (parent && parent <= vu.causes().size()) {
+      const auto& p = vu.causes()[parent - 1u];
+      std::printf("  adc_parent pc=%04X instruction=%08X pair=%llu value=%08X incomplete=%u\n",
+          p.pc, p.instruction, static_cast<unsigned long long>(p.pair), p.value, unsigned(p.incomplete));
+    }
+  }
   std::printf("accepted=%u pending_direct_bytes=%zu vif_rejected=%llu vu_pairs=%llu path1=%llu/%llu "
               "reject_pc=%04X kick=%04X bad=%04X tag=%016llX triangles=%llu\n",
       static_cast<unsigned>(accepted), vif.pending_direct_bytes(),

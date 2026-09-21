@@ -164,6 +164,7 @@ void Vu1::trace_upper(std::uint32_t code) {
 }
 
 void Vu1::reset() {
+  flag_read_records_.clear();
   enable_causal_trace(trace_causes_);
   vf_ready_ = {}; cycles_ = vf_stall_cycles_ = 0;
   q_ready_ = q_stall_cycles_ = 0; pending_q_ = 0; q_pending_ = false;
@@ -392,6 +393,10 @@ bool Vu1::execute_lower(std::uint32_t code) {
     return true;
   }
   if (group == 0x1Au) { // FMAND
+    const auto mask = state_.vi[is];
+    if (trace_stores_ && flag_read_records_.size() < 128u)
+      flag_read_records_.push_back({pairs_executed_, cycles_, state_.pc,
+          lower_mac_snapshot_, mask, static_cast<std::uint16_t>(lower_mac_snapshot_ & mask)});
     if (it != 0u) state_.vi[it] = static_cast<std::uint16_t>(
         lower_mac_snapshot_ & state_.vi[is]);
     return true;
