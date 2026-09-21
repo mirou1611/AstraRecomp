@@ -1,9 +1,26 @@
 param([Parameter(Mandatory=$true)][string]$ImagePath, [switch]$Perspective,
-      [switch]$Highlight, [switch]$RegionRepeat)
+      [switch]$Highlight, [switch]$RegionRepeat, [switch]$Feedback)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 $bitmap = [System.Drawing.Bitmap]::new((Resolve-Path -LiteralPath $ImagePath).Path)
 try {
+    if ($Feedback) {
+        if ($bitmap.Width -lt 16 -or $bitmap.Height -lt 8) {
+            throw 'Feedback output is smaller than the 16x8 fixture region.'
+        }
+        $mismatches = 0
+        for ($y = 0; $y -lt 8; $y++) {
+            for ($x = 0; $x -lt 16; $x++) {
+                $expected = if ($x -lt 8) { 0xFF0000 } else { 0x0000FF }
+                if (($bitmap.GetPixel($x, $y).ToArgb() -band 0xFFFFFF) -ne $expected) {
+                    $mismatches++
+                }
+            }
+        }
+        Write-Output "Feedback native RGB mismatches: $mismatches / 128 (alpha constrained by guest EQUAL 64 test)"
+        if ($mismatches -ne 0) { throw 'Framebuffer-feedback reference comparison failed.' }
+        return
+    }
     if ($bitmap.Width -lt 128 -or $bitmap.Height -lt 128) {
         throw 'Reference render-target crop is smaller than the 128x128 fixture region.'
     }

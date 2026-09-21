@@ -16,9 +16,12 @@ int main(int argc, char** argv) {
   const bool highlight1 = argc > 1 && std::strcmp(argv[1], "--highlight") == 0;
   const bool highlight2 = argc > 1 && std::strcmp(argv[1], "--highlight2") == 0;
   const bool region_repeat = argc > 1 && std::strcmp(argv[1], "--region-repeat") == 0;
+  // Diagnostic until shared framebuffer storage is implemented. Deliberately
+  // returns failure on unsupported feedback; never mark it WILL_FAIL in CTest.
+  const bool feedback = argc > 1 && std::strcmp(argv[1], "--feedback") == 0;
   const bool highlight = highlight1 || highlight2;
   const bool rgb = rgb_decal || rgb_modulate;
-  if (perspective || rgb || highlight || region_repeat) { --argc; ++argv; }
+  if (perspective || rgb || highlight || region_repeat || feedback) { --argc; ++argv; }
   const unsigned expected_alpha = highlight1 ? 0x60u : highlight2 ? 0x20u :
                                   rgb ? 0x40u : 0xFFu;
   ps2vita::Emulator emulator;
@@ -60,8 +63,30 @@ int main(int argc, char** argv) {
   // Make the alpha result observable in reference RGB captures too.
   if (rgb) ad(1u | (4u << 1) | (0x40u << 4), 0x47u); // EQUAL, KEEP
   if (highlight) ad(1u | (4u << 1) | (expected_alpha << 4), 0x47u);
-  ad(perspective ? 0x13u : 0x113u, 0u);
-  if (perspective) {
+  if (feedback) {
+    // A=0x80000, B=0x40000. No IMAGE upload supplies A: it must come from draws.
+    const auto solid = [&](std::uint32_t color) {
+      ad(64u | (1ull << 16), 0x4Cu); // A, 64-wide PSMCT32
+      ad(0u, 0x47u);
+      ad(6u, 0u); ad(color, 1u);
+      ad(0u, 5u); ad(128u | (128ull << 16), 5u); // 8x8 native
+    };
+    const auto copy = [&](unsigned x) {
+      ad(32u | (10ull << 16), 0x4Cu); // B, 640-wide PSMCT32
+      ad(0u, 0x3Fu); // TEXFLUSH
+      ad(0x800ull | (1ull << 14) | (1ull << 20) | (3ull << 26) |
+          (3ull << 30) | (1ull << 34) | (1ull << 35), 6u);
+      ad(0x40u, 0x3Bu); // TEXA: TA0=64, AEM=0 (PSMCT24 alpha)
+      ad(1u | (4u << 1) | (0x40u << 4), 0x47u); // EQUAL 64, KEEP
+      ad(0x116u, 0u); ad(0x80808080u, 1u);
+      ad(0u, 3u); ad(x * 16u, 5u);
+      ad(128u | (128ull << 16), 3u);
+      ad((x + 8u) * 16u | (128ull << 16), 5u);
+    };
+    solid(0x800000FFu); copy(0u); // red A -> left B
+    solid(0x80FF0000u); copy(8u); // blue A -> right B; left B must stay red
+  } else if (perspective) {
+    ad(0x13u, 0u);
     ad(0x3F80000080808080ull, 1u); // Q=1
     ad(0u, 2u); ad(0u, 5u);
     ad(0x4000000080808080ull, 1u); // Q=2
@@ -69,6 +94,7 @@ int main(int argc, char** argv) {
     ad(0x3F80000080808080ull, 1u); // Q=1
     ad(0x3F80000000000000ull, 2u); ad(2048ull << 16, 5u); // S=0, T=1
   } else {
+    ad(0x113u, 0u);
     ad(rgb || highlight ? 0x40808080u : 0x80808080u, 1u);
     ad(0u, 3u); ad(0u, 5u);
     ad(region_repeat ? 64u : 32u, 3u); ad(2048u, 5u);
@@ -124,8 +150,8 @@ int main(int argc, char** argv) {
   const auto reason = emulator.run_slice(10000u); // Hard bound on guest poll.
   bool ok = loaded.ok && loaded.entry == entry && loaded.segments == 1u &&
       reason == ps2vita::StopReason::Break &&
-      emulator.gif().triangles_emitted() == 1u &&
-      emulator.gif().sprites_emitted() == 1u &&
+      emulator.gif().triangles_emitted() == (feedback ? 0u : 1u) &&
+      emulator.gif().sprites_emitted() == (feedback ? 5u : 1u) &&
       emulator.gif().packets_rejected() == 0u &&
       emulator.gif().pending_bytes() == 0u &&
       emulator.vif1().packets_submitted() == 0u &&
@@ -144,6 +170,8 @@ int main(int argc, char** argv) {
            (green ? 0x0000FF00u : blue ? 0x00FF0000u : 0x000000FFu)) : 0u;
       if (region_repeat && x + y < 32)
         expected = ((y / 8) % 2) ? 0xFFFFFFFFu : 0xFF00FF00u;
+      if (feedback)
+        expected = y < 2 && x < 4 ? (x < 2 ? 0x400000FFu : 0x40FF0000u) : 0u;
       if (emulator.gs().pixel(x, y) != expected) ++mismatches;
     }
   ok = ok && mismatches == 0u;
@@ -168,7 +196,7 @@ int main(int argc, char** argv) {
   const bool at_done = emulator.cpu().state().pc == done ||
                       emulator.cpu().state().pc == done + 4u;
   ok = ok && loop_loaded.ok && loop_reason == ps2vita::StopReason::StepLimit &&
-      at_done && emulator.gif().triangles_emitted() == 1u &&
+      at_done && emulator.gif().triangles_emitted() == (feedback ? 0u : 1u) &&
       emulator.vif1().packets_submitted() == 0u &&
       (memory.read32(0x1000A000u) & 0x100u) == 0u;
   for (std::size_t i = 0; i < expected_pixels.size(); ++i)
@@ -186,10 +214,10 @@ int main(int argc, char** argv) {
   emulator.gs().clear(0x12345678u);
   const auto negative_reason = emulator.run_slice(10000u);
   ok = ok && negative_loaded.ok && negative_reason == ps2vita::StopReason::StepLimit &&
-      emulator.gif().sprites_emitted() == 0u &&
+      emulator.gif().sprites_emitted() == (feedback ? 4u : 0u) &&
       emulator.gs().pixel(ps2vita::Gs::kWidth - 1, ps2vita::Gs::kHeight - 1) ==
           0x12345678u;
-  std::cout << "PATH3 EE-store/DMA/textured-triangle: " << (ok ? "PASS" : "FAIL")
+  std::cout << (feedback ? "PATH3 framebuffer-feedback: " : "PATH3 EE-store/DMA/textured-triangle: ") << (ok ? "PASS" : "FAIL")
             << " pixel_mismatches=" << mismatches << '\n';
   return ok ? 0 : 1;
 }
