@@ -72,7 +72,7 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 
 ## Project status
 
-Latest verified research checkpoint: **September 15, 2026**. These are development
+Latest verified research checkpoint: **September 21, 2026**. These are development
 results, not a game-compatibility list or a measured completion percentage.
 
 | Area | Current state |
@@ -87,24 +87,32 @@ results, not a game-compatibility list or a measured completion percentage.
 
 ### What the latest graphics milestone actually means
 
-A completed host replay executes **300,000,000 EE steps**, with **998 VU1
-instruction pairs**, **34,810 emitted triangles**, and **10,028/17,920 nonblack
-RGB pixels**. That ST/Q checkpoint produces textured rectangular regions, not
-the recognizable intro. The subsequent TCC and HIGHLIGHT fixes are verified by
-small guest ELF fixtures against PCSX2 software-renderer captures, with zero RGB
-mismatches in the compared regions. These are reference checks, not PS2 hardware
-validation. Release and UBSan suites pass **8/8 CTest targets** each, and the Vita
-VPK cross-build passes.
+A small guest ELF now draws into framebuffer A, samples A as a 24-bit texture
+into B, changes A, and samples it again without overwriting B's earlier result.
+This previously failed in Astra; it now passes, including texture-alpha checks.
+PCSX2 software-renderer output matches all **128 native RGB pixels** checked.
+Release and UBSan suites pass **14/14 CTest targets** each, and the Vita VPK
+cross-build passes. These are reference checks, not physical PS2/Vita validation.
+
+The new shared color storage is deliberately approximate: linear addressing,
+quarter-resolution rasterization, PSMCT32/24 targets, and a preview of the active
+draw target. Native GS swizzling, depth-buffer routing, display scanout and
+broader formats/filtering remain incomplete. Earlier 300-million-step BIOS
+captures showed textured rectangles, not a recognizable intro.
+The completed feedback-enabled replay changes that image, including blue
+textured regions, but still does **not** show a recognizable intro. Its execution
+endpoint and draw counts are unchanged; this is not further BIOS execution.
 
 This is evidence that part of the guest graphics pipeline reaches the rasterizer,
 **not evidence of a recognizable boot animation, playable games, or acceptable
 speed on physical Vita hardware**. One malformed VU1 PATH1 tag remains rejected.
-Texture addressing/clamping, formats, fog, GS buffer semantics and VU/GIF timing
-still need work. See the [saved investigation and replay details](docs/SESSION_2026-09-15.md).
+Formats, fog, native GS buffer semantics and VU/GIF timing still need work.
+See the [framebuffer-feedback implementation and validation](docs/SESSION_2026-09-21.md).
 
 ### What comes next
 
-- Capture and inspect the BIOS framebuffer and trace the rejected graphics packet.
+- Compare BIOS output after the framebuffer-feedback change; align useful draws
+  with reference captures before assigning the remaining failure to VU timing.
 - Improve the VU and GS behavior needed for a recognizable startup sequence.
 - Return to SPU2 sound-generation and Vita audio output after graphics bring-up.
 - Expand native-code coverage while checking it against the interpreter.
