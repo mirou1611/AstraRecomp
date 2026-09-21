@@ -25,6 +25,8 @@ int scaled_coordinate(std::uint64_t xyz, std::uint64_t offset,
 Gif::Gif(Gs& gs) : gs_(gs), local_memory_(4u * 1024u * 1024u) {}
 
 void Gif::reset() {
+  gs_.set_color_target(nullptr, 0u);
+  texa_ = 0;
   triangle_records_.clear();
   nondegenerate_triangle_records_.clear();
   prim_ = 0;
@@ -247,9 +249,14 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
   v = address_coordinate(v, (clamp >> 2) & 3u, 1u << ((tex0 >> 30) & 15u),
                          (clamp >> 24) & 0x3FFu, (clamp >> 34) & 0x3FFu);
   std::uint32_t color = 0;
-  if (format == 0u) {
+  if (format == 0u || format == 1u) {
     color = read_local32(base + static_cast<std::uint32_t>(
         (static_cast<std::uint64_t>(v) * width + u) * 4u));
+    if (format == 1u) {
+      color &= 0x00FFFFFFu;
+      const auto alpha = (texa_ & 0x8000u) != 0u && color == 0u ? 0u : texa_ & 0xFFu;
+      color |= static_cast<std::uint32_t>(alpha) << 24;
+    }
   } else if (format == 2u) {
     const auto address = base + static_cast<std::uint32_t>(
         (static_cast<std::uint64_t>(v) * width + u) * 2u);
@@ -315,6 +322,7 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   case 0x0D: emit_xyz2(value, false); break;
   case 0x18: xyoffset_[0] = value; break;
   case 0x19: xyoffset_[1] = value; break;
+  case 0x3B: texa_ = value; break;
   case 0x40: scissor_[0] = value; break;
   case 0x41: scissor_[1] = value; break;
   case 0x42: alpha_[0] = value; break;
@@ -338,6 +346,7 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
 void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   const auto primitive = static_cast<unsigned>(prim_ & 7u);
   const auto context = static_cast<unsigned>((prim_ >> 9) & 1u);
+  gs_.set_color_target(&local_memory_, frame_[context]);
   gs_.set_blend_state((prim_ & (1u << 6)) != 0u, alpha_[context], pabe_, colclamp_);
   gs_.set_alpha_test(test_[context]);
   const auto clip = scissor_[context];

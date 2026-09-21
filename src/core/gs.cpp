@@ -29,9 +29,41 @@ std::uint32_t mix_channel(std::uint32_t ca, std::uint32_t cb, std::uint32_t cc,
 
 Gs::Gs() : color_(kWidth * kHeight), depth_(kWidth * kHeight) { clear(0); }
 
+void Gs::set_color_target(std::vector<std::uint8_t>* memory, std::uint64_t frame) {
+  const unsigned format = (frame >> 24) & 0x3Fu;
+  color_width_ = ((frame >> 16) & 0x3Fu) * 64u;
+  color_base_ = (frame & 0x1FFu) * 8192u;
+  color_mask_ = static_cast<std::uint32_t>(frame >> 32) |
+                (format == 1u ? 0xFF000000u : 0u);
+  color_memory_ = memory && memory->size() == 4u * 1024u * 1024u &&
+                  color_width_ != 0u && format <= 1u ? memory : nullptr;
+}
+
+std::uint32_t Gs::target_read(std::uint32_t address) const {
+  std::uint32_t value = 0;
+  for (unsigned b = 0; b < 4; ++b)
+    value |= std::uint32_t{(*color_memory_)[(address + b) & 0x3FFFFFu]} << (8u * b);
+  return value;
+}
+
+void Gs::target_write(int x, int y, std::uint32_t color, std::uint32_t mask) {
+  if (static_cast<unsigned>(x * 4) >= color_width_) return;
+  for (unsigned dy = 0; dy < 4; ++dy)
+    for (unsigned dx = 0; dx < 4; ++dx) {
+      const auto address = color_base_ +
+          ((y * 4u + dy) * color_width_ + x * 4u + dx) * 4u;
+      const auto value = (color & ~mask) | (target_read(address) & mask);
+      for (unsigned b = 0; b < 4; ++b)
+        (*color_memory_)[(address + b) & 0x3FFFFFu] = value >> (b * 8u);
+    }
+}
+
 void Gs::clear(std::uint32_t color, std::uint32_t depth) {
   std::fill(color_.begin(), color_.end(), color);
   std::fill(depth_.begin(), depth_.end(), depth);
+  if (color_memory_)
+    for (int y = 0; y < kHeight; ++y)
+      for (int x = 0; x < kWidth; ++x) target_write(x, y, color, 0u);
 }
 
 void Gs::write(int x, int y, std::uint32_t z, std::uint32_t color) {
@@ -63,7 +95,7 @@ void Gs::write(int x, int y, std::uint32_t z, std::uint32_t color) {
     if (write_depth) depth_[index] = z;
     if (!write_color) return;
     if (blend_enabled_ && (!blend_pabe_ || (color & 0x80000000u) != 0u)) {
-      const auto destination = color_[index];
+      const auto destination = pixel(x, y);
       const auto source = color;
       const unsigned a = blend_equation_ & 3u;
       const unsigned b = (blend_equation_ >> 2) & 3u;
@@ -86,7 +118,11 @@ void Gs::write(int x, int y, std::uint32_t z, std::uint32_t color) {
         }
       }
     }
-    if (preserve_alpha) color = (color & 0x00FFFFFFu) | (color_[index] & 0xFF000000u);
+    if (preserve_alpha) color = (color & 0x00FFFFFFu) | (pixel(x, y) & 0xFF000000u);
+    if (color_memory_) {
+      target_write(x, y, color, color_mask_ | (preserve_alpha ? 0xFF000000u : 0u));
+      color = pixel(x, y);
+    }
     color_[index] = color;
   }
 }
@@ -191,7 +227,18 @@ void Gs::triangle(GsVertex a, GsVertex b, GsVertex c,
 
 std::uint32_t Gs::pixel(int x, int y) const {
   if (x < 0 || y < 0 || x >= kWidth || y >= kHeight) return 0;
+  if (color_memory_) {
+    if (static_cast<unsigned>(x * 4) >= color_width_) return 0;
+    return target_read(color_base_ + (y * 4u * color_width_ + x * 4u) * 4u);
+  }
   return color_[static_cast<std::size_t>(y * kWidth + x)];
+}
+
+const std::uint32_t* Gs::pixels() const {
+  if (color_memory_)
+    for (int y = 0; y < kHeight; ++y)
+      for (int x = 0; x < kWidth; ++x) color_[y * kWidth + x] = pixel(x, y);
+  return color_.data();
 }
 
 } // namespace ps2vita

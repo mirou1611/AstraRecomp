@@ -16,8 +16,7 @@ int main(int argc, char** argv) {
   const bool highlight1 = argc > 1 && std::strcmp(argv[1], "--highlight") == 0;
   const bool highlight2 = argc > 1 && std::strcmp(argv[1], "--highlight2") == 0;
   const bool region_repeat = argc > 1 && std::strcmp(argv[1], "--region-repeat") == 0;
-  // Diagnostic until shared framebuffer storage is implemented. Deliberately
-  // returns failure on unsupported feedback; never mark it WILL_FAIL in CTest.
+  // Two-target feedback oracle: independent expected colors, not captured output.
   const bool feedback = argc > 1 && std::strcmp(argv[1], "--feedback") == 0;
   const bool highlight = highlight1 || highlight2;
   const bool rgb = rgb_decal || rgb_modulate;
@@ -55,6 +54,12 @@ int main(int argc, char** argv) {
   ad(0x07FF000007FF0000ull, 0x40u); // SCISSOR
   ad(0u, 0x47u); // No alpha/depth test
   ad(6u, 0u); // Untextured, unblended sprite clears the full 640x448 target.
+  // Normally suppressed sentinel draw. The missing-clear negative control
+  // enables it, so poison resides in guest framebuffer memory, not a host cache.
+  ad(0x12345678u, 1u);
+  ad(0u, 5u);
+  const auto poison_kick_address_word = packet.size() + 3u;
+  ad(10240u | (7168ull << 16), 0xDu);
   ad(0u, 1u);
   ad(0u, 5u);
   const auto clear_kick_address_word = packet.size() + 3u;
@@ -199,8 +204,9 @@ int main(int argc, char** argv) {
       at_done && emulator.gif().triangles_emitted() == (feedback ? 0u : 1u) &&
       emulator.vif1().packets_submitted() == 0u &&
       (memory.read32(0x1000A000u) & 0x100u) == 0u;
+  const auto* loop_pixels = emulator.gs().pixels();
   for (std::size_t i = 0; i < expected_pixels.size(); ++i)
-    ok = (emulator.gs().pixels()[i] == expected_pixels[i]) && ok;
+    ok = (loop_pixels[i] == expected_pixels[i]) && ok;
   if (argc >= 4) {
     std::ofstream output(argv[3], std::ios::binary);
     output.write(reinterpret_cast<const char*>(elf.data()), elf.size());
@@ -210,11 +216,12 @@ int main(int argc, char** argv) {
   // background must remain poisoned, demonstrating this gate detects a missing
   // guest clear instead of accidentally relying on reset-time black pixels.
   put(0x100u + packet_address - entry + clear_kick_address_word * 8u, 0xDu, 8);
+  put(0x100u + packet_address - entry + poison_kick_address_word * 8u, 5u, 8);
   const auto negative_loaded = emulator.load_elf(elf.data(), elf.size());
   emulator.gs().clear(0x12345678u);
   const auto negative_reason = emulator.run_slice(10000u);
   ok = ok && negative_loaded.ok && negative_reason == ps2vita::StopReason::StepLimit &&
-      emulator.gif().sprites_emitted() == (feedback ? 4u : 0u) &&
+      emulator.gif().sprites_emitted() == (feedback ? 5u : 1u) &&
       emulator.gs().pixel(ps2vita::Gs::kWidth - 1, ps2vita::Gs::kHeight - 1) ==
           0x12345678u;
   std::cout << (feedback ? "PATH3 framebuffer-feedback: " : "PATH3 EE-store/DMA/textured-triangle: ") << (ok ? "PASS" : "FAIL")

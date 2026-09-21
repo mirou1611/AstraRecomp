@@ -3805,8 +3805,13 @@ void test_captured_bios_gif_sprite() {
   std::memcpy(packet.data(), qwords.data(), packet.size());
 
   ps2vita::Gs gs;
-  gs.clear(0xFFFF00FFu);
   ps2vita::Gif gif(gs);
+  // Bind the captured packet's guest target before poisoning it. A host-only
+  // clear no longer initializes the separate framebuffer selected by FRAME.
+  const std::array<std::uint64_t, 6> bind{{0x1000000000008002ull, 0xEull,
+      0xA0050u, 0x4Cu, 0u, 0xDu}};
+  gif.submit(reinterpret_cast<const std::uint8_t*>(bind.data()), sizeof(bind));
+  gs.clear(0xFFFF00FFu);
   check(gif.submit(packet.data(), packet.size()),
         "GIF frontend accepts the captured packed A+D packet");
   check(gs.pixel(0, 0) == 0u && gs.pixel(159, 63) == 0u &&
@@ -3970,6 +3975,70 @@ void test_gif_texture_color_component() {
           triangle();
           check(gs.pixel(0, 0) == 0x12345678u,
                 "TCC-selected alpha reaches alpha test before framebuffer write");
+        }
+}
+
+void test_logical_color_targets() {
+  std::vector<std::uint8_t> memory(4u * 1024u * 1024u);
+  ps2vita::Gs gs;
+  gs.set_depth_state(ps2vita::Gs::DepthTest::Always, false);
+  const auto a = 1ull | (1ull << 16); // 8192-byte base, 64-pixel stride
+  const auto b = 2ull | (1ull << 16);
+  gs.set_color_target(&memory, a);
+  gs.point({0, 0, 0, 0xAABBCCDDu});
+  check(memory[8192] == 0xDDu && memory[8192 + (3u * 64u + 3u) * 4u] == 0xDDu,
+        "Logical target replicates one host sample across a native 4x4 tile");
+  gs.set_color_target(&memory, b);
+  gs.point({0, 0, 0, 0x11223344u});
+  gs.set_color_target(&memory, a | (0x00FF00FFull << 32));
+  gs.point({0, 0, 0, 0x55667788u});
+  check(gs.pixel(0, 0) == 0x55BB77DDu, "FRAME mask preserves destination bits");
+  gs.set_color_target(&memory, a | (1ull << 24));
+  gs.point({0, 0, 0, 0x99ABCDEFu});
+  check(gs.pixel(0, 0) == 0x55ABCDEFu, "PSMCT24 target preserves stored high byte");
+  gs.set_color_target(&memory, b);
+  check(gs.pixel(0, 0) == 0x11223344u && gs.pixels()[0] == 0x11223344u,
+        "Switching targets restores independent color and preview");
+  // Blending must read B, not the last standalone or A preview value.
+  gs.set_blend_state(true, 1u << 6, false, true); // (Cs-Cs)*As + Cd
+  gs.point({0, 0, 0, 0x80FFFFFFu});
+  check(gs.pixel(0, 0) == 0x80223344u, "Blending reads the active guest destination");
+  gs.set_blend_state(false, 0u, false, true);
+  gs.set_color_target(nullptr, 0u);
+  gs.clear(0xDEADBEEFu);
+  check(gs.pixel(0, 0) == 0xDEADBEEFu && memory[16384] == 0x44u,
+        "Detached standalone color does not mutate guest storage");
+  gs.set_color_target(&memory, 511ull | (1ull << 16));
+  gs.point({0, 8, 0, 0x12345678u}); // Linear row32 crosses the 4MB boundary.
+  check(memory[0] == 0x78u && gs.pixel(0, 8) == 0x12345678u,
+        "Logical target addressing wraps at 4MB");
+}
+
+void test_gif_texture24_alpha() {
+  for (unsigned context : {0u, 1u})
+    for (unsigned aem : {0u, 1u})
+      for (unsigned ta0 : {0u, 64u, 255u})
+        for (std::uint32_t rgb : {0u, 0x123456u}) {
+          ps2vita::Gs gs;
+          ps2vita::Gif gif(gs);
+          const auto reg = [&](std::uint64_t value, std::uint64_t address) {
+            const std::array<std::uint64_t, 4> p{{0x1000000000008001ull, 0xEull, value, address}};
+            gif.submit(reinterpret_cast<const std::uint8_t*>(p.data()), sizeof(p));
+          };
+          reg(0x0001000100000000ull, 0x50u); // PSMCT32 upload at0x100
+          reg(0u, 0x51u); reg(0x100000001ull, 0x52u); reg(0u, 0x53u);
+          const std::array<std::uint64_t, 4> image{{0x0800000000008001ull,
+              0u, 0xA5000000u | rgb, 0u}};
+          gif.submit(reinterpret_cast<const std::uint8_t*>(image.data()), sizeof(image));
+          reg(1ull | (1ull << 14) | (1ull << 20) | (1ull << 34) | (1ull << 35),
+              6u + context); // Reinterpret as PSMCT24, RGBA DECAL
+          reg(ta0 | (aem << 15), 0x3Bu);
+          reg(0x116u | (context << 9), 0u);
+          reg(0x80808080u, 1u); reg(0u, 3u);
+          reg(0u, 5u); reg(64u | (64ull << 16), 5u);
+          const auto alpha = aem && rgb == 0u ? 0u : ta0;
+          check(gs.pixel(0, 0) == (alpha << 24 | rgb),
+                "PSMCT24 ignores stored alpha and applies TEXA TA0/AEM in both contexts");
         }
 }
 
@@ -4722,6 +4791,8 @@ int main() {
   test_vu0_broadcast_subtract();
   test_vu0_broadcast_minmax();
   test_triangle_trace();
+  test_logical_color_targets();
+  test_gif_texture24_alpha();
   test_gif_texture_attribute_latches();
   test_gs_perspective_safety();
   test_gif_textured_uv_triangles();

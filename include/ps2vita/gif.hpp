@@ -33,6 +33,7 @@ struct GifTriangleRecord {
 class Gif {
 public:
   explicit Gif(Gs& gs);
+  ~Gif() { gs_.set_color_target(nullptr, 0u); }
   void reset();
   void enable_triangle_trace(bool enabled) { trace_triangles_ = enabled; }
   const std::vector<GifTriangleRecord>& triangle_records() const {
@@ -83,8 +84,9 @@ private:
   std::uint32_t packed_q_ = 0x3F800000u;
   std::uint64_t tex0_[2]{};
   std::uint64_t clamp_[2]{};
-  // Retained for diagnostics; framebuffer addressing is not implemented yet.
+  // PSMCT32/24 bind the logical linear color target; other formats are pending.
   std::uint64_t frame_[2]{};
+  std::uint64_t texa_ = 0;
   std::uint64_t test_[2]{};
   std::uint64_t zbuf_[2]{};
   std::uint64_t alpha_[2]{};
