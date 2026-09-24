@@ -3,6 +3,7 @@
 #include "ps2vita/memory.hpp"
 #include "ps2vita/vu.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -32,6 +33,14 @@ public:
   void reset();
   void enable_packet_capture(bool enabled) { capture_packet_ = enabled; }
   void enable_provenance_trace(bool enabled) { trace_provenance_ = enabled; }
+  void enable_command_census(bool enabled) { command_census_ = enabled; }
+  const std::array<std::uint64_t, 128>& command_counts() const {
+    return command_counts_;
+  }
+  std::uint64_t census_bytes() const { return census_bytes_; }
+  std::uint64_t census_empty_packets() const { return census_empty_packets_; }
+  std::uint64_t first_run_packet() const { return first_run_packet_; }
+  std::uint64_t last_run_packet() const { return last_run_packet_; }
   const std::vector<VifUnpackRecord>& unpack_records() const { return unpack_records_; }
   const std::vector<VifRunRecord>& run_records() const { return run_records_; }
   std::uint64_t dropped_unpack_records() const { return dropped_unpack_records_; }
@@ -85,6 +94,10 @@ private:
   std::vector<std::uint8_t> direct_packet_;
   std::deque<std::vector<std::uint8_t>> gif_packets_;
   bool trace_provenance_ = false;
+  bool command_census_ = false;
+  std::array<std::uint64_t, 128> command_counts_{};
+  std::uint64_t census_bytes_ = 0, census_empty_packets_ = 0;
+  std::uint64_t first_run_packet_ = 0, last_run_packet_ = 0;
   std::vector<VifUnpackRecord> unpack_records_;
   std::vector<VifRunRecord> run_records_;
   std::uint64_t dropped_unpack_records_ = 0, dropped_run_records_ = 0;

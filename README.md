@@ -115,15 +115,17 @@ and VIF uploads. A separately built pre-optimization core and the new core
 match on 998 pairs, 1308 modeled cycles, final VU state, and GIF packet bytes.
 An isolated 55-pair VU-only prologue measured about 33x faster on the same host.
 The whole-packet and VU-only figures are host benchmarks, not Vita performance
-results or an intro fix. The packet still produces mostly
-suppressed geometry. See the [VU1 optimization checkpoint](docs/SESSION_2026-09-24.md).
+results or an intro fix. The packet still produces mostly suppressed geometry.
+A 300-million-step BIOS replay shows 5,361 DIRECT commands but no further VU
+start commands after packet 1; 998 pairs is not a VU execution
+ceiling. See the [VU1 optimization and VIF census checkpoint](docs/SESSION_2026-09-24.md).
 
 ### What comes next
 
-- Compare the first BIOS VU1 clipping decisions with an equivalent trusted
-  reference before changing MAC-flag timing or ADC suppression.
-- Improve the GS storage/scanout behavior needed for a recognizable startup
-  sequence, keeping reference-backed draw tests as the correctness gate.
+- Compare the later PATH2 DIRECT/GIF/GS draws and display routing with a
+  trusted reference; those transfers dominate traffic after the first VU packet.
+- Separately compare the first BIOS VU1 clipping decisions with equivalent
+  reference execution before changing MAC-flag timing or ADC suppression.
 - Return to SPU2 sound-generation and Vita audio output after graphics bring-up.
 - Expand native-code coverage while checking it against the interpreter.
 - Measure correctness and performance on a physical Vita before making speed claims.

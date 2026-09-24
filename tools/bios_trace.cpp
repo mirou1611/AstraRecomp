@@ -383,6 +383,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "BIOS must be exactly 4 MiB\n");
     return 2;
   }
+  emulator.enable_vif_command_census(true);
 
   constexpr std::size_t kTraceSize = 256;
   emulator.memory().enable_spu2_shadow(true);
@@ -1095,6 +1096,18 @@ int main(int argc, char** argv) {
           emulator.vif1().micro_instructions_loaded()),
       static_cast<unsigned long long>(emulator.vif1().vectors_unpacked()),
       emulator.vif1().first_unsupported_code());
+  std::printf("vif1_census bytes=%llu empty_packets=%llu first_run_packet=%llu "
+              "last_run_packet=%llu\n",
+      static_cast<unsigned long long>(emulator.vif1().census_bytes()),
+      static_cast<unsigned long long>(emulator.vif1().census_empty_packets()),
+      static_cast<unsigned long long>(emulator.vif1().first_run_packet()),
+      static_cast<unsigned long long>(emulator.vif1().last_run_packet()));
+  for (unsigned opcode = 0; opcode < emulator.vif1().command_counts().size(); ++opcode) {
+    const auto count = emulator.vif1().command_counts()[opcode];
+    if (count != 0u)
+      std::printf("vif1_command opcode=%02X count=%llu\n", opcode,
+          static_cast<unsigned long long>(count));
+  }
   std::printf("vif1_first_unsupported_packet=%llu stream_offset=%zu packet_bytes=%zu pending_direct_bytes=%zu\n",
       static_cast<unsigned long long>(emulator.vif1().first_unsupported_packet()),
       emulator.vif1().first_unsupported_offset(),

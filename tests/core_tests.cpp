@@ -2887,6 +2887,38 @@ void test_vif1_source_chain_completion() {
         "VIF source mapping records referenced payload without TTE");
 }
 
+void test_vif_command_census() {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  vif.enable_command_census(true);
+  const std::array<std::uint32_t, 2> setup{{0u, 0x01000404u}};
+  check(vif.submit(nullptr, 0u) &&
+        vif.submit(reinterpret_cast<const std::uint8_t*>(setup.data()),
+                   sizeof(setup)),
+        "VIF command census accepts empty and nonempty packets");
+  const auto micro = ps2vita::Memory::kVu1MicroBase;
+  memory.write32(micro, 0x8000033Cu);
+  memory.write32(micro + 4u, 0x400002FFu);
+  memory.write32(micro + 8u, 0x8000033Cu);
+  memory.write32(micro + 12u, 0x000002FFu);
+  const std::uint32_t run = 0x14000000u;
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(&run), sizeof(run)) &&
+        vif.vu1().pairs_executed() == 2u,
+        "VIF command census fixture executes an MSCAL and E-bit delay pair");
+  check(vif.census_bytes() == 12u && vif.census_empty_packets() == 1u &&
+        vif.command_counts()[0x00u] == 1u && vif.command_counts()[0x01u] == 1u &&
+        vif.command_counts()[0x14u] == 1u &&
+        vif.first_run_packet() == 3u && vif.last_run_packet() == 3u,
+        "VIF command census records parsed opcodes and run packet index");
+  vif.reset();
+  check(vif.census_bytes() == 0u && vif.census_empty_packets() == 0u &&
+        vif.command_counts()[0x14u] == 0u && vif.first_run_packet() == 0u,
+        "VIF reset clears command census without disabling it");
+  check(vif.submit(reinterpret_cast<const std::uint8_t*>(setup.data()), 4u) &&
+        vif.command_counts()[0x00u] == 1u,
+        "VIF command census remains enabled after reset");
+}
+
 void test_vif1_mpg_upload() {
   constexpr std::array<std::uint32_t, 5> words{{
       0x00000000u, 0x01000404u, 0x4A010002u,
@@ -4792,6 +4824,7 @@ int main() {
   test_gif_normal_dma_completion();
   test_vif1_source_chain_completion();
   test_vif1_mpg_upload();
+  test_vif_command_census();
   test_vif1_scratchpad_dma();
   test_vif1_v4_32_unpack();
   test_vif_provenance();

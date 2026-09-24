@@ -21,6 +21,9 @@ std::uint32_t load32(const std::uint8_t* data) {
 void Vif1::reset() {
   unpack_records_.clear(); run_records_.clear();
   dropped_unpack_records_ = dropped_run_records_ = 0;
+  command_counts_.fill(0u);
+  census_bytes_ = census_empty_packets_ = 0;
+  first_run_packet_ = last_run_packet_ = 0;
   direct_remaining_ = 0;
   direct_packet_.clear();
   gif_packets_.clear();
@@ -71,6 +74,10 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
     else if (size != 0u) captured_packet_.assign(data, data + size);
   }
   ++packets_submitted_;
+  if (command_census_) {
+    census_bytes_ += size;
+    if (size == 0u) ++census_empty_packets_;
+  }
   std::size_t cursor = 0;
   const auto record_unsupported = [&](std::uint32_t code) {
     if (first_unsupported_packet_ != 0u) return;
@@ -96,6 +103,7 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
     cursor += 4u;
     const auto command = static_cast<std::uint8_t>(code >> 24);
     const auto opcode = command & 0x7Fu;
+    if (command_census_) ++command_counts_[opcode];
     if (opcode == 0x50u) { // DIRECT, immediate is QWC; zero means 65536.
       // Preserve functional command order with previously emitted PATH1.
       // GIF arbitration/backpressure and DIRECTHL priority remain unmodeled.
@@ -135,6 +143,10 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       continue;
     }
     if (opcode == 0x14u || opcode == 0x15u) { // MSCAL / MSCALF
+      if (command_census_) {
+        if (first_run_packet_ == 0u) first_run_packet_ = packets_submitted_;
+        last_run_packet_ = packets_submitted_;
+      }
       top_ = tops_ & 0x3FFu;
       tops_ = double_buffer_ ? base_ :
           static_cast<std::uint16_t>((base_ + offset_) & 0x3FFu);
@@ -151,6 +163,10 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       continue;
     }
     if (opcode == 0x17u) { // MSCNT: continue at the current VU1 TPC.
+      if (command_census_) {
+        if (first_run_packet_ == 0u) first_run_packet_ = packets_submitted_;
+        last_run_packet_ = packets_submitted_;
+      }
       top_ = tops_ & 0x3FFu;
       tops_ = double_buffer_ ? base_ :
           static_cast<std::uint16_t>((base_ + offset_) & 0x3FFu);
