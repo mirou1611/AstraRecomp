@@ -4,6 +4,7 @@
 #include "ps2vita/execution_census.hpp"
 #include "ps2vita/gif.hpp"
 #include "ps2vita/framebuffer_dump.hpp"
+#include "ps2vita/gs_display.hpp"
 #include "ps2vita/vif.hpp"
 #include "ps2vita/vu.hpp"
 #include "ps2vita/spu2_adpcm.hpp"
@@ -1001,6 +1002,18 @@ void test_execution_census_blocks_and_edges() {
   census.record(0x3008u, 0u);
   check(census.blocks().size() == 2u && census.edges().size() == 1u,
         "execution census handles an annulled branch-likely delay slot");
+}
+
+void test_gs_display_framebuffer_decode() {
+  constexpr auto bios = ps2vita::GsDisplayFramebuffer::decode(0x1450u);
+  static_assert(bios.fbp == 0x50u && bios.fbw == 10u && bios.psm == 0u);
+  static_assert(bios.base_bytes() == 0xA0000u && bios.width_pixels() == 640u);
+  constexpr auto edge = ps2vita::GsDisplayFramebuffer::decode(
+      0x1FFull | (63ull << 9u) | (31ull << 15u) |
+      (2047ull << 32u) | (2047ull << 43u));
+  check(edge.base_bytes() == 0x3FE000u && edge.width_pixels() == 4032u &&
+        edge.psm == 31u && edge.dbx == 2047u && edge.dby == 2047u,
+        "GS DISPFB fields use 8 KiB base units and their documented bit widths");
 }
 
 void test_memory_aliases() {
@@ -4767,6 +4780,7 @@ int main() {
   test_gs_blending();
   test_gif_blend_registers();
   test_execution_census_blocks_and_edges();
+  test_gs_display_framebuffer_decode();
   test_memory_aliases();
   test_bios_mapping_and_boot();
   test_iop_memory_and_cpu();

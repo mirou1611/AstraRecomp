@@ -119,10 +119,9 @@ results or an intro fix. The packet still produces mostly suppressed geometry.
 A 300-million-step BIOS replay shows 5,361 DIRECT commands but no further VU
 start commands after packet 1; 998 pairs is not a VU execution
 ceiling. See the [VU1 optimization and VIF census checkpoint](docs/SESSION_2026-09-24.md).
-At that endpoint, the BIOS enables GS display circuit 2, whose selected
-framebuffer differs from Astra's current draw-target preview. A separate
-linear-memory probe confirms different pixel hashes; neither view is yet a
-hardware-accurate GS scanout.
+At that endpoint, the BIOS enables GS display circuit 2. Its output still
+needs comparison with a trusted reference; Astra's current draw-target preview
+is not hardware-accurate scanout.
 
 ### What comes next
 

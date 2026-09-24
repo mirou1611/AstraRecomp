@@ -40,7 +40,8 @@ to skip an unwanted optional census or VIF capture:
 ```
 
 The second image samples Astra's current **linear** GS memory at the selected
-`DISPFB` base and width on the same 160x112 quarter grid. The log prints raw
+`DISPFB` base (FBP in 8 KiB units) and width on the same 160x112 quarter grid.
+The log prints raw
 and decoded `PMODE`, `DISPFB1/2`, and `DISPLAY1/2`, plus a separate hash and
 nonblack pixel count. This is not native GS swizzled memory or accurate CRT
 scanout; it requires exactly one enabled display circuit and a PSMCT32/24

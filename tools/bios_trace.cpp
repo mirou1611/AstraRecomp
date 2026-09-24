@@ -1,6 +1,7 @@
 #include "ps2vita/emulator.hpp"
 #include "ps2vita/execution_census.hpp"
 #include "ps2vita/framebuffer_dump.hpp"
+#include "ps2vita/gs_display.hpp"
 #include "ps2vita/spu2_adpcm.hpp"
 
 #include <algorithm>
@@ -989,11 +990,9 @@ int main(int argc, char** argv) {
     // and GS_SET_DISPLAY* macros (ee/gs/include/gsInit.h).
     const auto fb = emulator.memory().read64(circuit ? 0x12000090u : 0x12000070u);
     const auto display = emulator.memory().read64(circuit ? 0x120000A0u : 0x12000080u);
-    const auto fbp = static_cast<unsigned>(fb & 0x1FFu);
-    const auto fbw = static_cast<unsigned>((fb >> 9u) & 0x3Fu);
-    const auto psm = static_cast<unsigned>((fb >> 15u) & 0x3Fu);
-    const auto dbx = static_cast<unsigned>((fb >> 32u) & 0x7FFu);
-    const auto dby = static_cast<unsigned>((fb >> 43u) & 0x7FFu);
+    const auto framebuffer = ps2vita::GsDisplayFramebuffer::decode(fb);
+    const auto fbp = framebuffer.fbp, fbw = framebuffer.fbw;
+    const auto psm = framebuffer.psm, dbx = framebuffer.dbx, dby = framebuffer.dby;
     std::printf("gs_display[%u] dispfb=%016llX fbp=%u fbw=%u psm=%u dbx=%u dby=%u "
                 "display=%016llX dx=%u dy=%u magh=%u magv=%u dw=%u dh=%u\n",
         circuit + 1u, static_cast<unsigned long long>(fb),
@@ -1028,8 +1027,8 @@ int main(int argc, char** argv) {
       }
       std::uint64_t hash = 1469598103934665603ull;
       std::size_t nonzero = 0;
-      const auto width = fbw * 64u;
-      const auto base = fbp * 2048u;
+      const auto width = framebuffer.width_pixels();
+      const auto base = framebuffer.base_bytes();
       for (int y = 0; y < ps2vita::Gs::kHeight; ++y) {
         for (int x = 0; x < ps2vita::Gs::kWidth; ++x) {
           const auto address = base +
