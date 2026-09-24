@@ -2998,6 +2998,28 @@ void test_vif_causal_input() {
         "Later VIF upload preserves immutable earlier input and rejected roots");
 }
 
+void test_vu1_local_memory_fast_path() {
+  ps2vita::Memory memory;
+  constexpr auto micro = ps2vita::Memory::kVu1MicroBase;
+  constexpr auto data = ps2vita::Memory::kVu1DataBase;
+  memory.write32(micro + 0x3FFCu, 0x89ABCDEFu);
+  memory.write32(data + 0x3FFCu, 0x12345678u);
+  check(memory.vu1_micro_word(0x3FFCu) == 0x89ABCDEFu &&
+        memory.vu1_data_word(0x3FFCu) == 0x12345678u,
+        "VU-local fast reads observe EE/VIF writes at the bank edge");
+  memory.vu1_store_micro_word(0x3FFCu, 0x01234567u);
+  check(memory.read32(micro + 0x3FFCu) == 0x01234567u,
+        "VU-local MPG writes remain visible to EE memory reads");
+  memory.vu1_store_data_word(0x3FFCu, 0xFEDCBA98u);
+  check(memory.read32(data + 0x3FFCu) == 0xFEDCBA98u,
+        "VU-local fast stores remain visible to EE memory reads");
+  std::array<std::uint8_t, 16> qword{};
+  memory.vu1_data_qword(0x3FF0u, qword);
+  check(qword[12] == 0x98u && qword[13] == 0xBAu &&
+        qword[14] == 0xDCu && qword[15] == 0xFEu,
+        "VU-local GIF qword reads preserve little-endian bank-edge bytes");
+}
+
 void test_vu1_captured_prologue() {
   ps2vita::Memory memory;
   constexpr std::array<std::uint32_t, 5> lower{{
@@ -4696,6 +4718,7 @@ void test_phase0_aot_contract() {
 
 int main() {
   test_ee_overlapping_backreference_copy();
+  test_vu1_local_memory_fast_path();
   test_vu1_q_latency();
   test_vu1_vector_scoreboard();
   test_vu1_pair_dependencies();

@@ -58,6 +58,25 @@ public:
   std::uint16_t read16(std::uint32_t address) const;
   std::uint32_t read32(std::uint32_t address) const;
   std::uint64_t read64(std::uint32_t address) const;
+  // VU1-local, aligned accesses bypass the EE address decoder and TLB. The
+  // caller supplies a byte offset within the 16 KiB micro/data bank.
+  std::uint32_t vu1_micro_word(std::uint16_t offset) const {
+    return vu1_local_word(0x8000u + (offset & 0x3FFCu));
+  }
+  std::uint32_t vu1_data_word(std::uint16_t offset) const {
+    return vu1_local_word(0xC000u + (offset & 0x3FFCu));
+  }
+  void vu1_store_micro_word(std::uint16_t offset, std::uint32_t value) {
+    vu1_store_word(0x8000u + (offset & 0x3FFCu), value);
+  }
+  void vu1_store_data_word(std::uint16_t offset, std::uint32_t value) {
+    vu1_store_word(0xC000u + (offset & 0x3FFCu), value);
+  }
+  void vu1_data_qword(std::uint16_t offset,
+                      std::array<std::uint8_t, 16>& out) const {
+    const auto* bytes = vu_mem_.data() + 0xC000u + (offset & 0x3FF0u);
+    for (unsigned i = 0; i < 16u; ++i) out[i] = bytes[i];
+  }
   void write8(std::uint32_t address, std::uint8_t value);
   void write16(std::uint32_t address, std::uint16_t value);
   void write32(std::uint32_t address, std::uint32_t value);
@@ -114,6 +133,18 @@ public:
   int probe_tlb(std::uint32_t entry_hi) const;
 
 private:
+  void vu1_store_word(std::uint32_t offset, std::uint32_t value) {
+    auto* bytes = vu_mem_.data() + offset;
+    bytes[0] = static_cast<std::uint8_t>(value);
+    bytes[1] = static_cast<std::uint8_t>(value >> 8);
+    bytes[2] = static_cast<std::uint8_t>(value >> 16);
+    bytes[3] = static_cast<std::uint8_t>(value >> 24);
+  }
+  std::uint32_t vu1_local_word(std::uint32_t offset) const {
+    const auto* bytes = vu_mem_.data() + offset;
+    return std::uint32_t{bytes[0]} | (std::uint32_t{bytes[1]} << 8) |
+           (std::uint32_t{bytes[2]} << 16) | (std::uint32_t{bytes[3]} << 24);
+  }
   struct TlbEntry {
     std::uint32_t page_mask = 0;
     std::uint32_t entry_hi = 0;

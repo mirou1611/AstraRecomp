@@ -178,9 +178,9 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
       const auto bytes = static_cast<std::size_t>(count) * 8u;
       if (cursor + bytes > size) { ++packets_rejected_; return false; }
       for (std::size_t byte = 0; byte < bytes; byte += 4u) {
-        const auto destination = Memory::kVu1MicroBase +
-            static_cast<std::uint32_t>((address * 8u + byte) & 0x3FFFu);
-        memory_.write32(destination, load32(data + cursor + byte));
+        const auto offset = static_cast<std::uint16_t>(
+            (address * 8u + byte) & 0x3FFFu);
+        memory_.vu1_store_micro_word(offset, load32(data + cursor + byte));
       }
       cursor += bytes;
       micro_instructions_loaded_ += count;
@@ -206,7 +206,8 @@ bool Vif1::submit(const std::uint8_t* data, std::size_t size) {
         const auto destination = Memory::kVu1DataBase +
             static_cast<std::uint32_t>((address + byte) & 0x3FFFu);
         const auto value = load32(data + cursor + byte);
-        memory_.write32(destination, value);
+        memory_.vu1_store_data_word(
+            static_cast<std::uint16_t>(destination - Memory::kVu1DataBase), value);
         vu1_.record_vif_upload(destination, value, code, packets_submitted_, cursor + byte);
         if (trace_provenance_) {
           if (unpack_records_.size() < 4096u)

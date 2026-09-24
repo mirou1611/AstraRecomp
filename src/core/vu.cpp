@@ -8,8 +8,22 @@
 namespace ps2vita {
 namespace {
 struct VectorAccess {
-  std::array<unsigned, 32> reads{};
+  std::array<unsigned, 2> read_registers{};
+  std::array<unsigned, 2> read_masks{};
+  unsigned read_count = 0;
   unsigned destination = 0, mask = 0;
+
+  void read(unsigned reg, unsigned lanes) {
+    if (reg == 0u || lanes == 0u) return;
+    for (unsigned i = 0; i < read_count; ++i) {
+      if (read_registers[i] == reg) {
+        read_masks[i] |= lanes;
+        return;
+      }
+    }
+    read_registers[read_count] = reg;
+    read_masks[read_count++] = lanes;
+  }
 };
 
 VectorAccess vector_access(std::uint32_t code, bool upper) {
@@ -20,14 +34,14 @@ VectorAccess vector_access(std::uint32_t code, bool upper) {
     const bool broadcast = fn <= 0x0Bu || (fn >= 0x10u && fn <= 0x13u);
     const bool vector = fn == 0x28u || fn == 0x2Au || fn == 0x2Bu || fn == 0x2Cu;
     if (broadcast || vector || fn == 0x1Cu) {
-      access.reads[fs] |= mask;
-      if (broadcast && mask) access.reads[ft] |= 8u >> (fn & 3u);
-      else if (vector) access.reads[ft] |= mask;
+      access.read(fs, mask);
+      if (broadcast && mask) access.read(ft, 8u >> (fn & 3u));
+      else if (vector) access.read(ft, mask);
       access.destination = fd; access.mask = mask;
     } else if (fn >= 0x3Cu && (fd == 2u || fd == 6u || fd == 5u)) {
-      access.reads[fs] |= mask;
+      access.read(fs, mask);
       if (fd == 5u) { access.destination = ft; access.mask = mask; }
-      else if (mask) access.reads[ft] |= 8u >> (fn & 3u);
+      else if (mask) access.read(ft, 8u >> (fn & 3u));
     }
   } else {
     const unsigned group = code >> 25;
@@ -35,15 +49,14 @@ VectorAccess vector_access(std::uint32_t code, bool upper) {
         ((fn == 0x3Cu && fd == 0xDu) || (fn == 0x3Du && fd == 0xFu)))) {
       access.destination = ft; access.mask = mask;
     } else if (group == 1u || (group == 0x40u && fn == 0x3Du && fd == 0xDu)) {
-      access.reads[fs] |= mask;
+      access.read(fs, mask);
     } else if (group == 0x40u && fn == 0x3Cu && fd == 0xEu) {
-      access.reads[fs] |= 8u >> ((code >> 21) & 3u);
-      access.reads[ft] |= 8u >> ((code >> 23) & 3u);
+      access.read(fs, 8u >> ((code >> 21) & 3u));
+      access.read(ft, 8u >> ((code >> 23) & 3u));
     } else if (group == 0x40u && fn == 0x3Cu && fd == 0xFu) {
-      access.reads[fs] |= 8u >> ((code >> 21) & 3u);
+      access.read(fs, 8u >> ((code >> 21) & 3u));
     }
   }
-  access.reads[0] = 0;
   return access;
 }
 
@@ -221,9 +234,8 @@ void Vu1::run(std::uint64_t max_pairs) {
 }
 
 bool Vu1::step() {
-  const auto address = Memory::kVu1MicroBase + state_.pc;
-  const auto lower = memory_.read32(address);
-  const auto upper = memory_.read32(address + 4u);
+  const auto lower = memory_.vu1_micro_word(state_.pc);
+  const auto upper = memory_.vu1_micro_word(state_.pc + 4u);
   const auto sequential_pc = static_cast<std::uint16_t>((state_.pc + 8u) & 0x3FFFu);
   const bool apply_branch = branch_pending_;
   const auto pending_target = branch_target_;
@@ -231,10 +243,16 @@ bool Vu1::step() {
   const auto upper_access = vector_access(upper, true);
   const auto lower_access = (upper & 0x80000000u) ? VectorAccess{} : vector_access(lower, false);
   auto ready = cycles_;
-  for (unsigned reg = 1; reg < 32; ++reg)
-    for (unsigned lane = 0; lane < 4; ++lane)
-      if (((upper_access.reads[reg] | lower_access.reads[reg]) & (8u >> lane)) != 0u)
-        ready = std::max(ready, vf_ready_[reg][lane]);
+  const auto check_ready = [&](const VectorAccess& access) {
+    for (unsigned i = 0; i < access.read_count; ++i) {
+      const unsigned reg = access.read_registers[i], mask = access.read_masks[i];
+      for (unsigned lane = 0; lane < 4; ++lane)
+        if ((mask & (8u >> lane)) != 0u)
+          ready = std::max(ready, vf_ready_[reg][lane]);
+    }
+  };
+  check_ready(upper_access);
+  check_ready(lower_access);
   while (cycles_ < ready) {
     mac_pipeline_[mac_pipeline_slot_] = state_.mac;
     mac_pipeline_slot_ = (mac_pipeline_slot_ + 1u) & 3u;
@@ -258,7 +276,14 @@ bool Vu1::step() {
   branch_pending_ = false;
   end_pending_ = (upper & 0x40000000u) != 0u;
 
-  lower_vf_snapshot_ = state_.vf;
+  // The upper word executes first, while lower VF sources observe the pair's
+  // entry state. Snapshot only the registers actually read by the lower word.
+  // VF0 is immutable but can still be a store/DIV/MTIR source.
+  lower_vf_snapshot_[0] = state_.vf[0];
+  for (unsigned i = 0; i < lower_access.read_count; ++i) {
+    const unsigned reg = lower_access.read_registers[i];
+    lower_vf_snapshot_[reg] = state_.vf[reg];
+  }
   current_lower_ = lower;
   if (trace_causes_) lower_causes_ = vf_causes_;
   if (!execute_upper(upper)) {
@@ -355,7 +380,8 @@ bool Vu1::step() {
 }
 
 void Vu1::store_data(std::uint32_t address, std::uint32_t value, unsigned reg, unsigned lane) {
-  memory_.write32(address, value);
+  memory_.vu1_store_data_word(
+      static_cast<std::uint16_t>(address - Memory::kVu1DataBase), value);
   if (trace_causes_) {
     VuCauseRecord record;
     record.kind = VuCauseRecord::Kind::Store;
@@ -388,7 +414,8 @@ bool Vu1::execute_lower(std::uint32_t code) {
       if ((code & (1u << (24u - lane))) == 0u) continue;
       const auto address = Memory::kVu1DataBase + qword * 16u + lane * 4u;
       if (store) store_data(address, lower_vf_snapshot_[vector_reg][lane], vector_reg, lane);
-      else if (vector_reg != 0u) state_.vf[vector_reg][lane] = memory_.read32(address);
+      else if (vector_reg != 0u)
+        state_.vf[vector_reg][lane] = memory_.vu1_data_word(qword * 16u + lane * 4u);
     }
     return true;
   }
@@ -479,8 +506,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
     for (unsigned lane = 0; lane < 4u; ++lane) {
       const auto mask = 1u << (24u - lane);
       if ((code & mask) != 0u && ft != 0u)
-        state_.vf[ft][lane] = memory_.read32(
-            Memory::kVu1DataBase + qword * 16u + lane * 4u);
+        state_.vf[ft][lane] = memory_.vu1_data_word(qword * 16u + lane * 4u);
     }
     if (is != 0u) ++state_.vi[is];
     return true;
@@ -534,8 +560,8 @@ bool Vu1::execute_lower(std::uint32_t code) {
       const auto qword = state_.vi[is] & 0x3FFu;
       for (unsigned lane = 0; lane < 4u; ++lane) {
         if ((code & (1u << (24u - lane))) != 0u)
-          state_.vi[it] = static_cast<std::uint16_t>(memory_.read32(
-              Memory::kVu1DataBase + qword * 16u + lane * 4u));
+          state_.vi[it] = static_cast<std::uint16_t>(
+              memory_.vu1_data_word(qword * 16u + lane * 4u));
       }
     }
     return true;
@@ -572,9 +598,7 @@ void Vu1::transfer_path1(bool flush) {
       xgkick_stall_cycles_ += wait;
     }
     std::array<std::uint8_t, 16> tag_bytes{};
-    for (unsigned byte = 0; byte < tag_bytes.size(); ++byte)
-      tag_bytes[byte] = memory_.read8(
-          Memory::kVu1DataBase + ((kick_offset_ + byte) & 0x3FFFu));
+    memory_.vu1_data_qword(kick_offset_, tag_bytes);
     if (kick_packet_.empty()) {
       std::uint64_t tag = 0;
       std::memcpy(&tag, tag_bytes.data(), sizeof(tag));
@@ -612,8 +636,8 @@ void Vu1::transfer_path1(bool flush) {
             }
           }
           for (unsigned word = 0; word < first_rejected_data_.size(); ++word)
-            first_rejected_data_[word] = memory_.read32(Memory::kVu1DataBase +
-                ((last_kick_address_ + word * 4u) & 0x3FFFu));
+            first_rejected_data_[word] = memory_.vu1_data_word(
+                (last_kick_address_ + word * 4u) & 0x3FFFu);
         }
         ++path1_tags_rejected_;
         kick_active_ = false;
