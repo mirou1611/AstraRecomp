@@ -1,9 +1,12 @@
 #include "ps2vita/vif.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <vector>
 
@@ -45,11 +48,88 @@ std::uint64_t gif_checksum(ps2vita::Vu1& vu) {
   for (auto word : vu.first_rejected_data()) h = mix(h, word);
   return h;
 }
+
+int benchmark_first_run(const std::vector<std::uint8_t>& data,
+                        unsigned long repetitions) {
+  ps2vita::Memory memory;
+  ps2vita::Vif1 vif(memory);
+  vif.enable_provenance_trace(true);
+  if (!vif.submit(data.data(), data.size()) || vif.run_records().empty()) {
+    std::fprintf(stderr, "capture has no accepted VU1 run\n");
+    return 1;
+  }
+  const auto first = vif.run_records().front();
+  const auto opcode = (first.command >> 24) & 0x7Fu;
+  if (first.command_offset + 4u > data.size() || first.first_pair != 0u ||
+      first.end_pair == 0u || (opcode != 0x14u && opcode != 0x15u)) {
+    std::fprintf(stderr, "first VU1 run must be MSCAL/MSCALF\n");
+    return 1;
+  }
+
+  vif.reset();
+  for (std::uint32_t offset = 0; offset < 0x4000u; offset += 4u) {
+    memory.write32(ps2vita::Memory::kVu1MicroBase + offset, 0u);
+    memory.write32(ps2vita::Memory::kVu1DataBase + offset, 0u);
+  }
+  if (!vif.submit(data.data(), first.command_offset) ||
+      vif.vu1().pairs_executed() != 0u) return 1;
+  std::array<std::uint32_t, 4096> initial_data{};
+  for (std::uint32_t i = 0; i < initial_data.size(); ++i)
+    initial_data[i] = memory.read32(ps2vita::Memory::kVu1DataBase + i * 4u);
+
+  auto& vu = vif.vu1();
+  vu.enable_store_trace(true);
+  if (!vif.submit(data.data() + first.command_offset, 4u) || vu.running() ||
+      vu.pairs_executed() != first.end_pair) return 1;
+  const auto expected_cycles = vu.cycles_executed();
+  const auto expected = checksum(vu, memory);
+  const auto expected_gif = gif_checksum(vu);
+  if (vu.dropped_store_records() != 0u) return 1;
+  std::vector<std::uint16_t> written_offsets;
+  for (const auto& record : vu.store_records()) written_offsets.push_back(record.address);
+  std::sort(written_offsets.begin(), written_offsets.end());
+  written_offsets.erase(std::unique(written_offsets.begin(), written_offsets.end()),
+                        written_offsets.end());
+  vu.enable_store_trace(false);
+
+  double milliseconds = 0.0;
+  for (unsigned long repetition = 0; repetition < repetitions; ++repetition) {
+    vu.reset();
+    for (auto offset : written_offsets)
+      memory.write32(ps2vita::Memory::kVu1DataBase + offset,
+                     initial_data[offset / 4u]);
+    vu.set_top(first.top);
+    vu.start(first.start_pc);
+    const auto start = std::chrono::steady_clock::now();
+    vu.run(2000000u);
+    const auto finish = std::chrono::steady_clock::now();
+    milliseconds += std::chrono::duration<double, std::milli>(finish - start).count();
+    if (vu.running() || vu.pairs_executed() != first.end_pair ||
+        vu.cycles_executed() != expected_cycles) return 1;
+    if (repetition == 0u || (repetition & 63u) == 0u ||
+        repetition + 1u == repetitions) {
+      const auto actual = checksum(vu, memory);
+      const auto actual_gif = gif_checksum(vu);
+      if (actual != expected || actual_gif != expected_gif) {
+        std::fprintf(stderr, "VU-only replay diverged at repetition %lu\n", repetition);
+        return 1;
+      }
+    }
+  }
+  std::printf("mode=vu-first repetitions=%lu pairs_each=%llu cycles_each=%llu checksum=%016llX gif_checksum=%016llX run_ms=%.3f ns_per_pair=%.2f\n",
+      repetitions, static_cast<unsigned long long>(first.end_pair),
+      static_cast<unsigned long long>(expected_cycles),
+      static_cast<unsigned long long>(expected),
+      static_cast<unsigned long long>(expected_gif), milliseconds,
+      milliseconds * 1000000.0 / (repetitions * first.end_pair));
+  return 0;
+}
 }
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    std::fprintf(stderr, "usage: ps2vu_benchmark CAPTURE.bin REPETITIONS(1..100000)\n");
+  if ((argc != 3 && argc != 4) ||
+      (argc == 4 && std::strcmp(argv[3], "--vu-first") != 0)) {
+    std::fprintf(stderr, "usage: ps2vu_benchmark CAPTURE.bin REPETITIONS(1..100000) [--vu-first]\n");
     return 2;
   }
   char* end = nullptr;
@@ -61,6 +141,7 @@ int main(int argc, char** argv) {
   std::vector<std::uint8_t> data(static_cast<std::size_t>(size));
   input.seekg(0);
   if (!input.read(reinterpret_cast<char*>(data.data()), data.size())) return 2;
+  if (argc == 4) return benchmark_first_run(data, repetitions);
   ps2vita::Memory memory;
   ps2vita::Vif1 vif(memory);
   std::uint64_t expected = 0;
@@ -68,8 +149,12 @@ int main(int argc, char** argv) {
   double milliseconds = 0.0;
   for (unsigned long repetition = 0; repetition < repetitions; ++repetition) {
     vif.reset();
-    memory.zero(ps2vita::Memory::kVu1DataBase, 0x4000u);
-    memory.zero(ps2vita::Memory::kVu1MicroBase, 0x4000u);
+    // Memory::zero addresses EE RAM, not the VU banks. Explicitly clear both
+    // banks outside the timed interval so every upload starts from the same state.
+    for (std::uint32_t offset = 0; offset < 0x4000u; offset += 4u) {
+      memory.write32(ps2vita::Memory::kVu1MicroBase + offset, 0u);
+      memory.write32(ps2vita::Memory::kVu1DataBase + offset, 0u);
+    }
     const auto start = std::chrono::steady_clock::now();
     const bool accepted = vif.submit(data.data(), data.size());
     const auto finish = std::chrono::steady_clock::now();

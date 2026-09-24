@@ -109,12 +109,13 @@ speed on physical Vita hardware**. One malformed VU1 PATH1 tag remains rejected.
 Formats, fog, native GS buffer semantics and VU/GIF timing still need work.
 See the [framebuffer-feedback implementation and validation](docs/SESSION_2026-09-21.md).
 
-The captured first VIF1/VU1 BIOS packet now runs about **23x faster on the
+The captured first VIF1/VU1 BIOS packet now runs at least about **22x faster on the
 development host** after removing EE bus/TLB decoding from VU-local accesses
-and VIF uploads. Its 998 pairs, 1308 modeled cycles, and final VU-state
-checksum are unchanged; the new benchmark also checks GIF-byte repeatability.
-This is an end-to-end host packet benchmark,
-not a Vita performance result or an intro fix. The packet still produces mostly
+and VIF uploads. A separately built pre-optimization core and the new core
+match on 998 pairs, 1308 modeled cycles, final VU state, and GIF packet bytes.
+An isolated 55-pair VU-only prologue measured about 33x faster on the same host.
+The whole-packet and VU-only figures are host benchmarks, not Vita performance
+results or an intro fix. The packet still produces mostly
 suppressed geometry. See the [VU1 optimization checkpoint](docs/SESSION_2026-09-24.md).
 
 ### What comes next
