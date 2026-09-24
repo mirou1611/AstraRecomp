@@ -72,7 +72,7 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 
 ## Project status
 
-Latest verified research checkpoint: **September 21, 2026**. These are development
+Latest verified research checkpoint: **September 24, 2026**. These are development
 results, not a game-compatibility list or a measured completion percentage.
 
 | Area | Current state |
@@ -81,7 +81,7 @@ results, not a game-compatibility list or a measured completion percentage.
 | PC recompiler | Phase-0 analysis, a tested R5900-to-C++ subset, and a generated mixed-workload performance gate |
 | Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
 | Guest graphics | 160×112 software rasterizer; reference-checked PATH3 fixtures cover UV, perspective ST/Q, RGB alpha selection and HIGHLIGHT modes; BIOS output is not a confirmed intro |
-| VU1 | Tested instruction subset, microprogram upload, vector unpacking, XGKICK delivery, and partial MAC-flag latency; full timing remains incomplete |
+| VU1 | Tested instruction subset, VIF1 uploads, XGKICK delivery, and partial MAC-flag latency; VU-local execution/upload fast paths are verified, but full timing remains incomplete |
 | Audio / SPU2 | Tested DMA and shadow ADPCM/voice-envelope/pitch/mixing components; no Vita speaker output; further audio work deferred |
 | Retail games | **Not playable**—IOP devices, GIF/GS, VU, SPU2, media, and compatibility work remain |
 
@@ -109,11 +109,20 @@ speed on physical Vita hardware**. One malformed VU1 PATH1 tag remains rejected.
 Formats, fog, native GS buffer semantics and VU/GIF timing still need work.
 See the [framebuffer-feedback implementation and validation](docs/SESSION_2026-09-21.md).
 
+The captured first VIF1/VU1 BIOS packet now runs about **23x faster on the
+development host** after removing EE bus/TLB decoding from VU-local accesses
+and VIF uploads. Its 998 pairs, 1308 modeled cycles, and final VU-state
+checksum are unchanged; the new benchmark also checks GIF-byte repeatability.
+This is an end-to-end host packet benchmark,
+not a Vita performance result or an intro fix. The packet still produces mostly
+suppressed geometry. See the [VU1 optimization checkpoint](docs/SESSION_2026-09-24.md).
+
 ### What comes next
 
-- Compare BIOS output after the framebuffer-feedback change; align useful draws
-  with reference captures before assigning the remaining failure to VU timing.
-- Improve the VU and GS behavior needed for a recognizable startup sequence.
+- Compare the first BIOS VU1 clipping decisions with an equivalent trusted
+  reference before changing MAC-flag timing or ADC suppression.
+- Improve the GS storage/scanout behavior needed for a recognizable startup
+  sequence, keeping reference-backed draw tests as the correctness gate.
 - Return to SPU2 sound-generation and Vita audio output after graphics bring-up.
 - Expand native-code coverage while checking it against the interpreter.
 - Measure correctness and performance on a physical Vita before making speed claims.
