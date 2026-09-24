@@ -325,11 +325,12 @@ void write_execution_census(std::ostream& output, std::uint64_t ee_steps,
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 13) {
+  if (argc < 2 || argc > 14) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
         "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP] "
-        "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM] [FIRST_VIF_BIN]\n"
+        "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM] [FIRST_VIF_BIN] "
+        "[LINEAR_DISPLAY_PPM]\n"
         "optional ASTRA_TRACE_SECONDS=1..86400 bounds host runtime and reports progress; 0 disables\n");
     return 2;
   }
@@ -374,7 +375,8 @@ int main(int argc, char** argv) {
   // '-' skips the optional census when requesting a framebuffer capture.
   const char* census_path = argc >= 11 && std::string(argv[10]) != "-" ? argv[10] : nullptr;
   const char* framebuffer_path = argc >= 12 ? argv[11] : nullptr;
-  const char* vif_path = argc >= 13 ? argv[12] : nullptr;
+  const char* vif_path = argc >= 13 && std::string(argv[12]) != "-" ? argv[12] : nullptr;
+  const char* linear_display_path = argc >= 14 ? argv[13] : nullptr;
 
   ps2vita::Emulator emulator;
   emulator.enable_vif_packet_capture(vif_path != nullptr);
@@ -971,6 +973,95 @@ int main(int argc, char** argv) {
     std::printf("%08X  %016llX %016llX\n", address,
         static_cast<unsigned long long>(emulator.memory().read64(address + 8u)),
         static_cast<unsigned long long>(emulator.memory().read64(address)));
+  }
+  const auto pmode = emulator.memory().read64(0x12000000u);
+  std::printf("gs_pmode=%016llX en1=%u en2=%u slbg=%u\n",
+      static_cast<unsigned long long>(pmode),
+      static_cast<unsigned>(pmode & 1u),
+      static_cast<unsigned>((pmode >> 1u) & 1u),
+      static_cast<unsigned>((pmode >> 7u) & 1u));
+  if (linear_display_path && (pmode & 3u) != 1u && (pmode & 3u) != 2u) {
+    std::fputs("linear display PPM requires exactly one enabled circuit\n", stderr);
+    return 2;
+  }
+  for (unsigned circuit = 0; circuit < 2u; ++circuit) {
+    // GS privileged register packing follows ps2dev gsKit's GS_SET_DISPFB*
+    // and GS_SET_DISPLAY* macros (ee/gs/include/gsInit.h).
+    const auto fb = emulator.memory().read64(circuit ? 0x12000090u : 0x12000070u);
+    const auto display = emulator.memory().read64(circuit ? 0x120000A0u : 0x12000080u);
+    const auto fbp = static_cast<unsigned>(fb & 0x1FFu);
+    const auto fbw = static_cast<unsigned>((fb >> 9u) & 0x3Fu);
+    const auto psm = static_cast<unsigned>((fb >> 15u) & 0x3Fu);
+    const auto dbx = static_cast<unsigned>((fb >> 32u) & 0x7FFu);
+    const auto dby = static_cast<unsigned>((fb >> 43u) & 0x7FFu);
+    std::printf("gs_display[%u] dispfb=%016llX fbp=%u fbw=%u psm=%u dbx=%u dby=%u "
+                "display=%016llX dx=%u dy=%u magh=%u magv=%u dw=%u dh=%u\n",
+        circuit + 1u, static_cast<unsigned long long>(fb),
+        fbp, fbw, psm, dbx, dby,
+        static_cast<unsigned long long>(display),
+        static_cast<unsigned>(display & 0xFFFu),
+        static_cast<unsigned>((display >> 12u) & 0x7FFu),
+        static_cast<unsigned>((display >> 23u) & 0xFu),
+        static_cast<unsigned>((display >> 27u) & 0x3u),
+        static_cast<unsigned>((display >> 32u) & 0xFFFu),
+        static_cast<unsigned>((display >> 44u) & 0x7FFu));
+    // This probes Astra's current *linear* local-memory approximation only.
+    // Native GS swizzling and display-circuit composition are not modeled.
+    if (((pmode >> circuit) & 1u) != 0u) {
+      if (fbw == 0u || psm > 1u) {
+        if (linear_display_path) {
+          std::fputs("linear display PPM requires PSMCT32/24 and nonzero FBW\n", stderr);
+          return 2;
+        }
+        continue;
+      }
+      std::ofstream linear_snapshot;
+      if (linear_display_path) {
+        linear_snapshot.open(linear_display_path, std::ios::binary | std::ios::trunc);
+        if (!linear_snapshot) {
+          std::fprintf(stderr, "could not open linear display PPM: %s\n",
+              linear_display_path);
+          return 2;
+        }
+        linear_snapshot << "P6\n" << ps2vita::Gs::kWidth << ' '
+                        << ps2vita::Gs::kHeight << "\n255\n";
+      }
+      std::uint64_t hash = 1469598103934665603ull;
+      std::size_t nonzero = 0;
+      const auto width = fbw * 64u;
+      const auto base = fbp * 2048u;
+      for (int y = 0; y < ps2vita::Gs::kHeight; ++y) {
+        for (int x = 0; x < ps2vita::Gs::kWidth; ++x) {
+          const auto address = base +
+              ((dby + static_cast<unsigned>(y) * 4u) * width +
+               dbx + static_cast<unsigned>(x) * 4u) * 4u;
+          const auto pixel = emulator.gif().read_local32(address);
+          if (linear_display_path) {
+            const char rgb[]{static_cast<char>(pixel & 0xFFu),
+                             static_cast<char>((pixel >> 8u) & 0xFFu),
+                             static_cast<char>((pixel >> 16u) & 0xFFu)};
+            linear_snapshot.write(rgb, sizeof(rgb));
+          }
+          if ((pixel & 0xFFFFFFu) != 0u) ++nonzero;
+          hash ^= pixel;
+          hash *= 1099511628211ull;
+        }
+      }
+      std::printf("gs_linear_display_probe[%u] base=%08X width=%u hash=%016llX "
+                  "nonzero_rgb_pixels=%zu/%u\n",
+          circuit + 1u, base, width,
+          static_cast<unsigned long long>(hash), nonzero,
+          ps2vita::Gs::kWidth * ps2vita::Gs::kHeight);
+      if (linear_display_path) {
+        linear_snapshot.close();
+        if (!linear_snapshot) {
+          std::fprintf(stderr, "could not write linear display PPM: %s\n",
+              linear_display_path);
+          return 2;
+        }
+        std::printf("gs_linear_display_snapshot=%s\n", linear_display_path);
+      }
+    }
   }
   std::uint64_t framebuffer_hash = 1469598103934665603ull;
   {

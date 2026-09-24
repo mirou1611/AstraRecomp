@@ -29,6 +29,24 @@ PNG locally. Keep BIOS-derived snapshots and replay dumps local while debugging;
 do not commit BIOS or game assets. Tests cover channel order, row order, alpha
 omission, exact payload length, and stream failure.
 
+For a separate probe of the GS framebuffer selected by the enabled privileged
+display circuit, append `LINEAR_DISPLAY_PPM` after `FIRST_VIF_BIN`. Use `-`
+to skip an unwanted optional census or VIF capture:
+
+```sh
+./build-release/ps2bios_trace bios.bin 0 300000000 1 0 8 0 0 0 \
+  - build-release/draw-preview.ppm - build-release/display-linear.ppm \
+  > build-release/display-probe.txt 2>&1
+```
+
+The second image samples Astra's current **linear** GS memory at the selected
+`DISPFB` base and width on the same 160x112 quarter grid. The log prints raw
+and decoded `PMODE`, `DISPFB1/2`, and `DISPLAY1/2`, plus a separate hash and
+nonblack pixel count. This is not native GS swizzled memory or accurate CRT
+scanout; it requires exactly one enabled display circuit and a PSMCT32/24
+framebuffer with nonzero width. Keep both views separate when comparing to a
+reference. The first path remains the renderer's current draw-target preview.
+
 The host tracer also enables bounded triangle tracing (first 64 drawing kicks).
 Each `gif_triangle` line includes PRIM, XYOFFSET, SCISSOR, TEST and ZBUF from the
 selected context, three host vertices `(x,y,z,AABBGGRR)`, and their original
