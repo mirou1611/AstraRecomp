@@ -326,12 +326,12 @@ void write_execution_census(std::ostream& output, std::uint64_t ee_steps,
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 14) {
+  if (argc < 2 || argc > 17) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
         "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP] "
         "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM] [FIRST_VIF_BIN] "
-        "[LINEAR_DISPLAY_PPM]\n"
+        "[LINEAR_DISPLAY_PPM] [SPRITE_SEQUENCE SPRITE_PPM [SPRITE_SOURCE_PPM]]\n"
         "optional ASTRA_TRACE_SECONDS=1..86400 bounds host runtime and reports progress; 0 disables\n");
     return 2;
   }
@@ -374,10 +374,32 @@ int main(int argc, char** argv) {
   const std::uint64_t timer5_probe_step = argc >= 10
       ? std::strtoull(argv[9], nullptr, 0) : 0u;
   // '-' skips the optional census when requesting a framebuffer capture.
-  const char* census_path = argc >= 11 && std::string(argv[10]) != "-" ? argv[10] : nullptr;
-  const char* framebuffer_path = argc >= 12 ? argv[11] : nullptr;
-  const char* vif_path = argc >= 13 && std::string(argv[12]) != "-" ? argv[12] : nullptr;
-  const char* linear_display_path = argc >= 14 ? argv[13] : nullptr;
+  const auto optional_path = [&](int index) -> const char* {
+    return argc > index && std::string(argv[index]) != "-" ? argv[index] : nullptr;
+  };
+  const char* census_path = optional_path(10);
+  const char* framebuffer_path = optional_path(11);
+  const char* vif_path = optional_path(12);
+  const char* linear_display_path = optional_path(13);
+  if (argc == 15) {
+    std::fputs("sprite capture requires SPRITE_SEQUENCE and SPRITE_PPM\n", stderr);
+    return 2;
+  }
+  std::uint64_t sprite_capture_sequence = 0;
+  const char* sprite_capture_path = argc >= 16 ? optional_path(15) : nullptr;
+  const char* sprite_source_path = optional_path(16);
+  if (argc >= 16) {
+    if (!sprite_capture_path || argv[14][0] == '\0' || argv[14][0] == '-') {
+      std::fputs("sprite capture needs a sequence and output path\n", stderr);
+      return 2;
+    }
+    char* end = nullptr;
+    sprite_capture_sequence = std::strtoull(argv[14], &end, 0);
+    if (*end != '\0' || end == argv[14]) {
+      std::fputs("invalid sprite capture sequence\n", stderr);
+      return 2;
+    }
+  }
 
   ps2vita::Emulator emulator;
   emulator.enable_vif_packet_capture(vif_path != nullptr);
@@ -387,6 +409,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   emulator.enable_vif_command_census(true);
+  if (sprite_capture_path)
+    emulator.capture_sprite_framebuffer_at(sprite_capture_sequence);
 
   constexpr std::size_t kTraceSize = 256;
   emulator.memory().enable_spu2_shadow(true);
@@ -1031,10 +1055,10 @@ int main(int argc, char** argv) {
       const auto base = framebuffer.base_bytes();
       for (int y = 0; y < ps2vita::Gs::kHeight; ++y) {
         for (int x = 0; x < ps2vita::Gs::kWidth; ++x) {
-          const auto address = base +
-              ((dby + static_cast<unsigned>(y) * 4u) * width +
-               dbx + static_cast<unsigned>(x) * 4u) * 4u;
-          const auto pixel = emulator.gif().read_local32(address);
+          const auto address = framebuffer.linear_pixel_byte_address(
+              static_cast<unsigned>(x) * 4u, static_cast<unsigned>(y) * 4u);
+          const auto pixel = emulator.gif().read_local32(
+              static_cast<std::uint32_t>(address));
           if (linear_display_path) {
             const char rgb[]{static_cast<char>(pixel & 0xFFu),
                              static_cast<char>((pixel >> 8u) & 0xFFu),
@@ -1117,6 +1141,72 @@ int main(int argc, char** argv) {
     }
     std::printf("framebuffer snapshot: %s\n", framebuffer_path);
   }
+  if (sprite_capture_path) {
+    if (!emulator.gif().sprite_framebuffer_captured()) {
+      std::fprintf(stderr, "sprite sequence %llu was not emitted\n",
+          static_cast<unsigned long long>(sprite_capture_sequence));
+      return 2;
+    }
+    std::ofstream snapshot(sprite_capture_path, std::ios::binary | std::ios::trunc);
+    snapshot << "P6\n" << ps2vita::Gs::kWidth << ' '
+             << ps2vita::Gs::kHeight << "\n255\n";
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const auto pixel : emulator.gif().sprite_framebuffer_capture()) {
+      hash ^= pixel;
+      hash *= 1099511628211ull;
+      const char rgb[]{static_cast<char>(pixel & 0xFFu),
+                       static_cast<char>((pixel >> 8u) & 0xFFu),
+                       static_cast<char>((pixel >> 16u) & 0xFFu)};
+      snapshot.write(rgb, sizeof(rgb));
+    }
+    snapshot.close();
+    if (!snapshot) {
+      std::fprintf(stderr, "could not write sprite capture: %s\n",
+          sprite_capture_path);
+      return 2;
+    }
+    std::printf("gif_sprite_capture sequence=%llu hash=%016llX path=%s\n",
+        static_cast<unsigned long long>(sprite_capture_sequence),
+        static_cast<unsigned long long>(hash), sprite_capture_path);
+    const auto& source = emulator.gif().sprite_texture_capture();
+    if (!source.empty()) {
+      std::uint64_t source_hash = 1469598103934665603ull;
+      std::size_t nonzero_rgb = 0;
+      std::ofstream source_snapshot;
+      if (sprite_source_path) {
+        source_snapshot.open(sprite_source_path, std::ios::binary | std::ios::trunc);
+        source_snapshot << "P6\n" << ps2vita::Gif::kSpriteSourceProbeWidth << ' '
+                        << ps2vita::Gif::kSpriteSourceProbeHeight << "\n255\n";
+      }
+      for (const auto pixel : source) {
+        source_hash ^= pixel;
+        source_hash *= 1099511628211ull;
+        if ((pixel & 0xFFFFFFu) != 0u) ++nonzero_rgb;
+        if (sprite_source_path) {
+          const char rgb[]{static_cast<char>(pixel & 0xFFu),
+                           static_cast<char>((pixel >> 8u) & 0xFFu),
+                           static_cast<char>((pixel >> 16u) & 0xFFu)};
+          source_snapshot.write(rgb, sizeof(rgb));
+        }
+      }
+      if (sprite_source_path) {
+        source_snapshot.close();
+        if (!source_snapshot) {
+          std::fprintf(stderr, "could not write sprite source: %s\n",
+              sprite_source_path);
+          return 2;
+        }
+      }
+      std::printf("gif_sprite_source_probe sequence=%llu hash=%016llX "
+                  "nonzero_rgb_pixels=%zu/%zu path=%s\n",
+          static_cast<unsigned long long>(sprite_capture_sequence),
+          static_cast<unsigned long long>(source_hash), nonzero_rgb,
+          source.size(), sprite_source_path ? sprite_source_path : "-");
+    } else if (sprite_source_path) {
+      std::fputs("sprite source probe requires PSMCT32/24 and nonzero TBW\n", stderr);
+      return 2;
+    }
+  }
   std::printf("gif_packets=%llu rejected=%llu sprites=%llu tags=%llu/%llu/%llu "
               "image_bytes=%llu local_bytes=%llu pending=%llu first_unsupported=%016llX\n",
       static_cast<unsigned long long>(emulator.gif().packets_submitted()),
@@ -1164,6 +1254,35 @@ int main(int argc, char** argv) {
   };
   print_triangles("gif_triangle", emulator.gif().triangle_records());
   print_triangles("gif_nondegenerate", emulator.gif().nondegenerate_triangle_records());
+  const auto& sprites = emulator.gif().sprite_records();
+  std::printf("gif_sprite_trace records=%zu total=%llu\n", sprites.size(),
+      static_cast<unsigned long long>(emulator.gif().sprites_emitted()));
+  for (std::size_t index = 0; index < sprites.size(); ++index) {
+    const auto& s = sprites[index];
+    std::printf("gif_sprite[%zu] sequence=%llu prim=%llX xyz=%016llX/%016llX "
+                "uv=%016llX/%016llX xyoffset=%016llX scissor=%016llX "
+                "tex0=%016llX tex1=%016llX clamp=%016llX frame=%016llX "
+                "test=%016llX alpha=%016llX texa=%016llX rgbaq=%016llX "
+                "source=%u/%016llX target=%u/%016llX\n", index,
+        static_cast<unsigned long long>(s.sequence),
+        static_cast<unsigned long long>(s.prim),
+        static_cast<unsigned long long>(s.first_xyz),
+        static_cast<unsigned long long>(s.second_xyz),
+        static_cast<unsigned long long>(s.first_uv),
+        static_cast<unsigned long long>(s.second_uv),
+        static_cast<unsigned long long>(s.xyoffset),
+        static_cast<unsigned long long>(s.scissor),
+        static_cast<unsigned long long>(s.tex0),
+        static_cast<unsigned long long>(s.tex1),
+        static_cast<unsigned long long>(s.clamp),
+        static_cast<unsigned long long>(s.frame),
+        static_cast<unsigned long long>(s.test),
+        static_cast<unsigned long long>(s.alpha),
+        static_cast<unsigned long long>(s.texa),
+        static_cast<unsigned long long>(s.rgbaq), s.source_nonzero_rgb,
+        static_cast<unsigned long long>(s.source_hash), s.target_nonzero_rgb,
+        static_cast<unsigned long long>(s.target_hash));
+  }
   for (std::size_t index = 0; index < emulator.gif().image_records().size();
        ++index) {
     const auto& image = emulator.gif().image_records()[index];

@@ -29,11 +29,16 @@ void Gif::reset() {
   texa_ = 0;
   triangle_records_.clear();
   nondegenerate_triangle_records_.clear();
+  sprite_records_.clear();
+  sprite_framebuffer_capture_.clear();
+  sprite_texture_capture_.clear();
+  capture_sprite_enabled_ = false;
   prim_ = 0;
   rgbaq_ = 0x8000000080808080ull;
   st_ = 0;
   packed_q_ = 0x3F800000u;
   tex0_[0] = tex0_[1] = 0;
+  tex1_[0] = tex1_[1] = 0;
   clamp_[0] = clamp_[1] = 0;
   frame_[0] = frame_[1] = 0;
   test_[0] = test_[1] = 0;
@@ -314,6 +319,8 @@ void Gif::write_register(std::uint8_t address, std::uint64_t value) {
   case 0x03: uv_ = value; break;
   case 0x06: tex0_[0] = value; break;
   case 0x07: tex0_[1] = value; break;
+  case 0x14: tex1_[0] = value; break;
+  case 0x15: tex1_[1] = value; break;
   case 0x08: clamp_[0] = value; break;
   case 0x09: clamp_[1] = value; break;
   case 0x05: emit_xyz2(value); break;
@@ -463,6 +470,48 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
     have_first_xyz2_ = false;
     return;
   }
+  const bool record_sprite = trace_triangles_ && sprite_records_.size() < 256u;
+  if (record_sprite) {
+    sprite_records_.push_back({first_xyz2_, value, first_uv_, uv_, prim_,
+        xyoffset_[context], scissor_[context], tex0_[context], tex1_[context],
+        clamp_[context], frame_[context], test_[context], alpha_[context],
+        texa_, sprites_emitted_});
+    auto& record = sprite_records_.back();
+    record.rgbaq = rgbaq_;
+    if ((prim_ & (1u << 4)) != 0u) {
+      const auto tex0 = tex0_[context];
+      const auto source_width = static_cast<unsigned>((tex0 >> 14u) & 0x3Fu) * 64u;
+      const auto format = static_cast<unsigned>((tex0 >> 20u) & 0x3Fu);
+      if (source_width != 0u && format <= 1u) {
+        const auto source_base = static_cast<std::uint32_t>(tex0 & 0x3FFFu) * 256u;
+        record.source_hash = 1469598103934665603ull;
+        for (unsigned y = 0; y < kSpriteSourceProbeHeight; ++y)
+          for (unsigned x = 0; x < kSpriteSourceProbeWidth; ++x) {
+            const auto pixel = read_local32(source_base +
+                ((y * 4u) * source_width + x * 4u) * 4u);
+            record.source_hash ^= pixel;
+            record.source_hash *= 1099511628211ull;
+            if ((pixel & 0xFFFFFFu) != 0u) ++record.source_nonzero_rgb;
+          }
+      }
+    }
+  }
+  if (capture_sprite_enabled_ && sprites_emitted_ == capture_sprite_sequence_) {
+    // Freeze the *raw linear* color source before rendering feedback into the
+    // destination. This is a diagnostic grid, not swizzled GS texture decode.
+    const auto tex0 = tex0_[context];
+    const auto source_width = static_cast<unsigned>((tex0 >> 14u) & 0x3Fu) * 64u;
+    const auto format = static_cast<unsigned>((tex0 >> 20u) & 0x3Fu);
+    if (source_width != 0u && format <= 1u) {
+      const auto source_base = static_cast<std::uint32_t>(tex0 & 0x3FFFu) * 256u;
+      sprite_texture_capture_.reserve(kSpriteSourceProbeWidth *
+                                      kSpriteSourceProbeHeight);
+      for (unsigned y = 0; y < kSpriteSourceProbeHeight; ++y)
+        for (unsigned x = 0; x < kSpriteSourceProbeWidth; ++x)
+          sprite_texture_capture_.push_back(read_local32(source_base +
+              ((y * 4u) * source_width + x * 4u) * 4u));
+    }
+  }
   auto x0 = scaled_coordinate(first_xyz2_, xyoffset_[context], 0u, 0u);
   auto y0 = scaled_coordinate(first_xyz2_, xyoffset_[context], 16u, 32u);
   auto x1 = scaled_coordinate(value, xyoffset_[context], 0u, 0u);
@@ -503,6 +552,24 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
       }
       gs_.point({x, y, z, pixel_color});
     }
+  }
+  if (capture_sprite_enabled_ && sprites_emitted_ == capture_sprite_sequence_) {
+    sprite_framebuffer_capture_.reserve(Gs::kWidth * Gs::kHeight);
+    for (int y = 0; y < Gs::kHeight; ++y)
+      for (int x = 0; x < Gs::kWidth; ++x)
+        sprite_framebuffer_capture_.push_back(gs_.pixel(x, y));
+    capture_sprite_enabled_ = false;
+  }
+  if (record_sprite) {
+    auto& record = sprite_records_.back();
+    record.target_hash = 1469598103934665603ull;
+    for (int y = 0; y < Gs::kHeight; ++y)
+      for (int x = 0; x < Gs::kWidth; ++x) {
+        const auto pixel = gs_.pixel(x, y);
+        record.target_hash ^= pixel;
+        record.target_hash *= 1099511628211ull;
+        if ((pixel & 0xFFFFFFu) != 0u) ++record.target_nonzero_rgb;
+      }
   }
   ++sprites_emitted_;
   have_first_xyz2_ = false;

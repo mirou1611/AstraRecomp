@@ -29,6 +29,7 @@ void check(bool condition, const char* label) {
 void test_gif_repeated_prim() {
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
+  gif.enable_triangle_trace(true);
   const auto reg = [&](std::uint64_t address, std::uint64_t value) {
     const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull, 0xEull, value, address}};
     check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet)),
@@ -46,10 +47,28 @@ void test_gif_repeated_prim() {
                                         0x5ull, 0, 0}};
   check(gif.submit(reinterpret_cast<const std::uint8_t*>(pre.data()), sizeof(pre)) &&
         gif.triangles_emitted() == 2, "GIF tag PRE restarts identical strip mode");
+  reg(0x14, 0x20); // Preserve TEX1's linear magnification bit in draw trace.
+  gif.capture_sprite_framebuffer_at(0u);
   reg(0, 6); reg(5, 0); reg(0, 6); reg(5, (256ull << 16) | 256);
   check(gif.sprites_emitted() == 0, "GIF identical PRIM discards incomplete sprite");
   reg(5, (512ull << 16) | 512);
   check(gif.sprites_emitted() == 1, "GIF sprite assembles after explicit restart");
+  check(gif.sprite_records().size() == 1u &&
+        gif.sprite_records()[0].first_xyz == ((256ull << 16) | 256u) &&
+        gif.sprite_records()[0].second_xyz == ((512ull << 16) | 512u) &&
+        gif.sprite_records()[0].tex1 == 0x20u &&
+        gif.sprite_records()[0].sequence == 0u &&
+        gif.sprite_records()[0].target_nonzero_rgb != 0u,
+        "GIF sprite trace captures the selected TEX1 and raw vertex pair");
+  check(gif.sprite_framebuffer_captured() &&
+        gif.sprite_framebuffer_capture().size() ==
+            ps2vita::Gs::kWidth * ps2vita::Gs::kHeight &&
+        gif.sprite_framebuffer_capture()[5u * ps2vita::Gs::kWidth + 5u] ==
+            gs.pixel(5, 5),
+        "GIF captures the selected sprite's completed draw target");
+  gif.reset();
+  check(gif.sprite_records().empty() && !gif.sprite_framebuffer_captured(),
+        "GIF reset discards captured sprite diagnostics");
 }
 
 void test_gs_shared_edges() {
@@ -1008,6 +1027,11 @@ void test_gs_display_framebuffer_decode() {
   constexpr auto bios = ps2vita::GsDisplayFramebuffer::decode(0x1450u);
   static_assert(bios.fbp == 0x50u && bios.fbw == 10u && bios.psm == 0u);
   static_assert(bios.base_bytes() == 0xA0000u && bios.width_pixels() == 640u);
+  static_assert(bios.linear_pixel_byte_address(0u, 0u) == 0xA0000u);
+  // FBP 0x50 spans 256 native rows at FBW 10, or 64 preview-grid rows.
+  static_assert(bios.linear_pixel_byte_address(0u, 0u) ==
+                ps2vita::GsDisplayFramebuffer::decode(10ull << 9u)
+                    .linear_pixel_byte_address(0u, 256u));
   constexpr auto edge = ps2vita::GsDisplayFramebuffer::decode(
       0x1FFull | (63ull << 9u) | (31ull << 15u) |
       (2047ull << 32u) | (2047ull << 43u));
@@ -3996,6 +4020,8 @@ void test_gif_textured_sprite_from_local_memory() {
   ps2vita::Gs gs;
   gs.clear(0u);
   ps2vita::Gif gif(gs);
+  gif.enable_triangle_trace(true);
+  gif.capture_sprite_framebuffer_at(0u);
   check(gif.submit(reinterpret_cast<const std::uint8_t*>(upload.data()),
                    sizeof(upload)) &&
         gif.submit(reinterpret_cast<const std::uint8_t*>(draw.data()),
@@ -4006,6 +4032,16 @@ void test_gif_textured_sprite_from_local_memory() {
         gs.pixel(0, 1) == 0xFFFF0000u &&
         gs.pixel(1, 1) == 0xFFFFFFFFu,
         "GIF UV sprite samples the logical PSMCT32 surface");
+  check(gif.sprite_texture_capture().size() ==
+            ps2vita::Gif::kSpriteSourceProbeWidth *
+            ps2vita::Gif::kSpriteSourceProbeHeight &&
+        gif.sprite_texture_capture()[0] == 0xFF0000FFu &&
+        gif.sprite_texture_capture()[1] == 0u,
+        "GIF sprite source probe freezes raw linear texels before the draw");
+  check(gif.sprite_records().size() == 1u &&
+        gif.sprite_records()[0].source_nonzero_rgb != 0u &&
+        gif.sprite_records()[0].target_nonzero_rgb != 0u,
+        "GIF sprite census records nonblack source and completed target");
 }
 
 void gif_depth_register(ps2vita::Gif& gif, std::uint64_t value,

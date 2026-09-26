@@ -125,6 +125,12 @@ exactly match rows 64-111 of Astra's draw-target preview. This identifies a
 real display-versus-draw origin difference, but is **not** hardware-accurate
 scanout or proof that the output matches the BIOS intro. See the
 [display-routing checkpoint](docs/SESSION_2026-09-24.md).
+Draw-level tracing has since matched the GS state and vertices of a repeated
+full-screen BIOS feedback sprite to the PCSX2 reference, then isolated a
+source-surface mismatch: one later Astra pass samples blue texture across the
+whole source, while the reference texture has mostly black background around
+the cloud. This is a more specific graphics lead, **not** a boot-intro result.
+See the [draw-level checkpoint](docs/SESSION_2026-09-26.md).
 
 ### What comes next
 

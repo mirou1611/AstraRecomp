@@ -19,6 +19,14 @@ struct GsDisplayFramebuffer {
   // PCSX2 v2.8.2 GSRegDISPFB::Block() and GIFRegFRAME::Block() agree.
   constexpr std::uint32_t base_bytes() const { return fbp * 8192u; }
   constexpr std::uint32_t width_pixels() const { return fbw * 64u; }
+
+  // Diagnostic linear-VRAM approximation for PSMCT32/24 only. This is not
+  // native GS page/block swizzling or display-circuit sampling.
+  constexpr std::uint64_t linear_pixel_byte_address(std::uint32_t x,
+                                                    std::uint32_t y) const {
+    return base_bytes() +
+           (static_cast<std::uint64_t>(dby + y) * width_pixels() + dbx + x) * 4u;
+  }
 };
 
 } // namespace ps2vita

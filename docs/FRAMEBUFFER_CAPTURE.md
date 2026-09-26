@@ -63,6 +63,34 @@ ADC-suppressed assembly updates do not create records. Zero-area drawing kicks
 can appear in the trace even though the rasterizer correctly gives them no
 coverage. Tracing is off by default in the runtime and never caps rendering.
 
+It also records up to 256 emitted sprites as `gif_sprite` lines with raw XYZ/UV
+endpoints and the selected PRIM, XYOFFSET, SCISSOR, TEX0, TEX1, CLAMP, FRAME,
+TEST, ALPHA, TEXA and RGBAQ values. It includes raw linear source and
+post-draw target hashes/nonblack RGB counts on bounded preview grids.
+`sequence` is the zero-based sprite emission
+count, so a reference sprite can be matched by state and geometry rather than
+by assuming the two emulators use the same draw number. TEX1 is captured for
+diagnosis; Astra does not yet implement its texture-filter selection.
+
+To freeze the draw target immediately after a particular zero-based sprite
+emission, append its sequence and a PPM path after the linear display path.
+For example, the captured BIOS sprite 11 has the same XYZ/UV endpoints and
+key GS state as PCSX2 reference draw 99 (but equivalent texture contents are
+not yet established):
+
+```sh
+./build-release/ps2bios_trace bios.bin 0 300000000 1 0 8 0 0 0 \
+  - - - - 11 build-release/sprite-11.ppm build-release/sprite-11-source.ppm \
+  > build-release/sprite-11.txt 2>&1
+```
+
+`-` now skips *each* optional output path, including both PPM paths. The
+sprite capture is read-only diagnostic state; it neither stops the replay nor
+changes the draw. The optional source PPM samples the sprite's PSMCT32/24
+texture base on a 160x64 quarter grid **before** the draw; it uses Astra's
+linear local-memory approximation, not native GS swizzling. A nonexistent
+sequence is an explicit output error.
+
 ## Isolated VIF replay
 
 Append `FIRST_VIF_BIN` after the framebuffer path to save the first submitted
