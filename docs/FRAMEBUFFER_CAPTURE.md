@@ -48,6 +48,13 @@ scanout; it requires exactly one enabled display circuit and a PSMCT32/24
 framebuffer with nonzero width. Keep both views separate when comparing to a
 reference. The first path remains the renderer's current draw-target preview.
 
+In the 300M-step BIOS checkpoint, circuit 2 selects FBP `0x50`, giving a
+linear base of `0xA0000` at FBW 10 (640 pixels). At this endpoint, rows 0-47
+of the linear display probe match rows 64-111 of the draw preview byte for
+byte in RGB. The base offset equals 256 native rows, or 64 rows at this
+quarter-resolution preview scale. This is a useful addressing cross-check,
+not evidence that either image is a hardware-accurate scanout.
+
 The host tracer also enables bounded triangle tracing (first 64 drawing kicks).
 Each `gif_triangle` line includes PRIM, XYOFFSET, SCISSOR, TEST and ZBUF from the
 selected context, three host vertices `(x,y,z,AABBGGRR)`, and their original
