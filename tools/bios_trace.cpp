@@ -326,12 +326,13 @@ void write_execution_census(std::ostream& output, std::uint64_t ee_steps,
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 17) {
+  if (argc < 2 || argc > 18) {
     std::fprintf(stderr,
         "usage: ps2bios_trace BIOS [STOP_PC] [MAX_STEPS] [STOP_HIT] "
         "[WATCH_LOW_CLEAR] [IOP_DIVISOR] [IOP_STOP_PC] [SBUS_PROBE_STEP] "
         "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM] [FIRST_VIF_BIN] "
-        "[LINEAR_DISPLAY_PPM] [SPRITE_SEQUENCE SPRITE_PPM [SPRITE_SOURCE_PPM]]\n"
+        "[LINEAR_DISPLAY_PPM] [SPRITE_SEQUENCE SPRITE_PPM [SPRITE_SOURCE_PPM "
+        "[PRECEDING_TEXTURE16_BIN]]]\n"
         "optional ASTRA_TRACE_SECONDS=1..86400 bounds host runtime and reports progress; 0 disables\n");
     return 2;
   }
@@ -388,6 +389,7 @@ int main(int argc, char** argv) {
   std::uint64_t sprite_capture_sequence = 0;
   const char* sprite_capture_path = argc >= 16 ? optional_path(15) : nullptr;
   const char* sprite_source_path = optional_path(16);
+  const char* preceding_texture16_path = optional_path(17);
   if (argc >= 16) {
     if (!sprite_capture_path || argv[14][0] == '\0' || argv[14][0] == '-') {
       std::fputs("sprite capture needs a sequence and output path\n", stderr);
@@ -1206,6 +1208,43 @@ int main(int argc, char** argv) {
       std::fputs("sprite source probe requires PSMCT32/24 and nonzero TBW\n", stderr);
       return 2;
     }
+    const auto& texture16 = emulator.gif().sprite_preceding_texture16();
+    if (!texture16.empty()) {
+      std::uint64_t texture_hash = 1469598103934665603ull;
+      std::size_t nonzero = 0;
+      for (const auto pixel : texture16) {
+        texture_hash ^= pixel;
+        texture_hash *= 1099511628211ull;
+        if ((pixel & 0x7FFFu) != 0u) ++nonzero;
+      }
+      if (preceding_texture16_path) {
+        std::ofstream snapshot(preceding_texture16_path,
+                               std::ios::binary | std::ios::trunc);
+        for (const auto pixel : texture16) {
+          const char bytes[]{static_cast<char>(pixel & 0xFFu),
+                             static_cast<char>(pixel >> 8u)};
+          snapshot.write(bytes, sizeof(bytes));
+        }
+        snapshot.close();
+        if (!snapshot) {
+          std::fprintf(stderr, "could not write preceding texture16: %s\n",
+                       preceding_texture16_path);
+          return 2;
+        }
+      }
+      std::printf("gif_sprite_preceding_texture16 sequence=%llu tex0=%016llX "
+                  "size=%ux%u hash=%016llX nonzero_rgb_texels=%zu/%zu path=%s\n",
+          static_cast<unsigned long long>(sprite_capture_sequence),
+          static_cast<unsigned long long>(
+              emulator.gif().sprite_preceding_texture16_tex0()),
+          emulator.gif().sprite_preceding_texture16_width(),
+          emulator.gif().sprite_preceding_texture16_height(),
+          static_cast<unsigned long long>(texture_hash), nonzero,
+          texture16.size(), preceding_texture16_path ? preceding_texture16_path : "-");
+    } else if (preceding_texture16_path) {
+      std::fputs("no bounded preceding PSMCT16 triangle texture captured\n", stderr);
+      return 2;
+    }
   }
   std::printf("gif_packets=%llu rejected=%llu sprites=%llu tags=%llu/%llu/%llu "
               "image_bytes=%llu local_bytes=%llu pending=%llu first_unsupported=%016llX\n",
@@ -1254,6 +1293,8 @@ int main(int argc, char** argv) {
   };
   print_triangles("gif_triangle", emulator.gif().triangle_records());
   print_triangles("gif_nondegenerate", emulator.gif().nondegenerate_triangle_records());
+  print_triangles("gif_sprite_preceding_triangle",
+                  emulator.gif().sprite_preceding_triangles());
   const auto& sprites = emulator.gif().sprite_records();
   std::printf("gif_sprite_trace records=%zu total=%llu\n", sprites.size(),
       static_cast<unsigned long long>(emulator.gif().sprites_emitted()));

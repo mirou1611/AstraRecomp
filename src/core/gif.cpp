@@ -30,8 +30,13 @@ void Gif::reset() {
   triangle_records_.clear();
   nondegenerate_triangle_records_.clear();
   sprite_records_.clear();
+  sprite_preceding_triangles_.clear();
+  recent_triangle_count_ = recent_triangle_cursor_ = 0;
   sprite_framebuffer_capture_.clear();
   sprite_texture_capture_.clear();
+  sprite_preceding_texture16_.clear();
+  sprite_preceding_texture16_tex0_ = 0;
+  sprite_preceding_texture16_width_ = sprite_preceding_texture16_height_ = 0;
   capture_sprite_enabled_ = false;
   prim_ = 0;
   rgbaq_ = 0x8000000080808080ull;
@@ -269,12 +274,14 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
         local_memory_[address & 0x3FFFFFu] |
         (local_memory_[(address + 1u) & 0x3FFFFFu] << 8u));
     const auto expand = [](std::uint32_t component) {
-      return (component << 3u) | (component >> 2u);
+      return component << 3u;
     };
+    const auto alpha = (pixel & 0x8000u) != 0u ? (texa_ >> 32u) & 0xFFu :
+        ((texa_ & 0x8000u) != 0u && pixel == 0u ? 0u : texa_ & 0xFFu);
     color = expand(pixel & 0x1Fu) |
             (expand((pixel >> 5) & 0x1Fu) << 8u) |
             (expand((pixel >> 10) & 0x1Fu) << 16u) |
-            ((pixel & 0x8000u) != 0u ? 0x80000000u : 0u);
+            (static_cast<std::uint32_t>(alpha) << 24u);
   } else {
     return vertex_color;
   }
@@ -411,22 +418,33 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
       return;
     }
     if (draw) {
-      if (trace_triangles_ && (triangle_records_.size() < 64u ||
-                              nondegenerate_triangle_records_.size() < 64u)) {
+      if ((trace_triangles_ && (triangle_records_.size() < 64u ||
+                               nondegenerate_triangle_records_.size() < 64u)) ||
+          capture_sprite_enabled_) {
         const GifTriangleRecord record{{vertices_[0], vertices_[1], vertex},
             {triangle_xyz_[0], triangle_xyz_[1], value},
             prim_, xyoffset_[context], scissor_[context], test_[context],
             zbuf_[context], tex0_[context], clamp_[context], frame_[context],
             alpha_[context], triangles_emitted_};
-        if (triangle_records_.size() < 64u) triangle_records_.push_back(record);
+        if (trace_triangles_ && triangle_records_.size() < 64u)
+          triangle_records_.push_back(record);
         // Host-space area only: this selects useful raster inputs, not proof
         // of visibility or native GS coverage. Keep the original prefix too.
         const auto area = std::int64_t{vertices_[1].x - vertices_[0].x} *
                             (vertex.y - vertices_[0].y) -
                           std::int64_t{vertices_[1].y - vertices_[0].y} *
                             (vertex.x - vertices_[0].x);
-        if (area != 0 && nondegenerate_triangle_records_.size() < 64u)
-          nondegenerate_triangle_records_.push_back(record);
+        if (area != 0) {
+          if (trace_triangles_ && nondegenerate_triangle_records_.size() < 64u)
+            nondegenerate_triangle_records_.push_back(record);
+          if (capture_sprite_enabled_) {
+            recent_triangles_[recent_triangle_cursor_] = record;
+            recent_triangle_cursor_ = (recent_triangle_cursor_ + 1u) %
+                                      recent_triangles_.size();
+            recent_triangle_count_ = std::min(recent_triangle_count_ + 1u,
+                                              recent_triangles_.size());
+          }
+        }
       }
       auto first = vertices_[0];
       auto second = vertices_[1];
@@ -469,6 +487,38 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   if (!draw) {
     have_first_xyz2_ = false;
     return;
+  }
+  if (capture_sprite_enabled_ && sprites_emitted_ == capture_sprite_sequence_) {
+    const auto first = (recent_triangle_cursor_ + recent_triangles_.size() -
+                        recent_triangle_count_) % recent_triangles_.size();
+    for (std::size_t index = 0; index < recent_triangle_count_; ++index)
+      sprite_preceding_triangles_.push_back(
+          recent_triangles_[(first + index) % recent_triangles_.size()]);
+    // Preserve the most recent PSMCT16 input before the sprite can feed back
+    // into local memory. This intentionally reads Astra's linear model, not
+    // a native GS-swizzled surface.
+    for (auto it = sprite_preceding_triangles_.rbegin();
+         it != sprite_preceding_triangles_.rend(); ++it) {
+      const auto tex0 = it->tex0;
+      if (((tex0 >> 20u) & 0x3Fu) != 2u) continue;
+      const auto width = 1u << ((tex0 >> 26u) & 0xFu);
+      const auto height = 1u << ((tex0 >> 30u) & 0xFu);
+      const auto stride = static_cast<unsigned>((tex0 >> 14u) & 0x3Fu) * 64u;
+      if (stride == 0u || width > 256u || height > 256u) break;
+      const auto base = static_cast<std::uint32_t>(tex0 & 0x3FFFu) * 256u;
+      sprite_preceding_texture16_tex0_ = tex0;
+      sprite_preceding_texture16_width_ = width;
+      sprite_preceding_texture16_height_ = height;
+      sprite_preceding_texture16_.reserve(width * height);
+      for (unsigned y = 0; y < height; ++y)
+        for (unsigned x = 0; x < width; ++x) {
+          const auto address = base + (y * stride + x) * 2u;
+          sprite_preceding_texture16_.push_back(static_cast<std::uint16_t>(
+              local_memory_[address & 0x3FFFFFu] |
+              (local_memory_[(address + 1u) & 0x3FFFFFu] << 8u)));
+        }
+      break;
+    }
   }
   const bool record_sprite = trace_triangles_ && sprite_records_.size() < 256u;
   if (record_sprite) {

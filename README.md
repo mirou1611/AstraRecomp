@@ -129,7 +129,11 @@ Draw-level tracing has since matched the GS state and vertices of a repeated
 full-screen BIOS feedback sprite to the PCSX2 reference, then isolated a
 source-surface mismatch: one later Astra pass samples blue texture across the
 whole source, while the reference texture has mostly black background around
-the cloud. This is a more specific graphics lead, **not** a boot-intro result.
+the cloud. The preceding textured triangle draw has matching GS state and
+near-identical vertices; its raw 128x128 PSMCT16 input matches the PCSX2
+draw-98 dump at **all 16,384 texels**. The remaining broad mismatch is in
+an earlier framebuffer-producing/copy pass or its GS interpretation, not this
+texture upload. This is a more specific graphics lead, **not** a boot-intro result.
 See the [draw-level checkpoint](docs/SESSION_2026-09-26.md).
 
 ### What comes next

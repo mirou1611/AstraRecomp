@@ -30,6 +30,7 @@ void test_gif_repeated_prim() {
   ps2vita::Gs gs;
   ps2vita::Gif gif(gs);
   gif.enable_triangle_trace(true);
+  gif.capture_sprite_framebuffer_at(0u);
   const auto reg = [&](std::uint64_t address, std::uint64_t value) {
     const std::array<std::uint64_t, 4> packet{{0x1000000000008001ull, 0xEull, value, address}};
     check(gif.submit(reinterpret_cast<const std::uint8_t*>(packet.data()), sizeof(packet)),
@@ -48,7 +49,6 @@ void test_gif_repeated_prim() {
   check(gif.submit(reinterpret_cast<const std::uint8_t*>(pre.data()), sizeof(pre)) &&
         gif.triangles_emitted() == 2, "GIF tag PRE restarts identical strip mode");
   reg(0x14, 0x20); // Preserve TEX1's linear magnification bit in draw trace.
-  gif.capture_sprite_framebuffer_at(0u);
   reg(0, 6); reg(5, 0); reg(0, 6); reg(5, (256ull << 16) | 256);
   check(gif.sprites_emitted() == 0, "GIF identical PRIM discards incomplete sprite");
   reg(5, (512ull << 16) | 512);
@@ -66,8 +66,13 @@ void test_gif_repeated_prim() {
         gif.sprite_framebuffer_capture()[5u * ps2vita::Gs::kWidth + 5u] ==
             gs.pixel(5, 5),
         "GIF captures the selected sprite's completed draw target");
+  check(gif.sprite_preceding_triangles().size() == 2u &&
+        gif.sprite_preceding_triangles()[0].sequence == 0u &&
+        gif.sprite_preceding_triangles()[1].sequence == 1u,
+        "GIF sprite capture retains preceding nondegenerate triangle order");
   gif.reset();
-  check(gif.sprite_records().empty() && !gif.sprite_framebuffer_captured(),
+  check(gif.sprite_records().empty() && !gif.sprite_framebuffer_captured() &&
+        gif.sprite_preceding_triangles().empty(),
         "GIF reset discards captured sprite diagnostics");
 }
 
@@ -691,8 +696,42 @@ void test_triangle_trace() {
   check(t.prim == 3u && t.vertices[1].x == 2 && t.vertices[2].y == 2 &&
         t.test == 0u && t.zbuf == 0u && t.xyz[1] == 128u &&
         t.xyz[2] == (128ull << 16), "Triangle trace records geometry and GS state");
+  gif.capture_sprite_framebuffer_at(0u);
+  const auto capture_reg = [&](std::uint64_t value, std::uint64_t address) {
+    const std::array<std::uint64_t, 4> p{{0x1000000000008001ull, 0xEull,
+                                           value, address}};
+    check(gif.submit(reinterpret_cast<const std::uint8_t*>(p.data()), sizeof(p)),
+          "Pre-sprite triangle ring fixture accepted");
+  };
+  capture_reg((1ull << 48u) | (2ull << 56u), 0x50u);
+  capture_reg(2ull | (1ull << 32u), 0x52u);
+  capture_reg(0u, 0x53u);
+  const std::array<std::uint64_t, 4> image{{0x0800000000008001ull,
+      0u, 0x7C00001Full, 0u}};
+  check(gif.submit(reinterpret_cast<const std::uint8_t*>(image.data()),
+                   sizeof(image)), "Pre-sprite PSMCT16 texture upload accepted");
+  capture_reg((1ull << 14u) | (2ull << 20u) | (1ull << 26u) |
+              (1ull << 30u), 0x06u);
+  for (unsigned i = 0; i < 70u; ++i) submit();
+  capture_reg(6u, 0u);
+  capture_reg(0u, 5u);
+  capture_reg(128u | (128ull << 16), 5u);
+  check(gif.sprite_preceding_triangles().size() == 64u &&
+        gif.sprite_preceding_triangles().front().sequence == 72u &&
+        gif.sprite_preceding_triangles().back().sequence == 135u,
+        "Sprite capture retains the latest 64 triangles in chronological order");
+  check(gif.sprite_preceding_texture16_tex0() ==
+            ((1ull << 14u) | (2ull << 20u) | (1ull << 26u) | (1ull << 30u)) &&
+        gif.sprite_preceding_texture16_width() == 2u &&
+        gif.sprite_preceding_texture16_height() == 2u &&
+        gif.sprite_preceding_texture16().size() == 4u &&
+        gif.sprite_preceding_texture16()[0] == 0x001Fu &&
+        gif.sprite_preceding_texture16()[1] == 0x7C00u,
+        "Sprite capture freezes preceding PSMCT16 source texels");
   gif.reset();
-  check(gif.triangle_records().empty(), "Reset clears triangle records");
+  check(gif.triangle_records().empty() &&
+        gif.sprite_preceding_texture16().empty(),
+        "Reset clears triangle records and preceding texture capture");
   check(gif.nondegenerate_triangle_records().empty(), "Reset clears area-selected records");
   const auto reg = [&](std::uint64_t value, std::uint64_t address) {
     const std::array<std::uint64_t, 4> p{{0x1000000000008001ull, 0xEull, value, address}};
@@ -4162,6 +4201,46 @@ void test_gif_texture24_alpha() {
         }
 }
 
+void test_gif_texture16_alpha() {
+  for (unsigned context : {0u, 1u})
+    for (unsigned aem : {0u, 1u})
+      for (std::uint16_t pixel : {std::uint16_t{0x0000}, std::uint16_t{0x001F},
+                                  std::uint16_t{0x8000}, std::uint16_t{0x801F}}) {
+        ps2vita::Gs gs;
+        ps2vita::Gif gif(gs);
+        const auto reg = [&](std::uint64_t value, std::uint64_t address) {
+          const std::array<std::uint64_t, 4> p{{0x1000000000008001ull,
+              0xEull, value, address}};
+          check(gif.submit(reinterpret_cast<const std::uint8_t*>(p.data()),
+                           sizeof(p)), "PSMCT16 TEXA register accepted");
+        };
+        reg((1ull << 32u) | (1ull << 48u) | (2ull << 56u), 0x50u);
+        reg(0u, 0x51u);
+        reg(1ull | (1ull << 32u), 0x52u);
+        reg(0u, 0x53u);
+        const std::array<std::uint64_t, 4> image{{0x0800000000008001ull,
+            0u, pixel, 0u}};
+        check(gif.submit(reinterpret_cast<const std::uint8_t*>(image.data()),
+                         sizeof(image)), "PSMCT16 TEXA pixel uploaded");
+        reg(1ull | (1ull << 14u) | (2ull << 20u) |
+            (1ull << 34u) | (1ull << 35u), 6u + context);
+        reg(0x7Full | (static_cast<std::uint64_t>(aem) << 15u) |
+            (0x81ull << 32u), 0x3Bu);
+        reg(0x116u | (context << 9u), 0u);
+        reg(0x80808080u, 1u);
+        reg(0u, 3u);
+        reg(0u, 5u);
+        reg(64u | (64ull << 16u), 5u);
+        const unsigned expected_alpha = (pixel & 0x8000u) != 0u ? 0x81u :
+            (aem != 0u && pixel == 0u ? 0u : 0x7Fu);
+        check(gs.pixel(0, 0) >> 24u == expected_alpha,
+              "PSMCT16 TEXA selects TA0/TA1 and AEM zero suppression");
+        check((gs.pixel(0, 0) & 0xFFFFFFu) ==
+                  ((pixel & 0x1Fu) != 0u ? 0xF8u : 0u),
+              "PSMCT16 expands five-bit channels by shifting, not replicating");
+      }
+}
+
 void test_gif_texture_address_modes() {
   const std::array<std::uint64_t, 14> upload{{
       0x1000000000008004ull, 0xEull,
@@ -4916,6 +4995,7 @@ int main() {
   test_triangle_trace();
   test_logical_color_targets();
   test_gif_texture24_alpha();
+  test_gif_texture16_alpha();
   test_gif_texture_attribute_latches();
   test_gs_perspective_safety();
   test_gif_textured_uv_triangles();

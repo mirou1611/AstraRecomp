@@ -74,14 +74,14 @@ diagnosis; Astra does not yet implement its texture-filter selection.
 
 To freeze the draw target immediately after a particular zero-based sprite
 emission, append its sequence and a PPM path after the linear display path.
-For example, the captured BIOS sprite 11 has the same XYZ/UV endpoints and
-key GS state as PCSX2 reference draw 99 (but equivalent texture contents are
-not yet established):
+For example, BIOS sprite 50 follows triangles aligned with PCSX2 reference
+draw 98, then uses the same feedback-sprite XYZ/UV endpoints and key GS state
+as reference draw 99. Its texture contents still differ:
 
 ```sh
 ./build-release/ps2bios_trace bios.bin 0 300000000 1 0 8 0 0 0 \
-  - - - - 11 build-release/sprite-11.ppm build-release/sprite-11-source.ppm \
-  > build-release/sprite-11.txt 2>&1
+  - - - - 50 build-release/sprite-50.ppm build-release/sprite-50-source.ppm \
+  > build-release/sprite-50.txt 2>&1
 ```
 
 `-` now skips *each* optional output path, including both PPM paths. The
@@ -90,6 +90,25 @@ changes the draw. The optional source PPM samples the sprite's PSMCT32/24
 texture base on a 160x64 quarter grid **before** the draw; it uses Astra's
 linear local-memory approximation, not native GS swizzling. A nonexistent
 sequence is an explicit output error.
+
+With sprite capture enabled, the trace also freezes the latest 64
+nondegenerate triangles before that sprite as
+`gif_sprite_preceding_triangle` records, retaining absolute triangle sequence
+and draw state. This is a ring buffer, not the first-64 prefix. It let us
+align Astra's source-producing triangles before sprite 50 with PCSX2
+reference draw 98 by FRAME/TEX0/ALPHA and near-identical vertices.
+
+An optional final path dumps the latest preceding PSMCT16 triangle texture
+as headerless little-endian `uint16` texels in row-major order. The trace
+prints its TEX0, dimensions, hash, and nonzero-RGB count. This reflects
+Astra's linear local-memory model at the selected sprite, not a native GS
+swizzled texture. For the matched draw-98 pass, use sprite sequence 50 and
+append `build-release/sprite-50-texture16.bin` after the sprite source PPM.
+The captured BIOS texture matched PCSX2 draw 98's raw 128x128 texture at
+all 16,384 texels (the reference PNG displays each little-endian texel as
+its low and high byte in R/G). This rules out the selected texture upload as
+the cause of the much wider target mismatch; it does not validate native
+PSMCT16 swizzling elsewhere.
 
 ## Isolated VIF replay
 

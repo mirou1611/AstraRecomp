@@ -57,11 +57,19 @@ public:
   const std::vector<GifSpriteRecord>& sprite_records() const {
     return sprite_records_;
   }
+  const std::vector<GifTriangleRecord>& sprite_preceding_triangles() const {
+    return sprite_preceding_triangles_;
+  }
   void capture_sprite_framebuffer_at(std::uint64_t sequence) {
     capture_sprite_sequence_ = sequence;
     capture_sprite_enabled_ = true;
     sprite_framebuffer_capture_.clear();
     sprite_texture_capture_.clear();
+    sprite_preceding_triangles_.clear();
+    sprite_preceding_texture16_.clear();
+    sprite_preceding_texture16_tex0_ = 0;
+    sprite_preceding_texture16_width_ = sprite_preceding_texture16_height_ = 0;
+    recent_triangle_count_ = recent_triangle_cursor_ = 0;
   }
   bool sprite_framebuffer_captured() const {
     return !sprite_framebuffer_capture_.empty();
@@ -71,6 +79,18 @@ public:
   }
   const std::vector<std::uint32_t>& sprite_texture_capture() const {
     return sprite_texture_capture_;
+  }
+  const std::vector<std::uint16_t>& sprite_preceding_texture16() const {
+    return sprite_preceding_texture16_;
+  }
+  std::uint64_t sprite_preceding_texture16_tex0() const {
+    return sprite_preceding_texture16_tex0_;
+  }
+  unsigned sprite_preceding_texture16_width() const {
+    return sprite_preceding_texture16_width_;
+  }
+  unsigned sprite_preceding_texture16_height() const {
+    return sprite_preceding_texture16_height_;
   }
   bool submit(const std::uint8_t* data, std::size_t size);
   std::uint64_t packets_submitted() const { return packets_submitted_; }
@@ -108,8 +128,15 @@ private:
   std::vector<GifTriangleRecord> triangle_records_;
   std::vector<GifTriangleRecord> nondegenerate_triangle_records_;
   std::vector<GifSpriteRecord> sprite_records_;
+  std::array<GifTriangleRecord, 64> recent_triangles_{};
+  std::size_t recent_triangle_count_ = 0, recent_triangle_cursor_ = 0;
+  std::vector<GifTriangleRecord> sprite_preceding_triangles_;
   std::vector<std::uint32_t> sprite_framebuffer_capture_;
   std::vector<std::uint32_t> sprite_texture_capture_;
+  std::vector<std::uint16_t> sprite_preceding_texture16_;
+  std::uint64_t sprite_preceding_texture16_tex0_ = 0;
+  unsigned sprite_preceding_texture16_width_ = 0;
+  unsigned sprite_preceding_texture16_height_ = 0;
   std::uint64_t capture_sprite_sequence_ = 0;
   bool capture_sprite_enabled_ = false;
   std::vector<std::uint8_t> local_memory_;
