@@ -72,7 +72,7 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 
 ## Project status
 
-Latest verified research checkpoint: **September 24, 2026**. These are development
+Latest verified research checkpoint: **October 1, 2026**. These are development
 results, not a game-compatibility list or a measured completion percentage.
 
 | Area | Current state |
@@ -81,7 +81,7 @@ results, not a game-compatibility list or a measured completion percentage.
 | PC recompiler | Phase-0 analysis, a tested R5900-to-C++ subset, and a generated mixed-workload performance gate |
 | Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
 | Guest graphics | 160×112 software rasterizer; reference-checked PATH3 fixtures cover UV, perspective ST/Q, RGB alpha selection and HIGHLIGHT modes; BIOS output is not a confirmed intro |
-| VU1 | Tested instruction subset, VIF1 uploads, XGKICK delivery, and partial MAC-flag latency; VU-local execution/upload fast paths are verified, but full timing remains incomplete |
+| VU1 | VF0 MAC-flag and zero-DIV/Q fixes; PCSX2 memory oracle matches the first 55-pair BIOS run exactly, with continuation differences now localized; full timing and arithmetic remain incomplete |
 | Audio / SPU2 | Tested DMA and shadow ADPCM/voice-envelope/pitch/mixing components; no Vita speaker output; further audio work deferred |
 | Retail games | **Not playable**—IOP devices, GIF/GS, VU, SPU2, media, and compatibility work remain |
 
@@ -91,7 +91,7 @@ A small guest ELF now draws into framebuffer A, samples A as a 24-bit texture
 into B, changes A, and samples it again without overwriting B's earlier result.
 This previously failed in Astra; it now passes, including texture-alpha checks.
 PCSX2 software-renderer output matches all **128 native RGB pixels** checked.
-Release and UBSan suites pass **14/14 CTest targets** each, and the Vita VPK
+Release and UBSan suites pass **17/17 CTest targets** each, and the Vita VPK
 cross-build passes. These are reference checks, not physical PS2/Vita validation.
 
 The new shared color storage is deliberately approximate: linear addressing,
@@ -108,6 +108,17 @@ This is evidence that part of the guest graphics pipeline reaches the rasterizer
 speed on physical Vita hardware**. One malformed VU1 PATH1 tag remains rejected.
 Formats, fog, native GS buffer semantics and VU/GIF timing still need work.
 See the [framebuffer-feedback implementation and validation](docs/SESSION_2026-09-21.md).
+
+### Latest VU1 correctness milestone
+
+Arithmetic that discards its result into VF0 now still updates delayed MAC flags,
+and DIV by zero/denormal operands produces signed saturated Q. Dedicated suites
+check 962 flag/branch properties and 180 DIV/Q properties. A bounded PCSX2 runner
+now compares the same VIF packet's final 16 KiB of VU1 memory: the first MSCAL
+matches all 4,096 words; differences begin after the first MSCNT. PCSX2's two VU
+execution modes disagree on some numerical results, so those differences remain
+an investigation gate. The complete packet still executes 998 pairs and rejects
+one PATH1 tag. See the [saved VU1 session and next experiment](docs/SESSION_2026-10-01.md).
 
 The captured first VIF1/VU1 BIOS packet now runs at least about **22x faster on the
 development host** after removing EE bus/TLB decoding from VU-local accesses

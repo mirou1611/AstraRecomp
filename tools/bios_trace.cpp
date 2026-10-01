@@ -333,7 +333,8 @@ int main(int argc, char** argv) {
         "[TIMER5_PROBE_STEP] [CENSUS_JSON] [FRAMEBUFFER_PPM] [FIRST_VIF_BIN] "
         "[LINEAR_DISPLAY_PPM] [SPRITE_SEQUENCE SPRITE_PPM [SPRITE_SOURCE_PPM "
         "[PRECEDING_TEXTURE16_BIN]]]\n"
-        "optional ASTRA_TRACE_SECONDS=1..86400 bounds host runtime and reports progress; 0 disables\n");
+        "optional ASTRA_TRACE_SECONDS=1..86400 bounds host runtime and reports progress; 0 disables\n"
+        "optional ASTRA_STOP_ON_SPRITE=1 stops after the selected sprite is captured\n");
     return 2;
   }
 
@@ -401,6 +402,13 @@ int main(int argc, char** argv) {
       std::fputs("invalid sprite capture sequence\n", stderr);
       return 2;
     }
+  }
+  const char* sprite_stop_env = std::getenv("ASTRA_STOP_ON_SPRITE");
+  const bool stop_on_sprite = sprite_stop_env != nullptr &&
+      std::string(sprite_stop_env) == "1";
+  if (sprite_stop_env != nullptr && (!stop_on_sprite || !sprite_capture_path)) {
+    std::fputs("ASTRA_STOP_ON_SPRITE=1 requires sprite capture\n", stderr);
+    return 2;
   }
 
   ps2vita::Emulator emulator;
@@ -493,8 +501,13 @@ int main(int argc, char** argv) {
   std::array<std::uint32_t, 2> spu_keyon_masks{};
   const auto host_start = std::chrono::steady_clock::now();
   bool host_deadline = false;
+  bool sprite_capture_stop = false;
   unsigned last_report = 0;
   for (; steps < max_steps; ++steps) {
+    if (stop_on_sprite && emulator.gif().sprite_framebuffer_captured()) {
+      sprite_capture_stop = true;
+      break;
+    }
     if (host_seconds != 0u && (steps & 0xFFFFu) == 0u) {
       const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
           std::chrono::steady_clock::now() - host_start).count();
@@ -958,6 +971,9 @@ int main(int argc, char** argv) {
   if (host_seconds != 0u)
     std::printf("host_deadline=%u limit_seconds=%u (checked between EE steps)\n",
         unsigned(host_deadline), host_seconds);
+  if (stop_on_sprite)
+    std::printf("sprite_capture_stop=%u step=%llu\n", unsigned(sprite_capture_stop),
+        static_cast<unsigned long long>(steps));
   const auto& state = emulator.cpu().state();
   const auto& iop_state = emulator.iop().state();
   if (low_clear_triggered)
@@ -1992,5 +2008,6 @@ int main(int argc, char** argv) {
     }
     std::printf("execution census: %s\n", census_path);
   }
-  return (stop_pc != 0u && state.pc == stop_pc) || iop_stop_triggered ? 0 : 1;
+  return (stop_pc != 0u && state.pc == stop_pc) || iop_stop_triggered ||
+      sprite_capture_stop ? 0 : 1;
 }

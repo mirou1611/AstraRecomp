@@ -85,8 +85,12 @@ as reference draw 99. Its texture contents still differ:
 ```
 
 `-` now skips *each* optional output path, including both PPM paths. The
-sprite capture is read-only diagnostic state; it neither stops the replay nor
-changes the draw. The optional source PPM samples the sprite's PSMCT32/24
+sprite capture is read-only diagnostic state and does not change the draw.
+By default, execution continues after capture. Set `ASTRA_STOP_ON_SPRITE=1`
+to stop between EE steps once the requested sprite has been captured; this
+requires a sprite PPM path and returns success with `sprite_capture_stop=1`.
+The step budget and host deadline still apply if the sprite is never reached.
+The optional source PPM samples the sprite's PSMCT32/24
 texture base on a 160x64 quarter grid **before** the draw; it uses Astra's
 linear local-memory approximation, not native GS swizzling. A nonexistent
 sequence is an explicit output error.
@@ -129,6 +133,50 @@ captured stream, then submits its path-1 packets to GIF. Its summary exposes
 VU pair counts and rejection origin. Exit 1 indicates a processing rejection;
 exit 2 indicates usage or I/O errors. Output files are overwritten if they exist.
 The input size is checked before allocating its buffer.
+
+An optional final `VU1_DATA_BIN` path exports all 16,384 bytes of final VU1
+data memory, starting at guest `0x1100C000`, as raw little-endian bytes:
+
+```sh
+./build-release/ps2vif_replay build-release/first-vif.bin \
+  build-release/vif-only.ppm build-release/vu1-final.bin
+```
+
+The dump is written even when the replay reports the known PATH1 rejection.
+It supports word-by-word comparison with a reference run, but preserves only
+final memory: earlier XGKICK payloads may already have been overwritten.
+Append `--explain-vu-qword 01D0` after the dump path to walk the last recorded
+writers and register ancestry of that aligned VU byte address. The argument is
+exactly four hexadecimal digits in `0000..3FF0`. The breadth-first walk is
+bounded to 64 nodes; missing ancestry stays explicitly incomplete.
+
+For an independent PCSX2 final-memory oracle, use an existing profile containing
+your selected BIOS. The runner makes a unique local profile, enables EE serial
+logging, disables VU speed hacks, and stops only its own child process:
+
+```sh
+python tools/run_vu1_reference.py capture build-release/first-vif.bin \
+  build-release/vu1-reference.bin \
+  --pcsx2 .tools/pcsx2-v2.8.2/pcsx2-qt.exe \
+  --profile-template .tools/pcsx2-reference-data/PCSX2
+python tools/run_vu1_reference.py compare \
+  build-release/vu1-reference.bin build-release/vu1-final.bin
+```
+
+This launch example uses the Windows PCSX2 executable. Comparison and fixture
+generation also work on the Linux host. Outputs must be fresh filenames; compare
+returns 1 on a difference and rejects non-16-KiB dumps. Runtime is bounded to
+15 seconds by default (maximum 60). Metadata records the selected input, hashes,
+settings and execution mode. `--vu1-interpreter` cross-checks PCSX2's interpreter
+against its default microVU mode. A register-initialization microprogram and
+explicit RAM clear precede the unchanged selected input; the result is still a
+final-memory check, not a full CPU/VU savestate comparison or historical GIF oracle.
+
+`--prefix-bytes 0x8A4` ends the known local capture just after its first MSCAL;
+`0x9CC` ends after its first MSCNT. These offsets are specific to this capture,
+not universal BIOS constants. Take a complete command boundary from `vif_run`
+records; the tool only checks word alignment and pads the prefix with NOPs to a
+DMA qword. It cannot detect truncation inside an upload payload.
 
 This is not a savestate: prior path-3 GS setup, textures, earlier VU state and
 other device state are absent. Establish agreement for the specific failure

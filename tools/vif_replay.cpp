@@ -4,11 +4,26 @@
 #include <cstdio>
 #include <fstream>
 #include <vector>
+#include <cstring>
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    std::fprintf(stderr, "usage: ps2vif_replay FIRST_VIF_BIN FRAMEBUFFER_PPM\n");
+  if (argc != 3 && argc != 4 && argc != 6) {
+    std::fprintf(stderr, "usage: ps2vif_replay FIRST_VIF_BIN FRAMEBUFFER_PPM [VU1_DATA_BIN [--explain-vu-qword HEX_ADDRESS]]\n");
     return 2;
+  }
+  unsigned explain_address = 0;
+  if (argc == 6) {
+    if (std::strcmp(argv[4], "--explain-vu-qword") || std::strlen(argv[5]) != 4u)
+      return 2;
+    for (unsigned index = 0; index < 4u; ++index) {
+      const char c = argv[5][index];
+      const unsigned digit = c >= '0' && c <= '9' ? c - '0' :
+          c >= 'A' && c <= 'F' ? c - 'A' + 10u :
+          c >= 'a' && c <= 'f' ? c - 'a' + 10u : 16u;
+      if (digit == 16u) return 2;
+      explain_address = (explain_address << 4) | digit;
+    }
+    if (explain_address >= 0x4000u || (explain_address & 15u)) return 2;
   }
   std::ifstream input(argv[1], std::ios::binary | std::ios::ate);
   const auto size = input.tellg();
@@ -204,6 +219,60 @@ int main(int argc, char** argv) {
   const bool written = ps2vita::write_framebuffer_ppm(image, gs);
   image.close();
   if (!written || !image) return 2;
+  if (argc >= 4) {
+    // Final state only: historical XGKICK packets may already be overwritten.
+    // Use raw little-endian bytes so an independent reference can compare all
+    // 1024 VU1 data-memory qwords without host structure or text formatting.
+    std::vector<std::uint8_t> vu_data(16384u);
+    for (unsigned offset = 0; offset < vu_data.size(); offset += 4u) {
+      const auto word = memory.read32(ps2vita::Memory::kVu1DataBase + offset);
+      for (unsigned byte = 0; byte < 4u; ++byte)
+        vu_data[offset + byte] = static_cast<std::uint8_t>(word >> (byte * 8u));
+    }
+    std::ofstream dump(argv[3], std::ios::binary | std::ios::trunc);
+    dump.write(reinterpret_cast<const char*>(vu_data.data()), vu_data.size());
+    dump.close();
+    if (!dump) return 2;
+    std::printf("vu_data_dump bytes=%zu path=%s\n", vu_data.size(), argv[3]);
+  }
+  if (argc == 6) {
+    std::deque<std::uint32_t> pending;
+    const auto& causes = vu.causes();
+    for (unsigned lane = 0; lane < 4u; ++lane) {
+      const unsigned address = explain_address + lane * 4u;
+      std::uint32_t root = 0;
+      for (std::size_t index = causes.size(); index != 0u; --index) {
+        const auto& cause = causes[index - 1u];
+        if ((cause.kind == ps2vita::VuCauseRecord::Kind::Store ||
+             cause.kind == ps2vita::VuCauseRecord::Kind::VifUpload) &&
+            cause.address == address) {
+          // Do not attribute an older traced store to a different live value.
+          if (cause.value == memory.read32(ps2vita::Memory::kVu1DataBase + address))
+            root = static_cast<std::uint32_t>(index);
+          break;
+        }
+      }
+      std::printf("vu_memory_cause address=%04X value=%08X generation=%u\n",
+          address, memory.read32(ps2vita::Memory::kVu1DataBase + address), root);
+      if (root) pending.push_back(root);
+    }
+    std::vector<bool> seen(causes.size() + 1u);
+    unsigned shown = 0;
+    while (!pending.empty() && shown < 64u) {
+      const auto id = pending.front(); pending.pop_front();
+      if (!id || id > causes.size() || seen[id]) continue;
+      seen[id] = true; ++shown;
+      const auto& cause = causes[id - 1u];
+      std::printf("vu_memory_node id=%u kind=%u pc=%04X instruction=%08X pair=%llu cycle=%llu address=%04X reg=%u lane=%u value=%08X parents=%u,%u,%u incomplete=%u\n",
+          id, unsigned(cause.kind), cause.pc, cause.instruction,
+          static_cast<unsigned long long>(cause.pair),
+          static_cast<unsigned long long>(cause.cycle), cause.address,
+          cause.reg, cause.lane, cause.value, cause.parents[0], cause.parents[1],
+          cause.parents[2], unsigned(cause.incomplete));
+      for (auto parent : cause.parents) if (parent) pending.push_back(parent);
+    }
+    if (!pending.empty()) std::puts("vu_memory_walk truncated at 64 nodes");
+  }
   // Isolated replay starts with reset GS state, not prior BIOS path-3 uploads.
   // Its image is diagnostic, not a replacement for a full-BIOS framebuffer.
   return accepted && gif_ok && vif.pending_direct_bytes() == 0u &&

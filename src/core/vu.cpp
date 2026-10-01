@@ -514,8 +514,17 @@ bool Vu1::execute_lower(std::uint32_t code) {
   if (function == 0x3Cu && fd == 0x0Eu) { // DIV
     const auto fs = static_cast<unsigned>((code >> 11) & 0x1Fu);
     const auto ft = static_cast<unsigned>((code >> 16) & 0x1Fu);
-    pending_q_ = as_bits(as_float(lower_vf_snapshot_[fs][(code >> 21) & 3u]) /
-                       as_float(lower_vf_snapshot_[ft][(code >> 23) & 3u]));
+    const auto numerator = lower_vf_snapshot_[fs][(code >> 21) & 3u];
+    const auto denominator = lower_vf_snapshot_[ft][(code >> 23) & 3u];
+    // VU inputs flush denormals to signed zero. Even 0/0 produces signed
+    // saturation in Q; I/D status flags remain outside this state model.
+    if ((denominator & 0x7F800000u) == 0u) {
+      pending_q_ = ((numerator ^ denominator) & 0x80000000u) | 0x7F7FFFFFu;
+    } else {
+      const auto input = (numerator & 0x7F800000u) == 0u ?
+          numerator & 0x80000000u : numerator;
+      pending_q_ = as_bits(as_float(input) / as_float(denominator));
+    }
     q_ready_ = cycles_ + 7u;
     q_pending_ = true;
     return true;
@@ -724,14 +733,13 @@ bool Vu1::execute_upper(std::uint32_t code) {
   }
   if (function == 0x1Cu) { // MULq
     const auto scalar = as_float(state_.q);
-    if (fd != 0u) {
-      for (unsigned lane = 0; lane < 4u; ++lane) {
-        if ((code & (1u << (24u - lane))) != 0u) {
-          state_.vf[fd][lane] = update_mac(state_.mac, lane,
-              as_bits(as_float(state_.vf[fs][lane]) * scalar));
-        } else {
-          state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
-        }
+    for (unsigned lane = 0; lane < 4u; ++lane) {
+      if ((code & (1u << (24u - lane))) != 0u) {
+        const auto bits = update_mac(state_.mac, lane,
+            as_bits(as_float(state_.vf[fs][lane]) * scalar));
+        if (fd != 0u) state_.vf[fd][lane] = bits;
+      } else {
+        state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
       }
     }
     return true;
@@ -745,23 +753,25 @@ bool Vu1::execute_upper(std::uint32_t code) {
     const auto component = function & 3u;
     const auto broadcast = as_float(state_.vf[ft][component]);
     const bool changes_mac = !max_broadcast && function != 0x2Bu;
-    if (fd != 0u) {
-      for (unsigned lane = 0; lane < 4u; ++lane) {
-        if ((code & (1u << (24u - lane))) == 0u) {
-          if (changes_mac)
-            state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
-          continue;
-        }
-        const auto lhs = as_float(state_.vf[fs][lane]);
-        const auto rhs = vector_binary ? as_float(state_.vf[ft][lane]) : broadcast;
-        float result = 0.0f;
-        if (add_broadcast || function == 0x28u) result = lhs + rhs;
-        else if (sub_broadcast || function == 0x2Cu) result = lhs - rhs;
-        else if (max_broadcast || function == 0x2Bu) result = std::fmax(lhs, rhs);
-        else result = lhs * rhs;
-        state_.vf[fd][lane] = changes_mac ?
-            update_mac(state_.mac, lane, as_bits(result)) : as_bits(result);
+    // VF0 discards the result, but flag-writing arithmetic still updates MAC
+    // for active lanes and clears inactive lanes. MAX does not write flags.
+    if (!changes_mac && fd == 0u) return true;
+    for (unsigned lane = 0; lane < 4u; ++lane) {
+      if ((code & (1u << (24u - lane))) == 0u) {
+        if (changes_mac)
+          state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
+        continue;
       }
+      const auto lhs = as_float(state_.vf[fs][lane]);
+      const auto rhs = vector_binary ? as_float(state_.vf[ft][lane]) : broadcast;
+      float result = 0.0f;
+      if (add_broadcast || function == 0x28u) result = lhs + rhs;
+      else if (sub_broadcast || function == 0x2Cu) result = lhs - rhs;
+      else if (max_broadcast || function == 0x2Bu) result = std::fmax(lhs, rhs);
+      else result = lhs * rhs;
+      const auto bits = changes_mac ?
+          update_mac(state_.mac, lane, as_bits(result)) : as_bits(result);
+      if (fd != 0u) state_.vf[fd][lane] = bits;
     }
     return true;
   }
