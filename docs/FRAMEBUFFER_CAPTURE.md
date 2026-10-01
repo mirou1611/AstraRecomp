@@ -231,9 +231,18 @@ before relying on isolated replay. Its image is not the full BIOS image.
 Keep the BIOS-derived binary capture and images local and uncommitted.
 
 The BIOS tracer prints `vif_dma_span` records for the last successfully assembled
-VIF DMA chain. Each maps a stream interval to its EE source address, including
-separate intervals for TTE tag bytes. For stream offset `n` within a span,
+VIF DMA transfer. Each maps a stream interval to its EE source address, including
+separate intervals for source-chain TTE tag bytes. Normal forward transfers send
+only MADR/QWC payload, leave TADR unchanged, and ignore TTE. Encoded SPR sources
+wrap within the 16-KiB scratchpad; their spans split at each bank boundary.
+For stream offset `n` within a span,
 the source address is `source + (n - offset)`. The mapping is built alongside
 the actual byte copy; it is not reconstructed from final DMA registers. It is
-cleared on memory reset and replaced by each successful chain. With multiple
-submissions, do not mistake this last-chain mapping for the first captured stream.
+cleared on memory reset and replaced by each successful transfer. With multiple
+submissions, do not mistake this last-transfer mapping for the first captured stream.
+
+The first oversized BIOS-derived PATH1 kick is also rejected by both pinned
+PCSX2 modes, including an unchanged first-MSCAL-only capture. Upstream explicitly
+recognizes this BIOS case in its packet-size guard. This supports retaining the
+rejection; it does not validate historical qword delivery or explain the missing
+intro by itself. See [PCSX2's packet-size guard](https://github.com/PCSX2/pcsx2/blob/v2.8.2/pcsx2/Gif_Unit.h#L552-L573).

@@ -82,6 +82,7 @@ results, not a game-compatibility list or a measured completion percentage.
 | Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
 | Guest graphics | 160×112 software rasterizer; reference-checked PATH3 fixtures cover UV, perspective ST/Q, RGB alpha selection and HIGHLIGHT modes; BIOS output is not a confirmed intro |
 | VU1 | Delayed VI branch reads and finite DIV/MUL fixes; controlled synchronized packet matches all 4,096 memory words in both PCSX2 modes; original VIF/VU timing and full arithmetic remain incomplete |
+| DMA / graphics service | Normal forward VIF1 uploads, physical RAM/SPR addressing, consistent chain writeback, independent SIF service, and device-boundary visibility have owned regression tests; transport remains a coarse packet model |
 | Audio / SPU2 | Tested DMA and shadow ADPCM/voice-envelope/pitch/mixing components; no Vita speaker output; further audio work deferred |
 | Retail games | **Not playable**—IOP devices, GIF/GS, VU, SPU2, media, and compatibility work remain |
 
@@ -91,7 +92,7 @@ A small guest ELF now draws into framebuffer A, samples A as a 24-bit texture
 into B, changes A, and samples it again without overwriting B's earlier result.
 This previously failed in Astra; it now passes, including texture-alpha checks.
 PCSX2 software-renderer output matches all **128 native RGB pixels** checked.
-Release and UBSan suites pass **22/22 CTest targets** each, and the Vita VPK
+Release and UBSan suites pass **26/26 CTest targets** each, and the Vita VPK
 cross-build passes. These are reference checks, not physical PS2/Vita validation.
 
 The new shared color storage is deliberately approximate: linear addressing,
@@ -124,8 +125,24 @@ in flight. A **controlled synchronized** version now matches all 4,096 memory
 words in both PCSX2 modes, including the full 998-pair sequence. This validates
 sequential functional results, **not the original DMA/VU timeline or intro**.
 No wait was added to production emulation. VIF/VU/GIF event ordering and the PS2
-multiplier's special correction remain incomplete. One PATH1 tag is still rejected.
+multiplier's special correction remain incomplete. The initial oversized PATH1
+kick is rejected by both pinned PCSX2 modes too, so that rejection alone does
+not explain the missing intro.
 See the [saved VU1 session and next experiment](docs/SESSION_2026-10-01.md).
+
+### Latest DMA/VIF consistency milestone
+
+Normal forward VIF1 DMA now reaches VIF/VU without inventing a source-chain tag.
+RAM and encoded scratchpad sources bypass the EE's virtual TLB mappings; wrapped
+scratchpad provenance and encoded register writeback are preserved. Source-chain
+completion reports the same pointers as the bytes it actually consumed, and a
+pending SIF transfer no longer prevents unrelated channel service.
+
+Graphics packets are now serviced at modeled device boundaries, not only at the
+end of a host execution slice. Owned ELF and reset-ROM tests previously read
+stale VU memory after DMA completion; all **496 checks** now pass across six slice
+sizes. This fixes guest-visible consistency, **not per-qword DMA, asynchronous VU
+execution or shared GIF-bus timing**. The recognizable PS2 intro remains unconfirmed.
 
 The captured first VIF1/VU1 BIOS packet now runs at least about **22x faster on the
 development host** after removing EE bus/TLB decoding from VU-local accesses

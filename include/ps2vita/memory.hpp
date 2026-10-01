@@ -154,6 +154,8 @@ private:
   };
 
   std::uint32_t physical(std::uint32_t address) const;
+  bool dma_source_valid(std::uint32_t encoded, std::size_t bytes) const;
+  std::uint8_t dma_source_read8(std::uint32_t encoded) const;
   bool build_vif1_chain(std::vector<std::uint8_t>* packet,
                         std::uint32_t& final_tadr,
                         std::uint32_t& final_madr,
@@ -218,8 +220,9 @@ private:
   std::uint32_t gif_dma_qwc_ = 0;
   std::deque<std::vector<std::uint8_t>> gif_packets_;
   std::uint32_t vif1_cycles_remaining_ = 0;
-  std::uint32_t vif1_final_tadr_ = 0;
-  std::uint32_t vif1_final_madr_ = 0;
+  bool vif1_dma_normal_ = false;
+  std::uint32_t vif1_dma_source_ = 0;
+  std::uint32_t vif1_dma_qwc_ = 0;
   std::deque<std::vector<std::uint8_t>> vif1_packets_;
   std::vector<VifDmaSpan> vif_dma_spans_;
   std::array<std::uint32_t, 2> spu2_dma_cycles_remaining_{};

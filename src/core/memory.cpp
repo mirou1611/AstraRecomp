@@ -155,8 +155,9 @@ void Memory::clear() {
   gif_dma_qwc_ = 0;
   gif_packets_.clear();
   vif1_cycles_remaining_ = 0;
-  vif1_final_tadr_ = 0;
-  vif1_final_madr_ = 0;
+  vif1_dma_normal_ = false;
+  vif1_dma_source_ = 0;
+  vif1_dma_qwc_ = 0;
   vif1_packets_.clear();
   vif_dma_spans_.clear();
   spu2_dma_cycles_remaining_.fill(0);
@@ -526,9 +527,32 @@ std::uint32_t Memory::cycles_until_next_event() const {
       (raw_ee(0xA020u) & 0xFFFFu) != 0u;
   const auto vif1_chcr = raw_ee(0x9000u);
   const bool vif1_armed = vif1_cycles_remaining_ == 0u &&
-      (vif1_chcr & 0x100u) != 0u && (vif1_chcr & 0xCu) == 0x4u;
+      (vif1_chcr & 0x100u) != 0u &&
+      ((vif1_chcr & 0xCu) == 0x4u ||
+       ((vif1_chcr & 0xDu) == 0x1u &&
+        (raw_ee(0x9020u) & 0xFFFFu) != 0u));
   return sif0_armed || sif1_armed || gif_armed || vif1_armed
       ? 1u : distance;
+}
+
+bool Memory::dma_source_valid(std::uint32_t encoded, std::size_t bytes) const {
+  if ((encoded & 0x80000000u) != 0u) return true; // Wrapping scratchpad bank.
+  const auto address = encoded & 0x1FFFFFFFu;
+  if (address >= kDevBoardBase && address < kDevBoardBase + kDevBoardSize)
+    return bytes <= kDevBoardBase + kDevBoardSize - address;
+  // The existing bus-region support is retained, but DMA never uses EE TLB
+  // mappings. A direct kernel alias selects that physical bus region.
+  return valid(0xA0000000u | address, bytes);
+}
+
+std::uint8_t Memory::dma_source_read8(std::uint32_t encoded) const {
+  if ((encoded & 0x80000000u) != 0u)
+    return scratch_[encoded & (kScratchSize - 1u)];
+  const auto address = encoded & 0x1FFFFFFFu;
+  if (address < ram_.size()) return ram_[address];
+  if (address >= kDevBoardBase && address < kDevBoardBase + kDevBoardSize)
+    return 0;
+  return read8(0xA0000000u | address);
 }
 
 bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
@@ -538,15 +562,12 @@ bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
                               std::vector<VifDmaSpan>* spans) const {
   // DMA bit 31 selects scratchpad; it is not a CPU KSEG address bit.
   // Keep encoded addresses for channel writeback and chain control flow.
-  auto tadr = read32(0x10009030u) & 0xFFFFFFF0u;
+  auto tadr = read32(0xB0009030u) & 0xFFFFFFF0u;
   const auto dma_address = [](std::uint32_t address) {
     return (address & 0x80000000u) != 0u ?
         kScratchBase + (address & (kScratchSize - 1u)) : address & 0x1FFFFFFFu;
   };
-  const auto dma_valid = [&](std::uint32_t address, std::size_t bytes) {
-    return (address & 0x80000000u) != 0u || valid(dma_address(address), bytes);
-  };
-  const auto chcr = read32(0x10009000u);
+  const auto chcr = read32(0xB0009000u);
   std::array<std::uint32_t, 2> return_stack{};
   unsigned return_depth = 0;
   total_qwc = 0;
@@ -569,19 +590,21 @@ bool Memory::build_vif1_chain(std::vector<std::uint8_t>* packet,
     }
     packet->resize(old_size + bytes);
     for (std::size_t byte = 0; byte < bytes; ++byte)
-      (*packet)[old_size + byte] = read8(dma_address(source + static_cast<std::uint32_t>(byte)));
+      (*packet)[old_size + byte] = dma_source_read8(source + static_cast<std::uint32_t>(byte));
   };
 
   for (unsigned tag_index = 0; tag_index < 256u; ++tag_index) {
-    if (!dma_valid(tadr, 16u)) return false;
-    const auto tag = read64(dma_address(tadr));
+    if (!dma_source_valid(tadr, 16u)) return false;
+    std::uint64_t tag = 0;
+    for (unsigned byte = 0; byte < 8u; ++byte)
+      tag |= std::uint64_t{dma_source_read8(tadr + byte)} << (byte * 8u);
     const auto qwc = static_cast<std::uint32_t>(tag & 0xFFFFu);
     const auto id = static_cast<unsigned>((tag >> 28) & 7u);
     const auto address = static_cast<std::uint32_t>(tag >> 32) & 0xFFFFFFF0u;
     const bool inline_data = id == 1u || id == 2u || id >= 5u;
     const auto source = inline_data ? tadr + 16u : address;
     const auto bytes = static_cast<std::size_t>(qwc) * 16u;
-    if (!dma_valid(source, bytes) || total_qwc > UINT32_MAX - qwc) return false;
+    if (!dma_source_valid(source, bytes) || total_qwc > UINT32_MAX - qwc) return false;
     if ((chcr & 0x40u) != 0u) append(tadr + 8u, 8u); // TTE tag payload.
     append(source, bytes);
     total_qwc += qwc;
@@ -896,23 +919,61 @@ void Memory::advance(std::uint32_t cycles) {
       std::uint32_t final_madr = 0;
       std::uint32_t total_qwc = 0;
       std::vector<VifDmaSpan> spans;
-      if (build_vif1_chain(&packet, final_tadr, final_madr, total_qwc, &spans)) {
+      bool complete = false;
+      if (vif1_dma_normal_) {
+        // Normal forward DMA sends only MADR/QWC bytes. TADR and TTE do not
+        // contribute data. As with the existing chain model, sample the live
+        // payload at this modeled completion boundary, not at arm time.
+        const auto source = vif1_dma_source_;
+        const auto bytes = static_cast<std::size_t>(vif1_dma_qwc_) * 16u;
+        const bool scratch = (source & 0x80000000u) != 0u;
+        packet.resize(bytes);
+        std::size_t offset = 0;
+        while (offset < bytes) {
+          const auto encoded = source + static_cast<std::uint32_t>(offset);
+          const auto address = scratch ?
+              kScratchBase + (encoded & (kScratchSize - 1u)) :
+              encoded & 0x1FFFFFFFu;
+          const auto chunk = scratch ?
+              std::min(bytes - offset, static_cast<std::size_t>(kScratchSize -
+                  (encoded & (kScratchSize - 1u)))) : bytes - offset;
+          spans.push_back({address, offset, chunk});
+          // DMA addresses are physical. Do not reapply an EE TLB mapping to
+          // the decoded RAM offset or the CPU-visible scratchpad span address.
+          const auto& backing = scratch ? scratch_ : ram_;
+          const auto bank_offset = scratch ? encoded & (kScratchSize - 1u) :
+                                            encoded & 0x1FFFFFFFu;
+          std::copy_n(backing.data() + bank_offset, chunk, packet.data() + offset);
+          offset += chunk;
+        }
+        final_madr = source + static_cast<std::uint32_t>(bytes);
+        complete = true;
+      } else {
+        complete = build_vif1_chain(&packet, final_tadr, final_madr,
+                                   total_qwc, &spans);
+      }
+      if (complete) {
         vif_dma_spans_ = std::move(spans);
         vif1_packets_.push_back(std::move(packet));
-        store_ee(0x9010u, vif1_final_madr_);
+        // Publish the same completion walk that supplied the queued bytes.
+        // Arm-time predictions can be stale if an in-flight tag was edited.
+        store_ee(0x9010u, final_madr);
         store_ee(0x9020u, 0u);
-        store_ee(0x9030u, vif1_final_tadr_);
+        if (!vif1_dma_normal_) store_ee(0x9030u, final_tadr);
         store_ee(0x9000u, raw_ee(0x9000u) & ~0x100u);
         store_ee(0xE010u, raw_ee(0xE010u) | (1u << 1));
       }
+      vif1_dma_normal_ = false;
+      vif1_dma_source_ = 0u;
+      vif1_dma_qwc_ = 0u;
     }
   }
 
-  if (sif0_cycles_remaining_ != 0u) {
-    if (cycles < sif0_cycles_remaining_) {
-      sif0_cycles_remaining_ -= cycles;
-      return;
-    }
+  // A pending SIF transfer does not stop independent device clocks or prevent
+  // another armed channel from being discovered during this advance.
+  if (sif0_cycles_remaining_ != 0u && cycles < sif0_cycles_remaining_) {
+    sif0_cycles_remaining_ -= cycles;
+  } else if (sif0_cycles_remaining_ != 0u) {
     sif0_cycles_remaining_ = 0;
 
     auto tadr = raw_iop(0x052Cu) & 0x00FFFFFCu;
@@ -966,11 +1027,9 @@ void Memory::advance(std::uint32_t cycles) {
     }
   }
 
-  if (sif1_cycles_remaining_ != 0u) {
-    if (cycles < sif1_cycles_remaining_) {
-      sif1_cycles_remaining_ -= cycles;
-      return;
-    }
+  if (sif1_cycles_remaining_ != 0u && cycles < sif1_cycles_remaining_) {
+    sif1_cycles_remaining_ -= cycles;
+  } else if (sif1_cycles_remaining_ != 0u) {
     sif1_cycles_remaining_ = 0;
 
     auto tadr = raw_ee(0xC430u) & 0x0FFFFFF0u;
@@ -1112,9 +1171,26 @@ void Memory::advance(std::uint32_t cycles) {
     const auto chcr = raw_ee(0x9000u);
     if ((chcr & 0x100u) != 0u && (chcr & 0xCu) == 0x4u) {
       std::uint32_t total_qwc = 0;
-      if (build_vif1_chain(nullptr, vif1_final_tadr_, vif1_final_madr_,
-                           total_qwc))
+      std::uint32_t final_tadr = 0;
+      std::uint32_t final_madr = 0;
+      if (build_vif1_chain(nullptr, final_tadr, final_madr, total_qwc)) {
+        vif1_dma_normal_ = false;
         vif1_cycles_remaining_ = (total_qwc == 0u ? 1u : total_qwc) * 8u;
+      }
+    } else if ((chcr & 0x10Du) == 0x101u) {
+      const auto source = raw_ee(0x9010u) & 0xFFFFFFF0u;
+      const auto qwc = raw_ee(0x9020u) & 0xFFFFu;
+      const auto address = source & 0x1FFFFFFFu;
+      const auto bytes = static_cast<std::size_t>(qwc) * 16u;
+      // QWC=0 is not a successful normal kick; reverse GS downloads remain
+      // unsupported. Fail closed on non-RAM sources without a SPR selector.
+      if (qwc != 0u && ((source & 0x80000000u) != 0u ||
+          (address < kRamSize && bytes <= kRamSize - address))) {
+        vif1_dma_normal_ = true;
+        vif1_dma_source_ = source;
+        vif1_dma_qwc_ = qwc;
+        vif1_cycles_remaining_ = qwc * 8u;
+      }
     }
   }
 }

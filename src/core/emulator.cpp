@@ -1,5 +1,7 @@
 #include "ps2vita/emulator.hpp"
 
+#include <algorithm>
+
 namespace ps2vita {
 namespace {
 
@@ -48,26 +50,28 @@ bool Emulator::boot_bios() {
 
 StopReason Emulator::run_slice(std::uint32_t instructions) {
   if (!ready_) return StopReason::Halted;
-  if (image_.ok) {
-    const auto result = cpu_.run(instructions);
-    service_graphics();
-    return result;
-  }
-
+  // Drain already completed transfers before executing another EE instruction.
+  // This is still the functional packet model, not cycle-interleaved VU/GIF.
+  service_graphics();
   std::uint32_t remaining = instructions;
   while (remaining != 0u) {
-    const auto budget = remaining < ee_cycles_until_iop_
-        ? remaining : ee_cycles_until_iop_;
+    auto budget = std::min(remaining, memory_.cycles_until_next_event());
+    if (!image_.ok) budget = std::min(budget, ee_cycles_until_iop_);
     const auto cycles_before = cpu_.state().cycles;
     const auto result = cpu_.run(budget);
     const auto executed = static_cast<std::uint32_t>(
         cpu_.state().cycles - cycles_before);
     remaining -= executed;
-    ee_cycles_until_iop_ -= executed;
-    if (ee_cycles_until_iop_ == 0u) {
-      iop_.step();
-      ee_cycles_until_iop_ = 8u;
+    if (!image_.ok) {
+      ee_cycles_until_iop_ -= executed;
+      if (ee_cycles_until_iop_ == 0u) {
+        iop_.step();
+        ee_cycles_until_iop_ = 8u;
+      }
     }
+    // DMA can retire inside a requested host slice. Consume its packet now,
+    // before EE polling code observes completion and reads VU memory. A fixed
+    // host quantum alone can delay this visibility by several instructions.
     service_graphics();
     if (result != StopReason::StepLimit) return result;
     if (executed == 0u) return StopReason::Halted;
