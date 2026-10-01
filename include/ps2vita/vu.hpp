@@ -28,6 +28,11 @@ struct Vu1FlagReadRecord {
   std::uint64_t pair = 0, cycle = 0;
   std::uint16_t pc = 0, mac = 0, mask = 0, result = 0;
 };
+struct Vu1DivRecord {
+  std::uint64_t pair = 0, cycle = 0, ready_cycle = 0;
+  std::uint16_t pc = 0;
+  std::uint32_t numerator = 0, denominator = 0, result = 0;
+};
 struct VuCauseRecord {
   enum class Kind { Upper, LowerInput, Store, MemoryLoad, VifUpload } kind = Kind::Upper;
   std::uint64_t packet = 0, source_offset = 0;
@@ -61,6 +66,7 @@ public:
   std::uint64_t dropped_causes() const { return dropped_causes_; }
   const std::vector<Vu1StoreRecord>& store_records() const { return store_records_; }
   const std::vector<Vu1FlagReadRecord>& flag_read_records() const { return flag_read_records_; }
+  const std::vector<Vu1DivRecord>& div_records() const { return div_records_; }
   std::uint64_t dropped_store_records() const { return dropped_store_records_; }
   std::uint64_t first_rejected_pair() const { return first_rejected_pair_; }
   std::uint64_t cycles_executed() const { return cycles_; }
@@ -97,6 +103,8 @@ private:
   bool step();
   bool execute_lower(std::uint32_t code);
   bool execute_upper(std::uint32_t code);
+  void backup_branch_vi(unsigned reg);
+  std::uint16_t branch_vi(unsigned reg) const;
   bool kick_gif(unsigned address_reg);
   void transfer_path1(bool flush);
   void store_data(std::uint32_t address, std::uint32_t value, unsigned reg, unsigned lane);
@@ -110,9 +118,15 @@ private:
   std::uint64_t q_ready_ = 0, q_stall_cycles_ = 0;
   std::uint32_t pending_q_ = 0;
   bool q_pending_ = false;
+  // Conditional branches have a two-cycle old-VI forwarding window. Only
+  // selected integer writers participate; FMAND and indirect jumps do not.
+  std::uint64_t vi_branch_ready_ = 0;
+  unsigned vi_branch_reg_ = 0;
+  std::uint16_t vi_branch_old_ = 0;
   bool trace_stores_ = false;
   std::vector<Vu1StoreRecord> store_records_;
   std::vector<Vu1FlagReadRecord> flag_read_records_;
+  std::vector<Vu1DivRecord> div_records_;
   std::uint64_t dropped_store_records_ = 0, first_rejected_pair_ = 0;
   std::array<std::array<std::uint32_t, 4>, 32> lower_vf_snapshot_{};
   bool running_ = false;

@@ -172,6 +172,24 @@ against its default microVU mode. A register-initialization microprogram and
 explicit RAM clear precede the unchanged selected input; the result is still a
 final-memory check, not a full CPU/VU savestate comparison or historical GIF oracle.
 
+The replay also prints bounded `vu_div` records with the actual numerator,
+denominator, pending result and ready cycle. These are observations, not values
+reconstructed from final VF registers. An owned finite-arithmetic packet can
+separate arithmetic behavior from the BIOS stream's upload/execution overlap:
+
+```sh
+python tools/make_vu1_math_fixture.py build-release/vu1-math.bin \
+  --layout build-release/vu1-math.json
+./build-release/ps2vif_replay build-release/vu1-math.bin \
+  build-release/vu1-math.ppm build-release/vu1-math-astra.bin
+```
+
+Run the reference command above on this new packet in both modes. Each case
+waits with FLUSHE before changing its inputs; outputs use distinct qwords
+`000..00F`. The JSON contains raw operands and output locations, not native-float
+goldens. Four MUL rows cite recorded VU0 MULi hardware data transposed to VU1 MUL;
+this does not imply hardware validation of the fixture or every VU multiply.
+
 `--prefix-bytes 0x8A4` ends the known local capture just after its first MSCAL;
 `0x9CC` ends after its first MSCNT. These offsets are specific to this capture,
 not universal BIOS constants. Take a complete command boundary from `vif_run`

@@ -96,6 +96,11 @@ int main(int argc, char** argv) {
           static_cast<unsigned long long>(gif.triangles_emitted() - triangles_before));
   }
   const auto& vu = vif.vu1();
+  for (const auto& d : vu.div_records())
+    std::printf("vu_div pc=%04X pair=%llu cycle=%llu numerator=%08X denominator=%08X result=%08X ready_cycle=%llu\n",
+        d.pc, static_cast<unsigned long long>(d.pair),
+        static_cast<unsigned long long>(d.cycle), d.numerator, d.denominator,
+        d.result, static_cast<unsigned long long>(d.ready_cycle));
   for (const auto& f : vu.flag_read_records())
     std::printf("fmand pc=%04X pair=%llu cycle=%llu mac=%04X mask=%04X result=%04X\n",
         f.pc, static_cast<unsigned long long>(f.pair), static_cast<unsigned long long>(f.cycle),

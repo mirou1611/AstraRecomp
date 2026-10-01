@@ -77,6 +77,25 @@ std::uint32_t as_bits(float value) {
   return bits;
 }
 
+// Finite VU DIV truncates the normalized significand toward zero, independent
+// of the host FP rounding mode. Inputs here have exponents 1..254. Integer
+// division avoids changing process-wide FP state (and double-rounding).
+std::uint32_t finite_div(std::uint32_t numerator, std::uint32_t denominator) {
+  const auto sign = (numerator ^ denominator) & 0x80000000u;
+  const auto lhs = (numerator & 0x7FFFFFu) | 0x800000u;
+  const auto rhs = (denominator & 0x7FFFFFu) | 0x800000u;
+  int exponent = static_cast<int>((numerator >> 23) & 255u) -
+      static_cast<int>((denominator >> 23) & 255u) + 127;
+  const unsigned shift = lhs >= rhs ? 23u : 24u;
+  if (lhs < rhs) --exponent;
+  if (exponent <= 0) return sign; // VU has no denormal results.
+  if (exponent >= 255) return sign | 0x7F7FFFFFu;
+  const auto significand = static_cast<std::uint32_t>(
+      (static_cast<std::uint64_t>(lhs) << shift) / rhs);
+  return sign | (static_cast<std::uint32_t>(exponent) << 23) |
+      (significand & 0x7FFFFFu);
+}
+
 std::uint32_t update_mac(std::uint16_t& mac, unsigned lane,
                          std::uint32_t bits) {
   const auto shift = 3u - lane;
@@ -178,9 +197,11 @@ void Vu1::trace_upper(std::uint32_t code) {
 
 void Vu1::reset() {
   flag_read_records_.clear();
+  div_records_.clear();
   enable_causal_trace(trace_causes_);
   vf_ready_ = {}; cycles_ = vf_stall_cycles_ = 0;
   q_ready_ = q_stall_cycles_ = 0; pending_q_ = 0; q_pending_ = false;
+  vi_branch_ready_ = 0; vi_branch_reg_ = 0; vi_branch_old_ = 0;
   store_records_.clear(); dropped_store_records_ = 0; first_rejected_pair_ = 0;
   state_ = {};
   state_.vf[0][3] = 0x3F800000u;
@@ -219,6 +240,7 @@ void Vu1::start(std::uint16_t address) {
   running_ = true;
   branch_pending_ = false;
   end_pending_ = false;
+  vi_branch_ready_ = 0;
 }
 
 void Vu1::resume() {
@@ -227,6 +249,7 @@ void Vu1::resume() {
   running_ = true;
   branch_pending_ = false;
   end_pending_ = false;
+  vi_branch_ready_ = 0;
 }
 
 void Vu1::run(std::uint64_t max_pairs) {
@@ -362,6 +385,7 @@ bool Vu1::step() {
   ++cycles_;
   state_.pc = apply_branch ? pending_target : sequential_pc;
   if (apply_end) {
+    vi_branch_ready_ = 0;
     // Retire a pending division after the E-bit delay pair, not when E is
     // first encountered. A host run budget is not a microprogram termination.
     if (q_pending_) {
@@ -399,6 +423,21 @@ void Vu1::store_data(std::uint32_t address, std::uint32_t value, unsigned reg, u
   else ++dropped_store_records_;
 }
 
+void Vu1::backup_branch_vi(unsigned reg) {
+  if (reg == 0u) return;
+  // Consecutive writes to the same VI retain the pre-chain value. Readiness
+  // uses guest cycles so a NOP or even one additional VF/Q stall expires it.
+  if (reg != vi_branch_reg_ || cycles_ >= vi_branch_ready_)
+    vi_branch_old_ = state_.vi[reg];
+  vi_branch_reg_ = reg;
+  vi_branch_ready_ = cycles_ + 2u;
+}
+
+std::uint16_t Vu1::branch_vi(unsigned reg) const {
+  return reg != 0u && reg == vi_branch_reg_ && cycles_ < vi_branch_ready_ ?
+      vi_branch_old_ : state_.vi[reg];
+}
+
 bool Vu1::execute_lower(std::uint32_t code) {
   const auto group = code >> 25;
   const auto it = static_cast<unsigned>((code >> 16) & 0xFu);
@@ -433,7 +472,10 @@ bool Vu1::execute_lower(std::uint32_t code) {
     const auto immediate = static_cast<std::int32_t>(raw);
     const auto lhs = static_cast<std::int32_t>(state_.vi[is]);
     const auto result = group == 0x08u ? lhs + immediate : lhs - immediate;
-    if (it != 0u) state_.vi[it] = static_cast<std::uint16_t>(result);
+    if (it != 0u) {
+      backup_branch_vi(it);
+      state_.vi[it] = static_cast<std::uint16_t>(result);
+    }
     return true;
   }
   if (group == 0x21u) { // BAL
@@ -456,7 +498,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
     return true;
   }
   if (group == 0x28u || group == 0x29u) { // IBEQ / IBNE
-    const bool equal = state_.vi[is] == state_.vi[it];
+    const bool equal = branch_vi(is) == branch_vi(it);
     if ((group == 0x28u && equal) || (group == 0x29u && !equal)) {
       branch_target_ = static_cast<std::uint16_t>((state_.pc + 8u +
           sign_extend(code & 0x7FFu, 11u) * 8) & 0x3FFFu);
@@ -465,7 +507,7 @@ bool Vu1::execute_lower(std::uint32_t code) {
     return true;
   }
   if (group == 0x2Eu) { // IBLEZ
-    if (static_cast<std::int16_t>(state_.vi[is]) <= 0) {
+    if (static_cast<std::int16_t>(branch_vi(is)) <= 0) {
       branch_target_ = static_cast<std::uint16_t>((state_.pc + 8u +
           sign_extend(code & 0x7FFu, 11u) * 8) & 0x3FFFu);
       branch_pending_ = true;
@@ -478,21 +520,29 @@ bool Vu1::execute_lower(std::uint32_t code) {
   const auto fd = static_cast<unsigned>((code >> 6) & 0x1Fu);
   if (function == 0x30u) { // IADD
     const auto id = fd & 0xFu;
-    if (id != 0u) state_.vi[id] = static_cast<std::uint16_t>(
-        state_.vi[is] + state_.vi[it]);
+    if (id != 0u) {
+      backup_branch_vi(id);
+      state_.vi[id] = static_cast<std::uint16_t>(state_.vi[is] + state_.vi[it]);
+    }
     return true;
   }
   if (function == 0x32u) { // IADDI
     const auto immediate = sign_extend((code >> 6) & 0x1Fu, 5u);
-    if (it != 0u) state_.vi[it] = static_cast<std::uint16_t>(
-        static_cast<std::int32_t>(state_.vi[is]) + immediate);
+    if (it != 0u) {
+      backup_branch_vi(it);
+      state_.vi[it] = static_cast<std::uint16_t>(
+          static_cast<std::int32_t>(state_.vi[is]) + immediate);
+    }
     return true;
   }
   if (function == 0x34u || function == 0x35u) { // IAND / IOR
     const auto id = fd & 0xFu;
-    if (id != 0u) state_.vi[id] = static_cast<std::uint16_t>(
-        function == 0x34u ? state_.vi[is] & state_.vi[it]
-                          : state_.vi[is] | state_.vi[it]);
+    if (id != 0u) {
+      backup_branch_vi(id);
+      state_.vi[id] = static_cast<std::uint16_t>(
+          function == 0x34u ? state_.vi[is] & state_.vi[it]
+                            : state_.vi[is] | state_.vi[it]);
+    }
     return true;
   }
   if (function == 0x3Cu && fd == 0x0Cu) { // MOVE encoding of lower NOP.
@@ -508,7 +558,10 @@ bool Vu1::execute_lower(std::uint32_t code) {
       if ((code & mask) != 0u && ft != 0u)
         state_.vf[ft][lane] = memory_.vu1_data_word(qword * 16u + lane * 4u);
     }
-    if (is != 0u) ++state_.vi[is];
+    if (is != 0u) {
+      backup_branch_vi(is);
+      ++state_.vi[is];
+    }
     return true;
   }
   if (function == 0x3Cu && fd == 0x0Eu) { // DIV
@@ -520,18 +573,28 @@ bool Vu1::execute_lower(std::uint32_t code) {
     // saturation in Q; I/D status flags remain outside this state model.
     if ((denominator & 0x7F800000u) == 0u) {
       pending_q_ = ((numerator ^ denominator) & 0x80000000u) | 0x7F7FFFFFu;
+    } else if ((numerator & 0x7F800000u) == 0u) {
+      pending_q_ = (numerator ^ denominator) & 0x80000000u;
+    } else if ((numerator & 0x7F800000u) != 0x7F800000u &&
+               (denominator & 0x7F800000u) != 0x7F800000u) {
+      pending_q_ = finite_div(numerator, denominator);
     } else {
-      const auto input = (numerator & 0x7F800000u) == 0u ?
-          numerator & 0x80000000u : numerator;
-      pending_q_ = as_bits(as_float(input) / as_float(denominator));
+      // Exponent-FF operands still need a separately verified PS2 model.
+      pending_q_ = as_bits(as_float(numerator) / as_float(denominator));
     }
     q_ready_ = cycles_ + 7u;
     q_pending_ = true;
+    if (trace_stores_ && div_records_.size() < 128u)
+      div_records_.push_back({pairs_executed_, cycles_, q_ready_, state_.pc,
+          numerator, denominator, pending_q_});
     return true;
   }
   if (function == 0x3Cu && fd == 0x0Fu) { // MTIR
-    if (it != 0u) state_.vi[it] = static_cast<std::uint16_t>(
-        lower_vf_snapshot_[(code >> 11) & 0x1Fu][(code >> 21) & 3u]);
+    if (it != 0u) {
+      backup_branch_vi(it);
+      state_.vi[it] = static_cast<std::uint16_t>(
+          lower_vf_snapshot_[(code >> 11) & 0x1Fu][(code >> 21) & 3u]);
+    }
     return true;
   }
   if (function == 0x3Cu && fd == 0x1Au) { // XTOP
@@ -550,7 +613,10 @@ bool Vu1::execute_lower(std::uint32_t code) {
         store_data(Memory::kVu1DataBase + qword * 16u + lane * 4u,
                         lower_vf_snapshot_[fs][lane], fs, lane);
     }
-    if (address_reg != 0u) ++state_.vi[address_reg];
+    if (address_reg != 0u) {
+      backup_branch_vi(address_reg);
+      ++state_.vi[address_reg];
+    }
     return true;
   }
   if (function == 0x3Du && fd == 0x0Fu) { // MFIR
