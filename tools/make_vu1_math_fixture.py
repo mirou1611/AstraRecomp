@@ -10,6 +10,8 @@ No BIOS microprogram or emulator implementation is copied. The four TriAce
 expected values are externally recorded VU0 MULi data transposed to VU1 MUL,
 not hardware validation of this instruction form, unit, or surrounding code.
 Other cases are observations and deliberately have no native-float oracle.
+Use --suite div-boundaries for finite underflow/overflow and normalization
+operands; the default finite suite preserves the original packet bytes.
 """
 
 import argparse
@@ -67,6 +69,28 @@ def cases() -> tuple[MathCase, ...]:
     return tuple(result)
 
 
+def boundary_cases() -> tuple[MathCase, ...]:
+    """Raw finite operands only; result goldens belong to reference captures."""
+    return (
+        MathCase("minnormal_over_one", "div", 0x00800000, 0x3F800000),
+        MathCase("minnormal_over_two", "div", 0x00800000, 0x40000000),
+        MathCase("minnormal_over_negative_two", "div", 0x00800000, 0xC0000000),
+        MathCase("negative_minnormal_over_two", "div", 0x80800000, 0x40000000),
+        MathCase("maxnormal_over_half", "div", 0x7F7FFFFF, 0x3F000000),
+        MathCase("negative_maxnormal_over_half", "div", 0xFF7FFFFF, 0x3F000000),
+        MathCase("one_over_minnormal", "div", 0x3F800000, 0x00800000),
+        MathCase("half_over_minnormal", "div", 0x3F000000, 0x00800000),
+        MathCase("minnormal_over_maxnormal", "div", 0x00800000, 0x7F7FFFFF),
+        MathCase("minnormal_over_next_one", "div", 0x00800000, 0x3F800001),
+        MathCase("next_minnormal_over_next_one", "div", 0x00800001, 0x3F800001),
+        MathCase("one_over_next_one", "div", 0x3F800000, 0x3F800001),
+        MathCase("previous_one_over_one", "div", 0x3F7FFFFF, 0x3F800000),
+        MathCase("previous_one_over_next_one", "div", 0x3F7FFFFF, 0x3F800001),
+        MathCase("one_point_two_five_over_one_point_seven_five", "div", 0x3FA00000, 0x3FE00000),
+        MathCase("one_point_seven_five_over_one_point_two_five", "div", 0x3FE00000, 0x3FA00000),
+    )
+
+
 def microprogram(operation: str, output_qword: int) -> tuple[tuple[int, int], ...]:
     """Hand-encode loads, arithmetic, a store, E/NOP and its delay pair.
 
@@ -99,12 +123,18 @@ def microprogram(operation: str, output_qword: int) -> tuple[tuple[int, int], ..
     return tuple(program)
 
 
-def build() -> tuple[bytes, dict]:
+def build(suite: str = "finite") -> tuple[bytes, dict]:
     """Return a packet and descriptive metadata without calculating float results."""
+    if suite == "finite":
+        selected_cases = cases()
+    elif suite == "div-boundaries":
+        selected_cases = boundary_cases()
+    else:
+        raise ValueError("suite must be finite or div-boundaries")
     # STCYCL WL=CL=1 and STMOD normal make UNPACK independent of prior state.
     words = [0x10000000, 0x01000101, 0x05000000, 0]
     layout = []
-    for index, case in enumerate(cases()):
+    for index, case in enumerate(selected_cases):
         case_start = len(words) * 4
         # Put the V4-32 payload at a qword boundary. FLG=0 uses absolute addresses.
         words.extend((0, 0, 0, 0x6C020100))
@@ -145,10 +175,12 @@ def build() -> tuple[bytes, dict]:
     packet = struct.pack(f"<{len(words)}I", *words)
     metadata = {
         "schema_version": 1,
+        "suite": suite,
         "packet_bytes": len(packet),
         "packet_sha256": hashlib.sha256(packet).hexdigest(),
         "scope": "Owned finite arithmetic observation stream; no native-float expected values.",
-        "hardware_scope": HARDWARE_SCOPE,
+        "hardware_scope": HARDWARE_SCOPE if suite == "finite" else
+            "No physical PS2 expected results; boundary cases contain raw operands only.",
         "cases": layout,
     }
     return packet, metadata
@@ -157,12 +189,14 @@ def build() -> tuple[bytes, dict]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("packet", type=Path, help="output qword-aligned VIF binary")
+    parser.add_argument("--suite", choices=("finite", "div-boundaries"), default="finite",
+                        help="raw operand suite (default: finite)")
     parser.add_argument("--layout", "--json", dest="layout", type=Path,
                         help="optional JSON raw operands, output locations and pinned evidence")
     args = parser.parse_args()
     if args.layout is not None and args.packet.resolve() == args.layout.resolve():
         parser.error("packet and JSON layout must use distinct paths")
-    packet, metadata = build()
+    packet, metadata = build(args.suite)
     args.packet.parent.mkdir(parents=True, exist_ok=True)
     args.packet.write_bytes(packet)
     if args.layout is not None:

@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 from make_vu1_reference_elf import BEGIN_MARKER, END_MARKER, VU_MEMORY_SIZE, build
+from serialize_vif_fixture import serialize
 
 ROW_PATTERN = re.compile(r"VUMEM ([0-9A-Fa-f]{4})" + r" ([0-9A-Fa-f]{8})" * 4)
 REFERENCE_SETTINGS = {
@@ -175,7 +176,13 @@ def capture(args) -> dict:
     template = args.profile_template.resolve(strict=True)
     packet = args.packet.read_bytes()
     original_size = len(packet)
+    original_hash = hashlib.sha256(packet).hexdigest()
     packet = select_prefix(packet, args.prefix_bytes)
+    selected_size = len(packet)
+    selected_hash = hashlib.sha256(packet).hexdigest()
+    transformation = None
+    if args.serialize_vu_starts:
+        packet, transformation = serialize(packet)
     image = build(packet, reset_vu1=not args.no_reset_vu1)
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -230,6 +237,11 @@ def capture(args) -> dict:
         "log": str(log), "elf": str(elf), "elapsed_seconds": round(time.monotonic() - started, 3),
         "packet_bytes": len(packet), "packet_sha256": hashlib.sha256(packet).hexdigest(),
         "original_packet_bytes": original_size, "prefix_bytes": args.prefix_bytes,
+        "original_packet_sha256": original_hash,
+        "selected_unmodified_bytes": selected_size,
+        "selected_unmodified_sha256": selected_hash,
+        "serialize_vu_starts": args.serialize_vu_starts,
+        "transformation": transformation,
         "selected_packet": str(selected_packet),
         "elf_sha256": hashlib.sha256(image).hexdigest(),
         "memory_bytes": len(memory), "memory_sha256": hashlib.sha256(memory).hexdigest(),
@@ -237,7 +249,11 @@ def capture(args) -> dict:
         "zero_vu1_register_prelude": not args.no_reset_vu1,
         "zero_vu1_data_memory": True,
         "vu1_execution_mode": "interpreter" if args.vu1_interpreter else "microVU",
-        "scope": "final VU1 data memory only; historical XGKICK deliveries are not reconstructed",
+        "scope": ("controlled sequential functional fixture with inserted FLUSHE barriers; "
+                  "not the original DMA/VU event timeline or historical XGKICK oracle"
+                  if args.serialize_vu_starts else
+                  "unchanged selected stream, final VU1 data memory only; "
+                  "original DMA arrival timing and historical XGKICK deliveries are not reconstructed"),
     }
     args.output.with_suffix(args.output.suffix + ".json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
@@ -260,6 +276,9 @@ def main():
                      help="cross-check PCSX2's VU1 interpreter instead of microVU")
     run.add_argument("--prefix-bytes", type=lambda text: int(text, 0),
                      help="known complete VIF command boundary; pad selected prefix with NOPs to qword alignment")
+    run.add_argument("--serialize-vu-starts", action="store_true",
+                     help="controlled functional fixture: insert FLUSHE/NOP qwords after VU starts; "
+                          "changes timing, not an original-stream BIOS oracle")
     parse = commands.add_parser("parse", help="strictly parse an existing serial log")
     parse.add_argument("log", type=Path)
     parse.add_argument("output", type=Path)

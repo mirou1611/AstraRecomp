@@ -157,6 +157,9 @@ else()
   add_executable(vu1_branch_tests tests/vu1_branch_tests.cpp)
   target_link_libraries(vu1_branch_tests PRIVATE ps2core)
   add_test(NAME vu1_branch_tests COMMAND vu1_branch_tests)
+  add_executable(vu1_mul_tests tests/vu1_mul_tests.cpp)
+  target_link_libraries(vu1_mul_tests PRIVATE ps2core)
+  add_test(NAME vu1_mul_tests COMMAND vu1_mul_tests)
   add_executable(ps2bios_trace tools/bios_trace.cpp)
   target_link_libraries(ps2bios_trace PRIVATE ps2core)
   add_executable(ps2vif_replay tools/vif_replay.cpp)
@@ -178,6 +181,7 @@ else()
     target_compile_options(vu1_flag_tests PRIVATE /W4)
     target_compile_options(vu1_div_tests PRIVATE /W4)
     target_compile_options(vu1_branch_tests PRIVATE /W4)
+    target_compile_options(vu1_mul_tests PRIVATE /W4)
     target_compile_options(ps2bios_trace PRIVATE /W4)
     target_compile_options(ps2vif_replay PRIVATE /W4)
     target_compile_options(aot_benchmark PRIVATE /W4)
@@ -186,6 +190,7 @@ else()
     target_compile_options(vu1_flag_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(vu1_div_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(vu1_branch_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(vu1_mul_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ps2bios_trace PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ps2vif_replay PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(aot_benchmark PRIVATE -Wall -Wextra -Wpedantic)
@@ -213,4 +218,12 @@ else()
            COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
                    "${Python3_EXECUTABLE}" -m unittest discover
                    -s "${CMAKE_CURRENT_SOURCE_DIR}/tools" -p test_vu1_math_fixture.py)
+  add_test(NAME vif_serialized_fixture_tool_tests
+           COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+                   "${Python3_EXECUTABLE}" -m unittest discover
+                   -s "${CMAKE_CURRENT_SOURCE_DIR}/tools" -p test_serialize_vif_fixture.py)
+  add_test(NAME vu1_math_vif_replay
+           COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+                   "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_vu1_math_replay.py"
+                   "$<TARGET_FILE:ps2vif_replay>")
 endif()

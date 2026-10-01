@@ -61,7 +61,8 @@ int main() {
   // These finite goldens were observed independently in BOTH PCSX2 v2.8.2
   // microVU and interpreter, with VU1Roundmode=3, using the owned VIF fixture
   // from tools/make_vu1_math_fixture.py. They are not native-float expectations.
-  constexpr std::array<std::array<std::uint32_t, 3>, 10> finite{{
+  // The last sixteen rows are reproducible with --suite div-boundaries.
+  constexpr std::array<std::array<std::uint32_t, 3>, 26> finite{{
       {{0x3F800000u, 0x40200000u, 0x3ECCCCCCu}},
       {{0x3F800000u, 0xC0200000u, 0xBECCCCCCu}},
       {{0xBF800000u, 0x40200000u, 0xBECCCCCCu}},
@@ -72,6 +73,22 @@ int main() {
       {{0xBF800000u, 0xC0400000u, 0x3EAAAAAAu}},
       {{0x3F800000u, 0x40000000u, 0x3F000000u}},
       {{0xBF800000u, 0x40000000u, 0xBF000000u}},
+      {{0x00800000u, 0x3F800000u, 0x00800000u}},
+      {{0x00800000u, 0x40000000u, 0x00000000u}},
+      {{0x00800000u, 0xC0000000u, 0x80000000u}},
+      {{0x80800000u, 0x40000000u, 0x80000000u}},
+      {{0x7F7FFFFFu, 0x3F000000u, 0x7F7FFFFFu}},
+      {{0xFF7FFFFFu, 0x3F000000u, 0xFF7FFFFFu}},
+      {{0x3F800000u, 0x00800000u, 0x7E800000u}},
+      {{0x3F000000u, 0x00800000u, 0x7E000000u}},
+      {{0x00800000u, 0x7F7FFFFFu, 0x00000000u}},
+      {{0x00800000u, 0x3F800001u, 0x00000000u}},
+      {{0x00800001u, 0x3F800001u, 0x00800000u}},
+      {{0x3F800000u, 0x3F800001u, 0x3F7FFFFEu}},
+      {{0x3F7FFFFFu, 0x3F800000u, 0x3F7FFFFFu}},
+      {{0x3F7FFFFFu, 0x3F800001u, 0x3F7FFFFDu}},
+      {{0x3FA00000u, 0x3FE00000u, 0x3F36DB6Du}},
+      {{0x3FE00000u, 0x3FA00000u, 0x3FB33333u}},
   }};
   for (const auto& row : finite) {
     const auto numerator = row[0], denominator = row[1], expected = row[2];

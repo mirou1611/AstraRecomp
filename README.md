@@ -81,7 +81,7 @@ results, not a game-compatibility list or a measured completion percentage.
 | PC recompiler | Phase-0 analysis, a tested R5900-to-C++ subset, and a generated mixed-workload performance gate |
 | Vita runtime | VitaSDK-only VPK, native monitor, ELF loading, stepping, and diagnostic framebuffer |
 | Guest graphics | 160×112 software rasterizer; reference-checked PATH3 fixtures cover UV, perspective ST/Q, RGB alpha selection and HIGHLIGHT modes; BIOS output is not a confirmed intro |
-| VU1 | Delayed VI branch reads, VF0 MAC flags and finite DIV/Q fixes; owned arithmetic fixtures cross-checked in both PCSX2 modes; VIF/VU overlap and full arithmetic remain incomplete |
+| VU1 | Delayed VI branch reads and finite DIV/MUL fixes; controlled synchronized packet matches all 4,096 memory words in both PCSX2 modes; original VIF/VU timing and full arithmetic remain incomplete |
 | Audio / SPU2 | Tested DMA and shadow ADPCM/voice-envelope/pitch/mixing components; no Vita speaker output; further audio work deferred |
 | Retail games | **Not playable**—IOP devices, GIF/GS, VU, SPU2, media, and compatibility work remain |
 
@@ -91,7 +91,7 @@ A small guest ELF now draws into framebuffer A, samples A as a 24-bit texture
 into B, changes A, and samples it again without overwriting B's earlier result.
 This previously failed in Astra; it now passes, including texture-alpha checks.
 PCSX2 software-renderer output matches all **128 native RGB pixels** checked.
-Release and UBSan suites pass **19/19 CTest targets** each, and the Vita VPK
+Release and UBSan suites pass **22/22 CTest targets** each, and the Vita VPK
 cross-build passes. These are reference checks, not physical PS2/Vita validation.
 
 The new shared color storage is deliberately approximate: linear addressing,
@@ -112,17 +112,20 @@ See the [framebuffer-feedback implementation and validation](docs/SESSION_2026-0
 ### Latest VU1 correctness milestone
 
 Adjacent conditional branches now observe the required old VI value, with
-NOP/stall expiration, repeated-write and MSCNT lifecycle tests. Finite DIV uses
-host-independent significand truncation; zero/denormal divisors produce signed
-saturated Q. Dedicated suites check 962 flag properties and 272 DIV/Q properties.
-An owned 16-case VIF arithmetic fixture gives identical complete memory dumps in
-PCSX2's interpreter and microVU; all ten DIV cases now match Astra. MUL precision
-remains incomplete, including a multiplier correction not modeled by stock PCSX2.
-The first BIOS MSCAL matches all 4,096 memory words. First-MSCNT differences have
-fallen from 40 to 24 words, but upload/execution overlap must be isolated before
-using that stream as an arithmetic oracle. The complete packet still executes
-998 pairs and rejects one PATH1 tag. See the
-[saved VU1 session and next experiment](docs/SESSION_2026-10-01.md).
+NOP/stall expiration, repeated-write and MSCNT lifecycle tests. Finite DIV and
+ordinary normal-result MUL/MULq use host-independent significand truncation.
+Dedicated suites check 962 flag properties, 336 DIV/Q properties and 2,064 MUL
+properties. Both owned arithmetic packets match every memory word in PCSX2's
+interpreter and microVU, with full-memory golden hashes enforced in CTest.
+
+The earlier BIOS color discrepancy was isolated to overlapping reference uploads:
+later data overwrote the first call's lighting input while VU execution was still
+in flight. A **controlled synchronized** version now matches all 4,096 memory
+words in both PCSX2 modes, including the full 998-pair sequence. This validates
+sequential functional results, **not the original DMA/VU timeline or intro**.
+No wait was added to production emulation. VIF/VU/GIF event ordering and the PS2
+multiplier's special correction remain incomplete. One PATH1 tag is still rejected.
+See the [saved VU1 session and next experiment](docs/SESSION_2026-10-01.md).
 
 The captured first VIF1/VU1 BIOS packet now runs at least about **22x faster on the
 development host** after removing EE bus/TLB decoding from VU-local accesses

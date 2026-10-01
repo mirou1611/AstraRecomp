@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from make_vu1_math_fixture import build, microprogram
+from make_vu1_math_fixture import boundary_cases, build, microprogram
 
 
 # External raw values are repeated here so corruption in the generator's case
@@ -25,6 +25,18 @@ RAW_OPERANDS = (
     (0x46FCC888, 0x43A0DA10), (0x793CC535, 0x43546E14),
     (0x3C23D70A, 0x3ECCCCCC), (0x3C23D70A, 0x3ECCCCCD),
 )
+
+RAW_BOUNDARY_OPERANDS = (
+    (0x00800000, 0x3F800000), (0x00800000, 0x40000000),
+    (0x00800000, 0xC0000000), (0x80800000, 0x40000000),
+    (0x7F7FFFFF, 0x3F000000), (0xFF7FFFFF, 0x3F000000),
+    (0x3F800000, 0x00800000), (0x3F000000, 0x00800000),
+    (0x00800000, 0x7F7FFFFF), (0x00800000, 0x3F800001),
+    (0x00800001, 0x3F800001), (0x3F800000, 0x3F800001),
+    (0x3F7FFFFF, 0x3F800000), (0x3F7FFFFF, 0x3F800001),
+    (0x3FA00000, 0x3FE00000), (0x3FE00000, 0x3FA00000),
+)
+BOUNDARY_PACKET_SHA256 = "17b3bf7f7ff11d800f6e58c48c8787b573b195e2b02f37d3a478da291a03f083"
 
 
 def commands(packet):
@@ -57,6 +69,9 @@ class MathFixtureTests(unittest.TestCase):
         self.assertEqual(len(self.packet) % 16, 0)
         self.assertEqual(self.layout["packet_bytes"], len(self.packet))
         self.assertEqual(self.layout["packet_sha256"], hashlib.sha256(self.packet).hexdigest())
+        self.assertEqual(self.layout["packet_sha256"],
+                         "cf18eb048e058ba2179064c5fb3536c9a1a01bcb91800217efe07131ccb8159d")
+        self.assertEqual(self.layout["suite"], "finite")
         parsed = commands(self.packet)
         self.assertEqual([entry[1] for entry in parsed[:4]],
                          [0x10000000, 0x01000101, 0x05000000, 0])
@@ -152,6 +167,50 @@ class MathFixtureTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(packet.read_bytes(), self.packet)
             self.assertEqual(json.loads(layout.read_text(encoding="utf-8")), self.layout)
+
+
+    def test_boundary_cases_preserve_raw_operands_and_output_layout(self):
+        packet, layout = build("div-boundaries")
+        self.assertEqual(layout["suite"], "div-boundaries")
+        self.assertEqual(len(packet) % 16, 0)
+        self.assertEqual(len(layout["cases"]), 16)
+        self.assertEqual(tuple((case.lhs, case.rhs) for case in boundary_cases()),
+                         RAW_BOUNDARY_OPERANDS)
+        self.assertTrue(all(case.operation == "div" and case.recorded_vu0_muli is None
+                            for case in boundary_cases()))
+        unpack = [(offset, word, payload) for offset, word, payload in commands(packet)
+                  if word >> 24 == 0x6C]
+        self.assertEqual(len(unpack), 16)
+        for index, (lhs, rhs) in enumerate(RAW_BOUNDARY_OPERANDS):
+            with self.subTest(index=index):
+                offset, command, payload = unpack[index]
+                self.assertEqual(command, 0x6C020100)
+                self.assertEqual((offset + 4) % 16, 0)
+                self.assertEqual(struct.unpack("<8I", payload), (lhs,) * 4 + (rhs,) * 4)
+                entry = layout["cases"][index]
+                self.assertEqual((entry["lhs"], entry["rhs"]), (f"{lhs:08X}", f"{rhs:08X}"))
+                self.assertEqual(entry["input_payload_offset"], offset + 4)
+                self.assertEqual(entry["output_qword"], f"{index:03X}")
+                self.assertEqual(entry["output_byte_offset"], index * 16)
+                self.assertEqual(entry["result_lanes"], "w")
+                self.assertNotIn("recorded_vu0_muli", entry)
+        with self.assertRaises(ValueError):
+            build("unknown")
+
+    def test_cli_boundary_suite_reproduces_captured_packet_hash(self):
+        generator = Path(__file__).with_name("make_vu1_math_fixture.py")
+        with tempfile.TemporaryDirectory(prefix="vu1-div-boundary-test-") as directory:
+            packet = Path(directory) / "boundaries.bin"
+            layout_path = Path(directory) / "boundaries.json"
+            completed = subprocess.run(
+                [sys.executable, str(generator), str(packet), "--suite", "div-boundaries",
+                 "--layout", str(layout_path)], capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(hashlib.sha256(packet.read_bytes()).hexdigest(), BOUNDARY_PACKET_SHA256)
+            expected_packet, expected_layout = build("div-boundaries")
+            self.assertEqual(packet.read_bytes(), expected_packet)
+            self.assertEqual(json.loads(layout_path.read_text(encoding="utf-8")), expected_layout)
+            self.assertEqual(expected_layout["packet_sha256"], BOUNDARY_PACKET_SHA256)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,28 @@ std::uint32_t finite_div(std::uint32_t numerator, std::uint32_t denominator) {
       (significand & 0x7FFFFFu);
 }
 
+// Correct ordinary finite-normal MUL rounding without changing host FP state.
+// The PS2 multiplier's operand-dependent partial-product correction is still
+// unmodeled; stock PCSX2 also omits it. Non-normal operands/results retain the
+// existing path so MAC underflow/overflow handling is not silently bypassed.
+std::uint32_t product_bits(std::uint32_t lhs, std::uint32_t rhs) {
+  const unsigned lhs_exponent = (lhs >> 23) & 255u;
+  const unsigned rhs_exponent = (rhs >> 23) & 255u;
+  if (lhs_exponent != 0u && lhs_exponent != 255u &&
+      rhs_exponent != 0u && rhs_exponent != 255u) {
+    const auto product = static_cast<std::uint64_t>((lhs & 0x7FFFFFu) | 0x800000u) *
+        ((rhs & 0x7FFFFFu) | 0x800000u);
+    const bool high = (product & (std::uint64_t{1} << 47)) != 0u;
+    const int exponent = static_cast<int>(lhs_exponent + rhs_exponent) - 127 + int(high);
+    if (exponent > 0 && exponent < 255) {
+      const auto significand = static_cast<std::uint32_t>(product >> (high ? 24u : 23u));
+      return ((lhs ^ rhs) & 0x80000000u) |
+          (static_cast<std::uint32_t>(exponent) << 23) | (significand & 0x7FFFFFu);
+    }
+  }
+  return as_bits(as_float(lhs) * as_float(rhs));
+}
+
 std::uint32_t update_mac(std::uint16_t& mac, unsigned lane,
                          std::uint32_t bits) {
   const auto shift = 3u - lane;
@@ -798,11 +820,10 @@ bool Vu1::execute_upper(std::uint32_t code) {
     return true;
   }
   if (function == 0x1Cu) { // MULq
-    const auto scalar = as_float(state_.q);
     for (unsigned lane = 0; lane < 4u; ++lane) {
       if ((code & (1u << (24u - lane))) != 0u) {
         const auto bits = update_mac(state_.mac, lane,
-            as_bits(as_float(state_.vf[fs][lane]) * scalar));
+            product_bits(state_.vf[fs][lane], state_.q));
         if (fd != 0u) state_.vf[fd][lane] = bits;
       } else {
         state_.mac &= static_cast<std::uint16_t>(~(0x1111u << (3u - lane)));
@@ -834,7 +855,12 @@ bool Vu1::execute_upper(std::uint32_t code) {
       if (add_broadcast || function == 0x28u) result = lhs + rhs;
       else if (sub_broadcast || function == 0x2Cu) result = lhs - rhs;
       else if (max_broadcast || function == 0x2Bu) result = std::fmax(lhs, rhs);
-      else result = lhs * rhs;
+      else {
+        const auto bits = update_mac(state_.mac, lane,
+            product_bits(state_.vf[fs][lane], state_.vf[ft][lane]));
+        if (fd != 0u) state_.vf[fd][lane] = bits;
+        continue;
+      }
       const auto bits = changes_mac ?
           update_mac(state_.mac, lane, as_bits(result)) : as_bits(result);
       if (fd != 0u) state_.vf[fd][lane] = bits;

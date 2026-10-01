@@ -190,6 +190,35 @@ waits with FLUSHE before changing its inputs; outputs use distinct qwords
 goldens. Four MUL rows cite recorded VU0 MULi hardware data transposed to VU1 MUL;
 this does not imply hardware validation of the fixture or every VU multiply.
 
+`--suite div-boundaries` generates a second owned packet covering finite DIV
+normalization, signed underflow, saturation and exponent boundaries. The
+`vu1_math_vif_replay` CTest gate replays both suites and checks their complete
+16-KiB memory hashes against observations from both PCSX2 v2.8.2 execution modes;
+PCSX2 itself is not required for CI.
+
+The unchanged BIOS-derived stream does not preserve DMA arrival timestamps.
+Later uploads can overlap a running microprogram in the reference while Astra's
+current functional VIF implementation executes calls sequentially. To isolate
+arithmetic from that overlap, create an explicitly controlled reference:
+
+```sh
+python tools/run_vu1_reference.py capture build-release/first-vif.bin \
+  build-release/vu1-functional-reference.bin \
+  --pcsx2 .tools/pcsx2-v2.8.2/pcsx2-qt.exe \
+  --profile-template .tools/pcsx2-reference-data/PCSX2 \
+  --serialize-vu-starts
+```
+
+This flag inserts FLUSHE/three-NOP qwords after command-boundary MSCAL, MSCALF
+and MSCNT. Original bytes and their modulo-16 alignment are preserved. Metadata
+records original/selected/transformed hashes and every inserted barrier. Unknown
+formats, noncontiguous STCYCL and truncated payloads are rejected; opcode-looking
+payload words are never scanned as commands. The standalone
+`tools/serialize_vif_fixture.py` can write the same transformed packet to a fresh
+filename. This changes event ordering: it is a **sequential functional fixture,
+not the original BIOS timeline, GIF history or hardware oracle**. Do not insert
+such barriers into production emulation to make a picture agree.
+
 `--prefix-bytes 0x8A4` ends the known local capture just after its first MSCAL;
 `0x9CC` ends after its first MSCNT. These offsets are specific to this capture,
 not universal BIOS constants. Take a complete command boundary from `vif_run`
