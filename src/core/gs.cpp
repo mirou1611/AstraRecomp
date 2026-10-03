@@ -1,11 +1,13 @@
 #include "ps2vita/gs.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace ps2vita {
 namespace {
@@ -30,6 +32,7 @@ std::uint32_t mix_channel(std::uint32_t ca, std::uint32_t cb, std::uint32_t cc,
 Gs::Gs() : color_(kWidth * kHeight), depth_(kWidth * kHeight) { clear(0); }
 
 void Gs::set_color_target(std::vector<std::uint8_t>* memory, std::uint64_t frame) {
+  color_frame_ = frame;
   const unsigned format = (frame >> 24) & 0x3Fu;
   color_width_ = ((frame >> 16) & 0x3Fu) * 64u;
   color_base_ = (frame & 0x1FFu) * 8192u;
@@ -37,6 +40,21 @@ void Gs::set_color_target(std::vector<std::uint8_t>* memory, std::uint64_t frame
                 (format == 1u ? 0xFF000000u : 0u);
   color_memory_ = memory && memory->size() == 4u * 1024u * 1024u &&
                   color_width_ != 0u && format <= 1u ? memory : nullptr;
+}
+
+bool Gs::set_pixel_watch(const std::vector<std::uint32_t>& addresses,
+                          PixelObserver observer) {
+  if (addresses.size() > 16u || (!addresses.empty() && !observer)) return false;
+  for (std::size_t i = 0; i < addresses.size(); ++i) {
+    if ((addresses[i] & 3u) != 0u || addresses[i] >= 0x400000u) return false;
+    if (std::find(addresses.begin(), addresses.begin() + i, addresses[i]) !=
+        addresses.begin() + i) return false;
+  }
+  pixel_watch_addresses_ = addresses;
+  pixel_observer_ = addresses.empty() ? PixelObserver{} : std::move(observer);
+  draw_trace_ = {};
+  texture_trace_ = {};
+  return true;
 }
 
 std::uint32_t Gs::target_read(std::uint32_t address) const {
@@ -94,6 +112,24 @@ void Gs::write(int x, int y, std::uint32_t z, std::uint32_t color) {
   if (pass) {
     if (write_depth) depth_[index] = z;
     if (!write_color) return;
+    const auto input_color = color;
+    std::uint16_t trace_hits = 0;
+    std::array<std::uint32_t, 16> trace_before;
+    if (pixel_observer_ && color_memory_ &&
+        static_cast<unsigned>(x * 4) < color_width_) {
+      const auto first = color_base_ + (y * 4u * color_width_ + x * 4u) * 4u;
+      for (std::size_t watch = 0; watch < pixel_watch_addresses_.size(); ++watch) {
+        const auto address = pixel_watch_addresses_[watch];
+        for (unsigned dy = 0; dy < 4u; ++dy) {
+          const auto delta = (address - (first + dy * color_width_ * 4u)) & 0x3FFFFFu;
+          if (delta < 16u) {
+            trace_hits |= static_cast<std::uint16_t>(1u << watch);
+            trace_before[watch] = target_read(address);
+            break;
+          }
+        }
+      }
+    }
     if (blend_enabled_ && (!blend_pabe_ || (color & 0x80000000u) != 0u)) {
       const auto destination = pixel(x, y);
       const auto source = color;
@@ -124,6 +160,14 @@ void Gs::write(int x, int y, std::uint32_t z, std::uint32_t color) {
       color = pixel(x, y);
     }
     color_[index] = color;
+    for (std::size_t watch = 0; trace_hits != 0u &&
+         watch < pixel_watch_addresses_.size(); ++watch) {
+      if ((trace_hits & (1u << watch)) == 0u) continue;
+      const auto address = pixel_watch_addresses_[watch];
+      const GsPixelWrite event{address, trace_before[watch], target_read(address),
+          input_color, z, x, y, color_frame_, draw_trace_, texture_trace_};
+      pixel_observer_(event);
+    }
   }
 }
 

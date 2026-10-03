@@ -12,12 +12,23 @@ std::uint64_t load64(const std::uint8_t* data) {
   return value;
 }
 
-int scaled_coordinate(std::uint64_t xyz, std::uint64_t offset,
-                      unsigned coordinate_shift, unsigned offset_shift) {
+int fixed_coordinate(std::uint64_t xyz, std::uint64_t offset,
+                     unsigned coordinate_shift, unsigned offset_shift) {
   const auto coordinate =
       static_cast<int>((xyz >> coordinate_shift) & 0xFFFFu);
   const auto origin = static_cast<int>((offset >> offset_shift) & 0xFFFFu);
-  return (coordinate - origin) / 64; // GS 12.4 coordinates at quarter scale.
+  return coordinate - origin;
+}
+
+int scaled_coordinate(std::uint64_t xyz, std::uint64_t offset,
+                      unsigned coordinate_shift, unsigned offset_shift) {
+  return fixed_coordinate(xyz, offset, coordinate_shift, offset_shift) / 64;
+}
+
+int ceil_quarter_coordinate(int fixed) {
+  // Quarter-grid anchors are native x*4: GS 12.4 fixed x*64. C++ signed
+  // division already rounds negative values toward the required ceiling.
+  return fixed >= 0 ? (fixed + 63) / 64 : fixed / 64;
 }
 
 } // namespace
@@ -239,6 +250,7 @@ void Gif::write_image(const std::uint8_t* data, std::size_t size) {
 
 std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
                                   std::uint32_t vertex_color) const {
+  const auto raw_u = u, raw_v = v;
   const auto tex0 = tex0_[context & 1u];
   const auto base = static_cast<std::uint32_t>((tex0 & 0x3FFFu) * 256u);
   const auto width = static_cast<unsigned>((tex0 >> 14) & 0x3Fu) * 64u;
@@ -259,9 +271,11 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
   v = address_coordinate(v, (clamp >> 2) & 3u, 1u << ((tex0 >> 30) & 15u),
                          (clamp >> 24) & 0x3FFu, (clamp >> 34) & 0x3FFu);
   std::uint32_t color = 0;
+  std::uint32_t texel_address = 0, raw_texel = 0;
   if (format == 0u || format == 1u) {
-    color = read_local32(base + static_cast<std::uint32_t>(
-        (static_cast<std::uint64_t>(v) * width + u) * 4u));
+    texel_address = base + static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(v) * width + u) * 4u);
+    color = raw_texel = read_local32(texel_address);
     if (format == 1u) {
       color &= 0x00FFFFFFu;
       const auto alpha = (texa_ & 0x8000u) != 0u && color == 0u ? 0u : texa_ & 0xFFu;
@@ -270,9 +284,11 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
   } else if (format == 2u) {
     const auto address = base + static_cast<std::uint32_t>(
         (static_cast<std::uint64_t>(v) * width + u) * 2u);
+    texel_address = address;
     const auto pixel = static_cast<std::uint16_t>(
         local_memory_[address & 0x3FFFFFu] |
         (local_memory_[(address + 1u) & 0x3FFFFFu] << 8u));
+    raw_texel = pixel;
     const auto expand = [](std::uint32_t component) {
       return component << 3u;
     };
@@ -287,9 +303,15 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
   }
   const auto texture_function = static_cast<unsigned>((tex0 >> 35) & 3u);
   const bool texture_alpha = (tex0 & (1ull << 34)) != 0u;
+  const auto traced = [&](std::uint32_t output) {
+    if (gs_.pixel_watch_enabled())
+      gs_.set_texture_trace({true, raw_u, raw_v, u, v, format,
+          texel_address & 0x3FFFFFu, raw_texel, color, vertex_color, output});
+    return output;
+  };
   if (texture_function == 1u) { // DECAL
-    return texture_alpha ? color :
-        (color & 0x00FFFFFFu) | (vertex_color & 0xFF000000u);
+    return traced(texture_alpha ? color :
+        (color & 0x00FFFFFFu) | (vertex_color & 0xFF000000u));
   }
   const auto vertex_alpha = vertex_color >> 24;
   const auto texel_alpha = color >> 24;
@@ -307,7 +329,13 @@ std::uint32_t Gif::sample_texture(unsigned context, unsigned u, unsigned v,
     else alpha = texel_alpha; // HIGHLIGHT2
   }
   // Texture-function saturation precedes alpha test and framebuffer blending.
-  return output | (std::min(255u, alpha) << 24);
+  return traced(output | (std::min(255u, alpha) << 24));
+}
+
+void Gif::trace_draw(GsTracePrimitive kind, std::uint64_t sequence, unsigned context) {
+  if (!gs_.pixel_watch_enabled()) return;
+  gs_.set_draw_trace({kind, sequence, packets_submitted_, prim_, frame_[context],
+      tex0_[context], clamp_[context], alpha_[context], test_[context], texa_});
 }
 
 void Gif::set_prim(std::uint64_t value) {
@@ -388,6 +416,7 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
 
   if (primitive == 0u) {
     if (draw) {
+      trace_draw(GsTracePrimitive::Point, points_emitted_, context);
       gs_.point(make_vertex(value));
       ++points_emitted_;
     }
@@ -397,6 +426,7 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
     const auto vertex = make_vertex(value);
     if (vertex_count_ != 0u) {
       if (draw) {
+        trace_draw(GsTracePrimitive::Line, lines_emitted_, context);
         auto first = vertices_[0];
         if ((prim_ & (1u << 3)) == 0u) first.color = vertex.color;
         gs_.line(first, vertex);
@@ -418,6 +448,7 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
       return;
     }
     if (draw) {
+      trace_draw(GsTracePrimitive::Triangle, triangles_emitted_, context);
       if ((trace_triangles_ && (triangle_records_.size() < 64u ||
                                nondegenerate_triangle_records_.size() < 64u)) ||
           capture_sprite_enabled_) {
@@ -488,6 +519,7 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
     have_first_xyz2_ = false;
     return;
   }
+  trace_draw(GsTracePrimitive::Sprite, sprites_emitted_, context);
   if (capture_sprite_enabled_ && sprites_emitted_ == capture_sprite_sequence_) {
     const auto first = (recent_triangle_cursor_ + recent_triangles_.size() -
                         recent_triangle_count_) % recent_triangles_.size();
@@ -562,21 +594,25 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
               ((y * 4u) * source_width + x * 4u) * 4u));
     }
   }
-  auto x0 = scaled_coordinate(first_xyz2_, xyoffset_[context], 0u, 0u);
-  auto y0 = scaled_coordinate(first_xyz2_, xyoffset_[context], 16u, 32u);
-  auto x1 = scaled_coordinate(value, xyoffset_[context], 0u, 0u);
-  auto y1 = scaled_coordinate(value, xyoffset_[context], 16u, 32u);
-  const auto origin_x = x0;
-  const auto origin_y = y0;
-  const auto span_x = x1 == x0 ? 1 : x1 - x0;
-  const auto span_y = y1 == y0 ? 1 : y1 - y0;
+  const auto origin_x = fixed_coordinate(first_xyz2_, xyoffset_[context], 0u, 0u);
+  const auto origin_y = fixed_coordinate(first_xyz2_, xyoffset_[context], 16u, 32u);
+  const auto end_x = fixed_coordinate(value, xyoffset_[context], 0u, 0u);
+  const auto end_y = fixed_coordinate(value, xyoffset_[context], 16u, 32u);
+  const auto span_x = end_x - origin_x;
+  const auto span_y = end_y - origin_y;
+  // Preserve fractional bounds until coverage is decided. This selects the
+  // native anchors lying in [min, max), not a native-resolution GS raster.
+  auto x0 = ceil_quarter_coordinate(origin_x);
+  auto y0 = ceil_quarter_coordinate(origin_y);
+  auto x1 = ceil_quarter_coordinate(end_x);
+  auto y1 = ceil_quarter_coordinate(end_y);
   if (x0 > x1) std::swap(x0, x1);
   if (y0 > y1) std::swap(y0, y1);
 
   const auto scissor = scissor_[context];
-  const auto clip_x0 = static_cast<int>((scissor & 0x7FFu) / 4u);
+  const auto clip_x0 = static_cast<int>(((scissor & 0x7FFu) + 3u) / 4u);
   const auto clip_x1 = static_cast<int>(((scissor >> 16) & 0x7FFu) / 4u);
-  const auto clip_y0 = static_cast<int>(((scissor >> 32) & 0x7FFu) / 4u);
+  const auto clip_y0 = static_cast<int>((((scissor >> 32) & 0x7FFu) + 3u) / 4u);
   const auto clip_y1 = static_cast<int>(((scissor >> 48) & 0x7FFu) / 4u);
   x0 = std::max(x0, clip_x0);
   x1 = std::min(x1, clip_x1 + 1);
@@ -586,19 +622,26 @@ void Gif::emit_xyz2(std::uint64_t value, bool draw) {
   const auto color = static_cast<std::uint32_t>(rgbaq_);
   const bool textured_uv = (prim_ & (1u << 4)) != 0u &&
                            (prim_ & (1u << 8)) != 0u;
-  const auto u0 = static_cast<int>(first_uv_ & 0x3FFFu) >> 4;
-  const auto v0 = static_cast<int>((first_uv_ >> 16) & 0x3FFFu) >> 4;
-  const auto u1 = static_cast<int>(uv_ & 0x3FFFu) >> 4;
-  const auto v1 = static_cast<int>((uv_ >> 16) & 0x3FFFu) >> 4;
+  const auto u0 = static_cast<int>(first_uv_ & 0x3FFFu);
+  const auto v0 = static_cast<int>((first_uv_ >> 16) & 0x3FFFu);
+  const auto u1 = static_cast<int>(uv_ & 0x3FFFu);
+  const auto v1 = static_cast<int>((uv_ >> 16) & 0x3FFFu);
   for (auto y = y0; y < y1; ++y) {
     for (auto x = x0; x < x1; ++x) {
       auto pixel_color = color;
       if (textured_uv) {
-        const auto u = u0 + (x - origin_x) * (u1 - u0) / span_x;
-        const auto v = v0 + (y - origin_y) * (v1 - v0) / span_y;
+        // A single rational division retains UV fractions and affine prestep
+        // from the original (possibly reversed) geometry. Truncating a signed
+        // slope before adding UV0 would choose the wrong texel at boundaries.
+        const auto u = (std::int64_t{u0} * span_x +
+            std::int64_t{x * 64 - origin_x} * (u1 - u0)) /
+            (std::int64_t{span_x} * 16);
+        const auto v = (std::int64_t{v0} * span_y +
+            std::int64_t{y * 64 - origin_y} * (v1 - v0)) /
+            (std::int64_t{span_y} * 16);
         pixel_color = sample_texture(context,
-            static_cast<unsigned>(std::max(0, u)),
-            static_cast<unsigned>(std::max(0, v)), color);
+            static_cast<unsigned>(std::max<std::int64_t>(0, u)),
+            static_cast<unsigned>(std::max<std::int64_t>(0, v)), color);
       }
       gs_.point({x, y, z, pixel_color});
     }

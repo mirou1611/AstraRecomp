@@ -16,6 +16,27 @@ struct GsVertex {
   std::uint32_t q = 0;
 };
 
+enum class GsTracePrimitive { Unknown, Point, Line, Triangle, Sprite };
+struct GsDrawTrace {
+  GsTracePrimitive kind = GsTracePrimitive::Unknown;
+  std::uint64_t sequence = 0, packet = 0;
+  std::uint64_t prim = 0, frame = 0, tex0 = 0, clamp = 0;
+  std::uint64_t alpha = 0, test = 0, texa = 0;
+};
+struct GsTextureTrace {
+  bool valid = false;
+  unsigned raw_u = 0, raw_v = 0, u = 0, v = 0, format = 0;
+  std::uint32_t address = 0, raw_texel = 0, expanded_texel = 0;
+  std::uint32_t vertex_color = 0, output_color = 0;
+};
+struct GsPixelWrite {
+  std::uint32_t address = 0, before = 0, after = 0, input_color = 0, z = 0;
+  int x = 0, y = 0;
+  std::uint64_t frame = 0;
+  GsDrawTrace draw{};
+  GsTextureTrace texture{};
+};
+
 class Gs {
 public:
   static constexpr int kWidth = 160;
@@ -51,6 +72,23 @@ public:
   // Preview of the current draw target, not privileged GS display scanout.
   const std::uint32_t* pixels() const;
   std::uint32_t pixel(int x, int y) const;
+  std::uint64_t color_frame() const { return color_frame_; }
+
+  // Opt-in diagnostic of accepted raster color operations in logical linear
+  // VRAM. Watch physical byte addresses, so aliased FRAME targets are tracked.
+  // Clear/IMAGE writes and rejected fragments are not reported. No callbacks
+  // are made for the standalone host color buffer. Empty addresses disables.
+  // Observers must not mutate/re-enter this Gs while a draw is in progress.
+  using PixelObserver = std::function<void(const GsPixelWrite&)>;
+  bool set_pixel_watch(const std::vector<std::uint32_t>& addresses,
+                        PixelObserver observer = {});
+  bool pixel_watch_enabled() const { return static_cast<bool>(pixel_observer_); }
+  void set_draw_trace(const GsDrawTrace& trace) {
+    if (pixel_watch_enabled()) { draw_trace_ = trace; texture_trace_ = {}; }
+  }
+  void set_texture_trace(const GsTextureTrace& trace) {
+    if (pixel_watch_enabled()) texture_trace_ = trace;
+  }
 
 private:
   void write(int x, int y, std::uint32_t z, std::uint32_t color);
@@ -59,6 +97,11 @@ private:
   mutable std::vector<std::uint32_t> color_;
   std::vector<std::uint8_t>* color_memory_ = nullptr;
   std::uint32_t color_base_ = 0, color_width_ = 0, color_mask_ = 0;
+  std::uint64_t color_frame_ = 0;
+  std::vector<std::uint32_t> pixel_watch_addresses_;
+  PixelObserver pixel_observer_;
+  GsDrawTrace draw_trace_{};
+  GsTextureTrace texture_trace_{};
   std::vector<std::uint32_t> depth_;
   DepthTest depth_test_ = DepthTest::LessEqual; // Standalone host drawing.
   bool depth_write_ = true;

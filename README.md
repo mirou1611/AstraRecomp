@@ -72,7 +72,7 @@ core is real BIOS execution, not a renamed frontend or a fake compatibility scre
 
 ## Project status
 
-Latest verified research checkpoint: **October 1, 2026**. These are development
+Latest verified research checkpoint: **October 3, 2026**. These are development
 results, not a game-compatibility list or a measured completion percentage.
 
 | Area | Current state |
@@ -86,13 +86,13 @@ results, not a game-compatibility list or a measured completion percentage.
 | Audio / SPU2 | Tested DMA and shadow ADPCM/voice-envelope/pitch/mixing components; no Vita speaker output; further audio work deferred |
 | Retail games | **Not playable**—IOP devices, GIF/GS, VU, SPU2, media, and compatibility work remain |
 
-### What the latest graphics milestone actually means
+### Reference-checked framebuffer feedback
 
 A small guest ELF now draws into framebuffer A, samples A as a 24-bit texture
 into B, changes A, and samples it again without overwriting B's earlier result.
 This previously failed in Astra; it now passes, including texture-alpha checks.
 PCSX2 software-renderer output matches all **128 native RGB pixels** checked.
-Release and UBSan suites pass **26/26 CTest targets** each, and the Vita VPK
+Release and UBSan suites pass **29/29 CTest targets** each, and the Vita VPK
 cross-build passes. These are reference checks, not physical PS2/Vita validation.
 
 The new shared color storage is deliberately approximate: linear addressing,
@@ -109,6 +109,26 @@ This is evidence that part of the guest graphics pipeline reaches the rasterizer
 speed on physical Vita hardware**. One malformed VU1 PATH1 tag remains rejected.
 Formats, fog, native GS buffer semantics and VU/GIF timing still need work.
 See the [framebuffer-feedback implementation and validation](docs/SESSION_2026-09-21.md).
+
+### Latest pixel-provenance and sprite-coverage milestone
+
+Physical GS pixel watches now identify accepted raster writers, aliased buffers,
+blend inputs/results and sampled texture data without changing the pre-fix BIOS
+image. Marked bright spots trace to green and purple tinted triangles sampling a
+white RGBA glow texture. This strengthens the partial-startup-scene lead; it is
+**not yet a confirmed recognizable intro or a reference-matched animation**.
+Saved PCSX2 draws contain the same texture/blend state, tinted vertices and
+smaller white components, identifying the same guest draw family. Their texture
+PNGs discarded alpha, so exact glow shape/brightness remains unverified.
+
+Sprite coverage now retains fractional XY/UV values, uses the original geometry
+for texture interpolation, and clips against valid quarter-grid anchors. A
+639.9375-native-pixel right edge previously left a stale column. All **46 owned
+coverage checks** pass; the pre-fix core fails 15. The opt-in provenance suite has
+**93 checks**, with separate synthetic-ROM tests for strict configuration and
+draw/display-buffer snapshots. Native GS swizzling, full-resolution coverage and
+true display scanout remain incomplete. See the
+[pixel investigation and saved session](docs/SESSION_2026-10-03.md).
 
 ### Latest VU1 correctness milestone
 

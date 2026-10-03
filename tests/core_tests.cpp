@@ -3982,9 +3982,11 @@ void test_gif_reglist_sprite() {
   check(gif.submit(packet.data(), packet.size()) &&
         gif.reglist_tags() == 1u && gif.packets_rejected() == 0u,
         "GIF frontend consumes a complete REGLIST tag");
-  check(gs.pixel(0, 0) == 0xFF332211u && gs.pixel(3, 3) == 0xFF332211u &&
-        gs.pixel(4, 4) == 0u,
-        "GIF REGLIST registers emit a masked quarter-scale sprite");
+  // Native [1,17) covers quarter-grid anchors 4,8,12,16, not anchor 0.
+  check(gs.pixel(0, 0) == 0u && gs.pixel(1, 1) == 0xFF332211u &&
+        gs.pixel(3, 3) == 0xFF332211u && gs.pixel(4, 4) == 0xFF332211u &&
+        gs.pixel(5, 5) == 0u,
+        "GIF REGLIST sprite preserves fractional quarter-grid coverage");
 }
 
 void test_gif_image_continues_to_pre_primitive() {

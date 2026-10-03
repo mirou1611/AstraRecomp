@@ -81,6 +81,199 @@ struct SyscallEvent {
   std::uint64_t sp = 0;
 };
 
+constexpr std::size_t kGsWatchHistorySize = 64u;
+constexpr std::size_t kGsDiagnosticLimit = 16u;
+
+struct GsPixelTraceEntry {
+  ps2vita::GsPixelWrite write{};
+  std::uint64_t ee_cycle = 0;
+  std::uint32_t next_ee_pc = 0;
+};
+
+struct GsPixelHistory {
+  std::uint32_t address = 0;
+  std::uint64_t total = 0;
+  std::array<GsPixelTraceEntry, kGsWatchHistorySize> entries{};
+};
+
+// Diagnostic lists intentionally do not accept whitespace, signs, empty
+// elements, octal notation, trailing separators, or partial numeric parses.
+bool parse_diagnostic_list(const char* text, unsigned base,
+                           std::uint64_t maximum,
+                           std::vector<std::uint64_t>& values) {
+  if (*text == '\0') return false;
+  for (;;) {
+    if (values.size() == kGsDiagnosticLimit) return false;
+    if (base == 16u && text[0] == '0' &&
+        (text[1] == 'x' || text[1] == 'X')) text += 2;
+    bool has_digit = false;
+    std::uint64_t value = 0;
+    for (; *text != '\0' && *text != ','; ++text) {
+      unsigned digit = base;
+      if (*text >= '0' && *text <= '9') digit = static_cast<unsigned>(*text - '0');
+      else if (*text >= 'a' && *text <= 'f')
+        digit = static_cast<unsigned>(*text - 'a') + 10u;
+      else if (*text >= 'A' && *text <= 'F')
+        digit = static_cast<unsigned>(*text - 'A') + 10u;
+      if (digit >= base || digit > maximum ||
+          value > (maximum - digit) / base) return false;
+      value = value * base + digit;
+      has_digit = true;
+    }
+    if (!has_digit) return false;
+    values.push_back(value);
+    if (*text == '\0') return true;
+    ++text;
+    if (*text == '\0') return false;
+  }
+}
+
+const char* gs_primitive_name(ps2vita::GsTracePrimitive kind) {
+  switch (kind) {
+  case ps2vita::GsTracePrimitive::Point: return "point";
+  case ps2vita::GsTracePrimitive::Line: return "line";
+  case ps2vita::GsTracePrimitive::Triangle: return "triangle";
+  case ps2vita::GsTracePrimitive::Sprite: return "sprite";
+  default: return "unknown";
+  }
+}
+
+void print_gs_pixel_history(const ps2vita::Emulator& emulator,
+                             const std::vector<GsPixelHistory>& histories) {
+  if (histories.empty()) return;
+  std::puts("gs_pixel_watch_scope=raster-only logical-linear-vram "
+            "excludes=clear,image,rejected-fragments per_address_capacity=64 "
+            "draw_sequence=per-primitive-kind pc=next-ee-pc");
+  for (const auto& history : histories) {
+    const auto retained = std::min<std::uint64_t>(history.total,
+                                                 kGsWatchHistorySize);
+    const auto first = history.total - retained;
+    std::printf("gs_pixel_watch address=%08X total=%llu retained=%llu "
+                "dropped=%llu latest_raw=%08X\n",
+        history.address, static_cast<unsigned long long>(history.total),
+        static_cast<unsigned long long>(retained),
+        static_cast<unsigned long long>(first),
+        emulator.gif().read_local32(history.address));
+    for (std::uint64_t index = first; index < history.total; ++index) {
+      const auto& entry = history.entries[index % kGsWatchHistorySize];
+      const auto& write = entry.write;
+      const auto& draw = write.draw;
+      const auto& texture = write.texture;
+      std::printf("gs_pixel_write address=%08X generation=%llu ee_cycle=%llu "
+                  "next_ee_pc=%08X before=%08X after=%08X input=%08X z=%08X "
+                  "quarter_xy=%d,%d FRAME=%016llX draw=%s sequence=%llu "
+                  "packet=%llu PRIM=%016llX ALPHA=%016llX TEST=%016llX "
+                  "TEX0=%016llX TEXA=%016llX CLAMP=%016llX "
+                  "texture_valid=%u texture_format=%u raw_uv=%u,%u uv=%u,%u "
+                  "texture_address=%08X raw_texel=%08X expanded_texel=%08X "
+                  "vertex_color=%08X texture_output=%08X\n",
+          write.address, static_cast<unsigned long long>(index + 1u),
+          static_cast<unsigned long long>(entry.ee_cycle), entry.next_ee_pc,
+          write.before, write.after, write.input_color, write.z, write.x, write.y,
+          static_cast<unsigned long long>(write.frame),
+          gs_primitive_name(draw.kind),
+          static_cast<unsigned long long>(draw.sequence),
+          static_cast<unsigned long long>(draw.packet),
+          static_cast<unsigned long long>(draw.prim),
+          static_cast<unsigned long long>(draw.alpha),
+          static_cast<unsigned long long>(draw.test),
+          static_cast<unsigned long long>(draw.tex0),
+          static_cast<unsigned long long>(draw.texa),
+          static_cast<unsigned long long>(draw.clamp),
+          unsigned(texture.valid), texture.format,
+          texture.raw_u, texture.raw_v, texture.u, texture.v, texture.address,
+          texture.raw_texel, texture.expanded_texel,
+          texture.vertex_color, texture.output_color);
+    }
+  }
+}
+
+bool write_gs_step_snapshot(ps2vita::Emulator& emulator,
+                            const char* framebuffer_path, std::uint64_t step,
+                            const std::vector<GsPixelHistory>& histories) {
+  const auto path = std::string(framebuffer_path) + ".step-" +
+      std::to_string(step) + ".ppm";
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  const bool written = ps2vita::write_framebuffer_ppm(output, emulator.gs());
+  output.close();
+  if (!written || !output) {
+    std::fprintf(stderr, "could not write GS step snapshot: %s\n", path.c_str());
+    return false;
+  }
+  const auto pmode = emulator.memory().read64(0x12000000u);
+  const auto dispfb1 = emulator.memory().read64(0x12000070u);
+  const auto dispfb2 = emulator.memory().read64(0x12000090u);
+  const auto display2 = ps2vita::GsDisplayFramebuffer::decode(dispfb2);
+  std::printf("gs_frame_step step=%llu ee_cycle=%llu next_ee_pc=%08X "
+              "scope=active-draw-target-not-scanout FRAME=%016llX "
+              "PMODE=%016llX DISPFB1=%016llX DISPFB2=%016llX "
+              "display2_base=%08X display2_width=%u path=%s\n",
+      static_cast<unsigned long long>(step),
+      static_cast<unsigned long long>(emulator.cpu().state().cycles),
+      emulator.cpu().state().pc,
+      static_cast<unsigned long long>(emulator.gs().color_frame()),
+      static_cast<unsigned long long>(pmode),
+      static_cast<unsigned long long>(dispfb1),
+      static_cast<unsigned long long>(dispfb2),
+      display2.base_bytes(), display2.width_pixels(), path.c_str());
+  for (const auto& history : histories)
+    std::printf("gs_pixel_sample step=%llu address=%08X raw=%08X "
+                "raster_operations=%llu\n",
+        static_cast<unsigned long long>(step), history.address,
+        emulator.gif().read_local32(history.address),
+        static_cast<unsigned long long>(history.total));
+  const auto enabled = pmode & 3u;
+  if (enabled != 1u && enabled != 2u) {
+    std::printf("gs_frame_step_display step=%llu skipped=pmode-not-single-circuit "
+                "PMODE=%016llX scope=logical-linear-not-scanout\n",
+        static_cast<unsigned long long>(step),
+        static_cast<unsigned long long>(pmode));
+    return true;
+  }
+  const unsigned circuit = enabled == 1u ? 1u : 2u;
+  const auto raw_fb = circuit == 1u ? dispfb1 : dispfb2;
+  const auto display_fb = ps2vita::GsDisplayFramebuffer::decode(raw_fb);
+  if (display_fb.fbw == 0u || display_fb.psm > 1u) {
+    std::printf("gs_frame_step_display step=%llu skipped=unsupported-display-format "
+                "circuit=%u DISPFB=%016llX fbw=%u psm=%u "
+                "scope=logical-linear-not-scanout\n",
+        static_cast<unsigned long long>(step), circuit,
+        static_cast<unsigned long long>(raw_fb), display_fb.fbw, display_fb.psm);
+    return true;
+  }
+  const auto display_path = path + ".linear-display.ppm";
+  std::ofstream display_output(display_path, std::ios::binary | std::ios::trunc);
+  display_output << "P6\n" << ps2vita::Gs::kWidth << ' '
+                 << ps2vita::Gs::kHeight << "\n255\n";
+  std::uint64_t display_hash = 1469598103934665603ull;
+  for (int y = 0; y < ps2vita::Gs::kHeight; ++y)
+    for (int x = 0; x < ps2vita::Gs::kWidth; ++x) {
+      const auto address = display_fb.linear_pixel_byte_address(
+          static_cast<unsigned>(x) * 4u, static_cast<unsigned>(y) * 4u);
+      const auto pixel = emulator.gif().read_local32(address);
+      const char rgb[]{static_cast<char>(pixel & 0xFFu),
+                       static_cast<char>((pixel >> 8u) & 0xFFu),
+                       static_cast<char>((pixel >> 16u) & 0xFFu)};
+      display_output.write(rgb, sizeof(rgb));
+      display_hash ^= pixel;
+      display_hash *= 1099511628211ull;
+    }
+  display_output.close();
+  if (!display_output) {
+    std::fprintf(stderr, "could not write GS step display snapshot: %s\n",
+        display_path.c_str());
+    return false;
+  }
+  std::printf("gs_frame_step_display step=%llu circuit=%u DISPFB=%016llX "
+              "base=%08X width=%u dbx=%u dby=%u hash=%016llX "
+              "scope=logical-linear-not-scanout path=%s\n",
+      static_cast<unsigned long long>(step), circuit,
+      static_cast<unsigned long long>(raw_fb), display_fb.base_bytes(),
+      display_fb.width_pixels(), display_fb.dbx, display_fb.dby,
+      static_cast<unsigned long long>(display_hash), display_path.c_str());
+  return true;
+}
+
 std::uint32_t parse_address(const char* text) {
   return static_cast<std::uint32_t>(std::strtoul(text, nullptr, 0));
 }
@@ -334,7 +527,9 @@ int main(int argc, char** argv) {
         "[LINEAR_DISPLAY_PPM] [SPRITE_SEQUENCE SPRITE_PPM [SPRITE_SOURCE_PPM "
         "[PRECEDING_TEXTURE16_BIN]]]\n"
         "optional ASTRA_TRACE_SECONDS=1..86400 bounds host runtime and reports progress; 0 disables\n"
-        "optional ASTRA_STOP_ON_SPRITE=1 stops after the selected sprite is captured\n");
+        "optional ASTRA_STOP_ON_SPRITE=1 stops after the selected sprite is captured\n"
+        "optional ASTRA_GS_WATCH=hex-address[,hex-address...] records up to 16 aligned logical VRAM addresses\n"
+        "optional ASTRA_GS_FRAME_STEPS=decimal-step[,decimal-step...] captures up to 16 increasing draw-target previews; requires FRAMEBUFFER_PPM\n");
     return 2;
   }
 
@@ -411,6 +606,39 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  std::vector<std::uint32_t> gs_watch_addresses;
+  if (const char* watch_env = std::getenv("ASTRA_GS_WATCH")) {
+    std::vector<std::uint64_t> addresses;
+    if (!parse_diagnostic_list(watch_env, 16u, 0x3FFFFCu, addresses)) {
+      std::fputs("ASTRA_GS_WATCH requires 1..16 hexadecimal byte addresses in 0..3FFFFC\n", stderr);
+      return 2;
+    }
+    for (const auto address : addresses) {
+      if ((address & 3u) != 0u ||
+          std::find(gs_watch_addresses.begin(), gs_watch_addresses.end(),
+                    static_cast<std::uint32_t>(address)) != gs_watch_addresses.end()) {
+        std::fputs("ASTRA_GS_WATCH addresses must be four-byte aligned and unique\n", stderr);
+        return 2;
+      }
+      gs_watch_addresses.push_back(static_cast<std::uint32_t>(address));
+    }
+  }
+  std::vector<std::uint64_t> gs_frame_steps;
+  if (const char* frame_env = std::getenv("ASTRA_GS_FRAME_STEPS")) {
+    if (!framebuffer_path ||
+        !parse_diagnostic_list(frame_env, 10u, max_steps, gs_frame_steps)) {
+      std::fputs("ASTRA_GS_FRAME_STEPS requires FRAMEBUFFER_PPM and 1..16 decimal steps no greater than MAX_STEPS\n", stderr);
+      return 2;
+    }
+    for (std::size_t index = 0; index < gs_frame_steps.size(); ++index) {
+      if (gs_frame_steps[index] == 0u ||
+          (index != 0u && gs_frame_steps[index] <= gs_frame_steps[index - 1u])) {
+        std::fputs("ASTRA_GS_FRAME_STEPS must be positive and strictly increasing\n", stderr);
+        return 2;
+      }
+    }
+  }
+
   ps2vita::Emulator emulator;
   emulator.enable_vif_packet_capture(vif_path != nullptr);
   emulator.enable_triangle_trace(true);
@@ -421,6 +649,23 @@ int main(int argc, char** argv) {
   emulator.enable_vif_command_census(true);
   if (sprite_capture_path)
     emulator.capture_sprite_framebuffer_at(sprite_capture_sequence);
+  std::vector<GsPixelHistory> gs_pixel_histories(gs_watch_addresses.size());
+  for (std::size_t index = 0; index < gs_watch_addresses.size(); ++index)
+    gs_pixel_histories[index].address = gs_watch_addresses[index];
+  if (!gs_watch_addresses.empty() && !emulator.gs().set_pixel_watch(
+          gs_watch_addresses, [&](const ps2vita::GsPixelWrite& write) {
+            for (auto& history : gs_pixel_histories) {
+              if (history.address != write.address) continue;
+              history.entries[history.total % kGsWatchHistorySize] =
+                  {write, emulator.cpu().state().cycles, emulator.cpu().state().pc};
+              ++history.total;
+              break;
+            }
+          })) {
+    std::fputs("could not configure GS pixel watch\n", stderr);
+    return 2;
+  }
+  std::size_t gs_frame_cursor = 0;
 
   constexpr std::size_t kTraceSize = 256;
   emulator.memory().enable_spu2_shadow(true);
@@ -767,6 +1012,12 @@ int main(int argc, char** argv) {
     if (stop_pc != 0u && state.pc == stop_pc && ++hits >= stop_hit) break;
     reason = emulator.cpu().step();
     emulator.service_graphics();
+    if (gs_frame_cursor < gs_frame_steps.size() &&
+        steps + 1u == gs_frame_steps[gs_frame_cursor]) {
+      if (!write_gs_step_snapshot(emulator, framebuffer_path, steps + 1u,
+                                  gs_pixel_histories)) return 2;
+      ++gs_frame_cursor;
+    }
     if (!vif_failure_reported && emulator.vif1().first_unsupported_packet() != 0u) {
       vif_failure_reported = true;
       std::printf("first_vif_failure step=%llu next_ee_pc=%08X tadr=%08X madr=%08X\n",
@@ -974,6 +1225,10 @@ int main(int argc, char** argv) {
   if (stop_on_sprite)
     std::printf("sprite_capture_stop=%u step=%llu\n", unsigned(sprite_capture_stop),
         static_cast<unsigned long long>(steps));
+  if (!gs_frame_steps.empty())
+    std::printf("gs_frame_steps captured=%zu requested=%zu\n",
+        gs_frame_cursor, gs_frame_steps.size());
+  print_gs_pixel_history(emulator, gs_pixel_histories);
   const auto& state = emulator.cpu().state();
   const auto& iop_state = emulator.iop().state();
   if (low_clear_triggered)
